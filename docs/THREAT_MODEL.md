@@ -1,40 +1,40 @@
 # Threat model
 
-This document records what NoddaNAS protects, from whom, how, and what risk remains. It uses
-STRIDE per trust boundary. Each mitigation points to code or tests so a claim can be checked.
+What NoddaNAS protects, from whom, how, and what risk remains. STRIDE per trust boundary; each
+mitigation points to code or tests so the claim can be checked.
 
 ## Assets
 
 | Asset | Why it matters |
 |---|---|
-| File content and names | The reason the system exists; often personal or regulated data |
-| Keyring (KEKs) | Unlocks every stored file |
-| Session cookies, app passwords, link tokens | Bearer credentials: whoever holds one acts as its owner |
-| Sharing graph and metadata | Reveals relationships, structure, activity |
+| File contents and names, team names | The reason the system exists |
+| Users' passphrases, recovery codes, master keys, private keys | Unlock everything a user can read |
+| Team secrets, node keys, link secrets | Unlock a space, a subtree, or a link |
+| Session cookies, app passwords, link tokens | Bearer credentials for server access |
+| Metadata (tree shape, sizes, timestamps, memberships) | Reveals structure and relationships |
 | Availability and quota | Storage is finite and shared |
 
 ## Actors
 
 - **Anonymous internet user**, possibly holding a leaked public link.
-- **Authenticated user** trying to reach other users' data or exceed their rights.
-- **Malicious recipient** of a share.
-- **Hostile web page** visited by a signed-in user (CSRF, XSS, clickjacking, XS-leaks).
+- **Authenticated user** trying to exceed their rights.
+- **Malicious share recipient or team member.**
+- **Hostile web page** visited by a signed-in user (CSRF, XSS, clickjacking).
 - **Compromised client device** holding an app password.
-- **Storage-tier attacker**: obtains the data volume, a backup or a snapshot.
+- **Storage / backup attacker**: obtains the volume, a snapshot or a backup.
 - **Database attacker**: obtains a database dump.
-- **Network attacker** between client and proxy, or inside the container network.
+- **Malicious or compromised server operator**: controls the NoddaNAS process and its data.
+- **Malicious identity provider response** (forged, replayed or unsolicited assertions).
 
-Out of scope: a fully compromised NoddaNAS host or process (it holds the keyring in memory),
-a malicious administrator, a compromised OIDC provider.
+Out of scope: a compromised end-user device or browser (it sees plaintext by definition), and a
+compromised identity provider (it can sign anyone in; it still cannot decrypt anything).
 
-## Trust boundaries
+## The central claim
 
-1. Internet → reverse proxy (TLS termination)
-2. Proxy → NoddaNAS (HTTP on a private network)
-3. NoddaNAS → OIDC provider (HTTPS)
-4. NoddaNAS → PostgreSQL
-5. NoddaNAS → blob storage volume
-6. NoddaNAS process → the web client running in users' browsers
+**A party that controls the server and all its storage cannot read file contents, file or folder
+names, or team names**, provided users verify public-key fingerprints when it matters (see
+"Trust in the key directory"). Everything below either supports that claim or covers what the
+server is still responsible for (access control, integrity of structure, availability).
 
 ## STRIDE analysis
 
@@ -42,81 +42,84 @@ a malicious administrator, a compromised OIDC provider.
 
 | Threat | Mitigation | Evidence |
 |---|---|---|
-| Forged sign-in / stolen authorization code | OIDC code flow with PKCE (S256), `state` bound to a browser cookie and a single-use server-side login record, `nonce` checked against the ID token; ID token signature, issuer, audience and expiry verified | `auth/oidc.go`; e2e "access policy and forged callbacks" |
-| Anyone with an IdP account signs in (e.g. a public IdP) | Optional group / verified-email-domain allowlist; loud startup warning if neither is set | `auth/oidc.go checkPolicy`, `cmd/noddanas` |
-| Account takeover via a re-used or unverified email | Accounts keyed by (issuer, subject); emails recorded only when verified and unclaimed, so nobody can register a victim's address to receive shares | `service/users.go`; `TestProvisioning` |
-| Session fixation | A new random session token on every login; the old session is deleted | `auth.StartSession`, `handleCallback` |
-| Guessing tokens or IDs | 256-bit tokens, 128-bit IDs from `crypto/rand`; all validated for shape before any lookup | `secure`, `validate.ID` |
-| Brute-forcing link passwords | argon2id hashing; lockout after N failures (default 10 for 15 min); per-IP rate limit on public endpoints | `access.go authorizeLink`; `TestPublicLinks` |
+| Forged OIDC sign-in | PKCE (S256), state bound to a single-use server record and a `__Host-` cookie, nonce, ID-token signature/issuer/audience/expiry | `auth/oidc.go`; e2e test |
+| Forged or tampered SAML assertion | XML signature required and verified (crewjam/saml); audience, issuer, destination, validity window | e2e: tampered NameID rejected |
+| Replayed SAML response | Each response must answer an AuthnRequest whose ID is stored server-side and consumed once, from the same browser | e2e: replay rejected |
+| Unsolicited (IdP-initiated) SAML, login CSRF | IdP-initiated SSO disabled; no binding cookie → rejected | e2e: unsolicited rejected |
+| Anyone the IdP knows signs in | Group / verified-email-domain policy for both OIDC and SAML; startup warning if open | e2e: policy test |
+| Capturing another user's shares via their email | Accounts keyed by (issuer, subject); emails recorded only if verified and unclaimed; SAML emails trusted only if configured | `service/users.go` |
+| Forged key grant (anyone can seal to a public key) | Every share, team grant and trash seal is signed by its granter; clients verify | `e2ee` tests: forged grant/share rejected |
+| Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
 ### Tampering
 
 | Threat | Mitigation | Evidence |
 |---|---|---|
-| Modifying stored blobs (storage attacker) | Per-chunk AES-GCM with index and final-chunk flag in the nonce: modification, truncation, reordering and blob swapping are detected | `blobcrypt`; `TestTamperingIsDetected`, `TestCorruptBlobIsDetected` |
-| Moving a wrapped data key to another record | Key wrapping authenticates the blob key as associated data | `keyring.go`; `TestKeyringWrapAndRotate` |
-| Truncated or altered uploads | Optional declared size and SHA-256 enforced; WebDAV uploads aborted unless the body ended cleanly | `service/content.go`, `httpapi/dav.go`; `TestUploadIntegrity` |
-| Lost updates / races | Revision checks and quota limits evaluated in the same SQL statement as the write | `store/postgres`; `TestQuotaIsAtomic` |
-| SQL injection | Parameterized queries only; IDs format-validated | `store/postgres` |
-| CSRF | Go `http.CrossOriginProtection` (Sec-Fetch-Site / Origin), `SameSite=Lax` cookies, JSON-only APIs, Host validation | `httpapi/server.go`; e2e "CSRF and host checks" |
+| Modified, truncated, reordered or swapped content | STREAM: per-chunk AES-GCM, chunk index and final flag in the nonce; signature over the header and a hash of all chunks | `TestContainerTampering` |
+| Swapping containers between files | Key commitment in each header; containers fetched via the hierarchy must commit to the node's key | `Prefix.Keys` |
+| Moving keys or names between nodes | Node IDs bound into every wrap and name AEAD | `TestNodeHierarchy` |
+| Planted backup file | Restore verifies the uploader's signature and shows who signed | client `RestoreContainer`; web restore |
+| Concurrency races, quota overshoot | Same-statement conditions in SQL | `TestQuotaIsAtomic` |
+| SQL injection | Parameterized queries; IDs format-validated | `store/postgres` |
+| CSRF | Go `CrossOriginProtection`, `SameSite=Lax` sessions, Host validation; the SAML ACS is exempt because it is authenticated by signature plus single-use binding | e2e |
 
 ### Repudiation
 
-| Threat | Mitigation |
-|---|---|
-| Denying an action | Structured JSON audit events (uploads, downloads, shares, logins, failures, purges) with user ID, object IDs and request ID. Logs record route patterns and IDs, never file names, tokens or passwords. Ship stdout to an append-only store for tamper resistance. |
+Containers, shares, grants and trash seals are signed by their author's Ed25519 key, so a client
+can attribute content and grants cryptographically. The server additionally logs structured audit
+events (identifiers only; never names, tokens or passwords).
 
 ### Information disclosure
 
 | Threat | Mitigation | Evidence |
 |---|---|---|
-| Horizontal access (user A reads B's files) | Single authorization point; ownership checked on the whole ancestor chain; "not found" for invisible items | `access.go`; `TestTenantIsolation` |
-| Share escalation (read → write, escaping the shared subtree) | Permissions computed per level; link access requires the shared node to be an ancestor; links are read-only by DB constraint | `TestReadShare`, `TestWriteShare`, `TestPublicLinks` |
-| Stolen volume / backup / snapshot | Application-level encryption; random blob names reveal no structure or ownership | `TestContentIsEncryptedAtRest` |
-| Stolen database dump | Contains only *wrapped* DEKs (useless without the keyring), hashes of all bearer secrets, argon2id for link passwords. **Does** reveal file names, sizes and the sharing graph (see residual risks) | schema |
-| Stored XSS via uploaded HTML/SVG | Downloads forced to `attachment` + `octet-stream` + `nosniff` + `CSP: sandbox`; inline only for passive media; WebDAV GETs pinned to `octet-stream` | `handlers.go serveContent`, `dav.go`; e2e "upload and safe download", "webdav" |
-| XSS in the web client | No HTML sinks; CSP `script-src 'self'` with Trusted Types enforced and no policies | `ui.go`, `app.js` |
-| Token leakage via logs/Referer | Link tokens in URL fragments and POST bodies; `Referrer-Policy: no-referrer`; logs record route patterns | `handlers.go`, `middleware.go` |
-| Clickjacking / XS-leaks | `frame-ancestors 'none'`, `X-Frame-Options`, COOP and CORP `same-origin` | `middleware.go` |
-| Verbose errors | Only typed, client-safe messages reach clients; internal errors return a request ID | `respond.go writeError` |
-| Plaintext DB traffic | Recommend `sslmode=verify-full` off-host; compose puts PostgreSQL on an internal network | README, compose |
+| Server operator / database dump reads files or names | End-to-end encryption; server holds only wrapped/sealed keys | `TestE2EEFileLifecycle`, e2e "server holds only ciphertext" |
+| Stolen volume or backup | Containers are ciphertext under random names; backups are ID-named | `noddanas-cli backup` smoke test |
+| Offline guessing of a passphrase from the stored bundle | PBKDF2-SHA256, 600k iterations; 12-character minimum; the recovery code has 160 bits | `e2ee/account.go` |
+| Horizontal access | Single authorization point; whole-chain checks; 404 for invisible items | `TestTenantIsolation` |
+| Link leaks to servers or logs | Link secret only in the URL fragment; token only in POST bodies; `Referrer-Policy: no-referrer` | e2e "public link" |
+| Stored XSS via uploads | The server only serves opaque containers as sandboxed attachments; the browser decrypts into a download | `serveContainer` |
+| XSS in the web client (would expose in-memory keys) | CSP `script-src 'self'`, Trusted Types with no policies, DOM-only rendering, private keys non-extractable | `ui.go`, `app.js` |
+| Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
 
 ### Denial of service
 
-| Threat | Mitigation |
-|---|---|
-| Storage exhaustion | Per-user quotas enforced atomically, including versions; max file size; uploads cut off at remaining quota |
-| Slowloris / stalled transfers | `ReadHeaderTimeout`, default read/write deadlines, idle-extending deadlines for streams |
-| Large or deep requests | JSON bodies capped at 64 KiB, header cap, folder depth capped (64), listing pages capped |
-| Credential stuffing / scanning | Per-IP rate limits on sign-in, public and failed-auth paths; IP taken from `X-Forwarded-For` only from trusted proxies |
-| argon2 as a CPU/memory amplifier | Parameters bounded when parsing stored hashes; public endpoints rate limited |
-| Link lockout abuse | Accepted: an attacker must already hold the 256-bit token to trigger lockout |
+Atomic quotas (counted on stored, encrypted bytes) and maximum file size; streaming uploads with
+idle deadlines; bounded JSON and header sizes; folder depth limit; per-IP rate limits on sign-in,
+public and failed-auth paths; bounded KDF parameters when parsing stored bundles and hashes.
 
 ### Elevation of privilege
 
 | Threat | Mitigation | Evidence |
 |---|---|---|
-| App password used to mint more credentials | Credential management requires an interactive session | e2e "app passwords are scoped" |
-| Read-only credential writing | Principal capped at `read` inside authorization | `TestReadOnlyCredential` |
-| Re-sharing by recipients | Only owners can share | `TestReadShare` |
-| Container escape impact | Distroless, non-root, read-only root FS, all capabilities dropped, `no-new-privileges`, seccomp `RuntimeDefault` (k8s) | `Dockerfile`, `deploy/` |
-| Supply chain | Few dependencies (Go stdlib, `x/` packages, pgx, go-oidc); `go mod verify`; govulncheck, gosec, staticcheck and Trivy in CI; GitHub Actions pinned to commit SHAs; Dependabot | `.github/` |
+| Read-only credential writes | Capped at read in authorization | `TestReadOnlyAndCycles` |
+| App password replaces keys or mints credentials | Key setup/changes and credential management require an interactive session | e2e "credential scoping" |
+| Non-admin maps groups to team folders | Admin check on every mapping change | `TestTeamFolders`, e2e |
+| Team left without a key holder | Last key-holding manager cannot leave or be demoted | `TestTeamFolders` |
+| Container escape impact | Distroless, non-root, read-only FS, no capabilities, seccomp | `Dockerfile`, `deploy/` |
+| Supply chain | Small dependency set; pinned CI actions; govulncheck, gosec, staticcheck, Trivy; Dependabot | `.github/` |
 
 ## Residual risks and accepted trade-offs
 
-1. **Metadata is not encrypted.** File and folder names, sizes, timestamps and sharing
-   relationships are plaintext in PostgreSQL so the server can list, search and enforce
-   uniqueness. Protect database dumps accordingly (encrypted backups, `verify-full` TLS).
-2. **The server can read content.** Encryption is server-side, protecting storage and backups,
-   not against a compromised NoddaNAS process or administrator. End-to-end encryption would make
-   sharing, previews and WebDAV much harder; it is a deliberate non-goal for now.
-3. **User enumeration via sharing.** Sharing by email reveals whether that email has an account
-   (same as Nextcloud's user search). Limited to authenticated users.
-4. **Revocation latency for downloads in progress.** Revoking a share stops new requests
-   immediately; a download already streaming continues to completion.
-5. **Per-replica rate limits and WebDAV locks.** See ARCHITECTURE.md › Scaling.
-6. **Trash ≠ immediate deletion.** Deleted items remain restorable for the retention period, and
-   storage-level snapshots may retain ciphertext longer. Crypto-shredding makes such leftovers
-   unreadable once the version row is purged.
-7. **Keyring loss = data loss.** By design there is no recovery path without the keyring. Back it
-   up separately from the data (see OPERATIONS.md).
+1. **Trust in the key directory.** Clients fetch other users' public keys from the server. A
+   malicious server could substitute keys when you share with someone (as with any E2EE system
+   lacking key transparency). Mitigation: compare fingerprints out of band (shown in Settings and
+   when sharing). Roadmap: key transparency / pinned contacts.
+2. **Malicious server serving malicious JavaScript.** Browser E2EE trusts the code the server sends.
+   An operator who modifies `app.js` could exfiltrate keys from future sessions. The CLI does not
+   have this weakness. Mitigations: the code is embedded in a reproducible binary, and CSP limits
+   third-party injection, but this is inherent to web-delivered E2EE.
+3. **Metadata.** Tree shape, sizes (to within padding and chunk granularity), timestamps, who
+   uploaded what, sharing relationships and team memberships are visible to the server.
+4. **Revocation is access control, not re-encryption.** Removing someone from a share or team stops
+   them fetching ciphertext immediately, but keys they already received remain valid for content
+   they could already read. Team key rotation on member removal is on the roadmap.
+5. **No recovery without the user.** Losing both passphrase and recovery code loses the data, by
+   design; administrators cannot help. Users should keep the recovery code and key backup safe.
+6. **Group members wait for a key.** Members who join through IdP groups are authorized at once
+   but can decrypt only after a manager's client grants the team key.
+7. **Passphrase strength.** PBKDF2 (chosen because browsers implement it natively) is less
+   memory-hard than Argon2id; long passphrases matter. Passkey-based unlock is on the roadmap.
+8. **Public links can carry their key.** Whoever has the full link URL can decrypt the shared item
+   until it expires or is revoked; link passwords add a server-enforced gate on top.
+9. **Per-replica rate limits and WebDAV locks.** See ARCHITECTURE.md › Scaling.

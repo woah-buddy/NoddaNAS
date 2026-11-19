@@ -39,6 +39,23 @@ jobs:
       - run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
       - run: go tool cover -func=coverage.out | tail -1
 
+  browser-interop:
+    name: Browser/Go E2EE interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --global --ignore-scripts playwright@1.63.0
+          npx --yes playwright@1.63.0 install --with-deps chromium
+      - name: Go and WebCrypto implementations agree byte-for-byte
+        run: NODDANAS_BROWSER_TEST=1 NODE_PATH="$(npm root -g)" go test -count=1 -run TestBrowserInterop -v ./internal/e2ee/
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

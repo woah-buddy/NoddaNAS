@@ -33,3 +33,20 @@ func TestLoadRejectsInsecurePublicURL(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadRequiresASignInMethod(t *testing.T) {
+	t.Setenv("NODDANAS_DATABASE_URL", "postgres://x")
+	t.Setenv("NODDANAS_PUBLIC_URL", "https://files.example.com")
+	if _, err := Load(); err == nil {
+		t.Fatal("started with no sign-in method configured")
+	}
+	t.Setenv("NODDANAS_SAML_IDP_METADATA_URL", "http://idp.example.com/metadata")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted SAML metadata over plain http")
+	}
+	t.Setenv("NODDANAS_SAML_IDP_METADATA_URL", "https://idp.example.com/metadata")
+	c, err := Load()
+	if err != nil || c.SAML == nil || c.OIDC != nil || c.SAML.ACSURL != "https://files.example.com/auth/saml/acs" {
+		t.Fatalf("SAML-only config: %+v %v", c, err)
+	}
+}

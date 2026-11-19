@@ -2,8 +2,11 @@
 #
 #   cd deploy/compose
 #   cp .env.example .env        # then edit it
-#   ../../scripts/init-secrets.sh
+#   sudo ../../scripts/init-secrets.sh
 #   docker compose up -d --build
+#
+# Files are end-to-end encrypted in users' browsers and CLIs. The server
+# holds no content keys, so there is no server-side encryption key here.
 #
 # Hardening applied to every service: no-new-privileges, all Linux
 # capabilities dropped (and only re-added where an image needs one), and
@@ -25,16 +28,20 @@ services:
     environment:
       NODDANAS_PUBLIC_URL: https://${NODDANAS_HOST:?set NODDANAS_HOST in .env}
       NODDANAS_DATABASE_URL_FILE: /run/secrets/database_url
-      NODDANAS_KEYRING_FILE: /run/secrets/noddanas_keyring
-      NODDANAS_OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER in .env}
-      NODDANAS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID in .env}
+      # Sign-in: OIDC and/or SAML (configure at least one in .env).
+      NODDANAS_OIDC_ISSUER: ${OIDC_ISSUER:-}
+      NODDANAS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       NODDANAS_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
-      NODDANAS_OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
-      NODDANAS_OIDC_ALLOWED_EMAIL_DOMAINS: ${OIDC_ALLOWED_EMAIL_DOMAINS:-}
+      NODDANAS_SAML_IDP_METADATA_URL: ${SAML_IDP_METADATA_URL:-}
+      NODDANAS_SAML_TRUST_EMAIL: ${SAML_TRUST_EMAIL:-false}
+      NODDANAS_ALLOWED_GROUPS: ${ALLOWED_GROUPS:-}
+      NODDANAS_ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+      NODDANAS_ADMIN_GROUPS: ${ADMIN_GROUPS:-}
       NODDANAS_DEFAULT_QUOTA: ${DEFAULT_QUOTA:-10GiB}
+      NODDANAS_DEFAULT_TEAM_QUOTA: ${DEFAULT_TEAM_QUOTA:-50GiB}
       # Only Caddy (on the frontend network) may set X-Forwarded-For.
       NODDANAS_TRUSTED_PROXIES: 172.30.0.0/24
-    secrets: [database_url, noddanas_keyring, oidc_client_secret]
+    secrets: [database_url, oidc_client_secret]
     volumes:
       - noddanas-data:/data
     networks: [frontend, backend]
@@ -101,7 +108,5 @@ secrets:
     file: ./secrets/database_url
   postgres_password:
     file: ./secrets/postgres_password
-  noddanas_keyring:
-    file: ./secrets/noddanas_keyring
   oidc_client_secret:
     file: ./secrets/oidc_client_secret

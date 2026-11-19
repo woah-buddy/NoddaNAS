@@ -1,175 +1,167 @@
 # Architecture
 
-NoddaNAS is a single stateless Go binary in front of two stateful stores: PostgreSQL for
-metadata and a filesystem for encrypted file content. Everything else (identity, TLS) is
-delegated to dedicated components that already do those jobs well.
+NoddaNAS is a single stateless Go server in front of PostgreSQL (metadata) and a filesystem
+volume (encrypted containers), with all content cryptography done in clients: the browser
+(`web/static/e2ee.js`) and the Go CLI (`internal/e2ee`, `internal/client`). Identity is
+delegated to an OIDC or SAML provider.
 
 ```
-                 ┌──────────────────────────┐
-  browser ──────▶│ reverse proxy (TLS)      │   Caddy / ingress controller
-  WebDAV  ──────▶│                          │
-  scripts ──────▶└────────────┬─────────────┘
-                              │ HTTP
-            ┌─────────────────▼──────────────────┐        ┌──────────────────┐
-            │ noddanas (1..N replicas)           │◀──────▶│ OIDC provider    │
-            │                                    │ OIDC   │ (MFA, passkeys,  │
-            │  httpapi  ─ JSON API, WebDAV, UI   │        │  lockout, users) │
-            │     │       public links           │        └──────────────────┘
-            │  auth     ─ sessions, app passwords│
-            │     │                              │
-            │  service  ─ use cases +            │
-            │             THE authorization point│
-            │     │                   │          │
-            │  store (SQL)        blobcrypt      │
-            │     │                   │          │
-            └─────┼───────────────────┼──────────┘
-                  │                   │ ciphertext only, random names
-         ┌────────▼───────┐   ┌───────▼───────────────┐
-         │ PostgreSQL     │   │ filesystem volume      │
-         │ tree, versions,│   │ (disk, NAS, NFS, PVC)  │
-         │ wrapped keys,  │   └────────────────────────┘
-         │ shares, quota  │
-         └────────────────┘
+ browser (WebCrypto) ─┐                          ┌──────────────────────┐
+ noddanas-cli (Go)  ──┼── HTTPS ── reverse proxy │ OIDC and/or SAML IdP │
+ rclone (WebDAV, ro) ─┘               │          └──────────┬───────────┘
+                                      ▼                     │ sign-in only
+                     ┌────────────────────────────────────┐ │
+                     │ noddanas (1..N stateless replicas) │◀┘
+                     │  httpapi   JSON API, WebDAV, UI     │
+                     │  auth      sessions, app passwords  │
+                     │  service   THE authorization point  │
+                     │            quota, structure checks  │
+                     └───────┬──────────────────┬──────────┘
+                             │ SQL              │ opaque containers, random names
+                    ┌────────▼───────┐  ┌───────▼────────────────┐
+                    │ PostgreSQL     │  │ filesystem volume       │
+                    │ tree shape,    │  │ (disk, NAS, NFS, PVC)   │
+                    │ encrypted      │  └─────────────────────────┘
+                    │ names, wrapped │
+                    │ keys, grants   │
+                    └────────────────┘
 ```
 
-## Layers and the dependency rule
+## Two independent layers of protection
 
-Dependencies point inward only:
+1. **Authorization (server).** Who may fetch, write, list or delete which ciphertext. Enforced in
+   one place, `internal/service/access.go`, for every interface.
+2. **Cryptography (clients).** Who can *read* anything. Even an attacker who bypasses the server
+   entirely (stolen disk, database dump, malicious administrator) holds only ciphertext and keys
+   wrapped for someone else.
 
-| Layer | Knows about | Never knows about |
-|---|---|---|
-| `domain` | nothing | everything else |
-| `validate`, `secure`, `blobcrypt` | `domain` | HTTP, SQL |
-| `service` | the above + its own interfaces (`Store`, `BlobStore`, `Keyring`) | HTTP, SQL, OIDC |
-| `auth` | `service` | SQL details |
-| `httpapi` | `service`, `auth` | SQL, files on disk |
-| `store/postgres`, `blob/fsblob` | `domain`, the interfaces they implement | HTTP |
+Neither layer trusts the other. A client verifies every key it receives (signatures, AEAD
+bindings, key commitments); the server authorizes every request regardless of what the client
+could decrypt.
 
-The point of this rule is that **authorization lives in exactly one layer**. `httpapi` cannot
-reach the database, so it cannot "forget" a permission check: the only way to get a node is to
-ask the service, and the service always authorizes first. Swapping PostgreSQL or the blob backend
-cannot weaken a security rule, because adapters only persist what they are told.
+## Spaces
+
+A *space* is an independently owned tree with its own quota and its own key material:
+
+- **Personal space**: one per user, created at first sign-in. Its secret is derived from the
+  user's master key, so nothing about it needs to be shared.
+- **Team folder** (team space): owned by no single user. Membership is the union of
+  - **direct members**, added by a manager with a role (`read`, `write`, `manage`); any user may
+    create a team folder (configurable), becoming its first manager; and
+  - **group members**, from identity-provider groups that an **administrator** has mapped to the
+    folder with a role. Groups are refreshed from the IdP at every sign-in.
+
+Because the server cannot read the team key, joining has two halves: the server records the
+membership (access is authorized immediately), and a manager's client *grants* the member the
+team secret (sealed to their public key and signed). The web app does this automatically when a
+manager opens the team page; `noddanas-cli` and the API expose it too. A team must always keep a
+manager who holds the key, or nobody could grant it again.
+
+Leaving a group, being removed, or an administrator deleting a group mapping revokes access at
+the server immediately and deletes the member's stored key grant.
 
 ## Authorization model
 
-Implemented in `internal/service/access.go`.
+`authorize(principal, node, want)`:
 
-1. Load the node's ancestor chain (node, parent, ..., root) in **one** recursive SQL query.
-2. Check invariants on the chain: it reaches a root, it is no deeper than `MaxDepth` (fail
-   closed), every node has the same owner, nothing in it is trashed.
-3. Compute the caller's permission at every level of the chain:
-   owner → `owner`; otherwise the strongest user-share grant at that level or above.
-4. A caller with no permission gets **404 Not Found**. A caller who can see the node but lacks a
-   stronger permission gets 403. This avoids an existence oracle.
-5. Read-only credentials are capped to `read` regardless of ownership.
+1. Load the node's ancestor chain in one recursive query; check it reaches the space root, stays
+   in one space, contains nothing trashed, and that the space is not being deleted.
+2. Start from the caller's **space role** (personal owner → full control; team member → their
+   effective role).
+3. Overlay **user shares** on the chain: a share grants its permission on its node and everything
+   below it.
+4. Cap read-only credentials at `read`. Callers with no permission get **404**; callers who can see
+   the node but lack a stronger permission get 403.
 
-Structural changes (rename, move, delete) require **write on the parent**, the same rule POSIX
-directories use. That one rule produces the expected sharing behaviour without special cases: if
-Alice shares `Photos` with Bob read-write, Bob can manage what is *inside* `Photos` but cannot
-rename or delete `Photos` itself, because he has no access to Alice's root folder.
+Structural changes (rename, move, delete) need **write on the parent folder**, as in POSIX, so a
+user given write access to a shared folder can manage its contents but not delete or rename the
+shared folder itself. Moves never cross spaces (that would silently move content and quota to
+another owner; clients copy instead, which also re-encrypts for the new owner).
 
-Moves are refused when they would create a cycle or cross owners (content and quota belong to
-the owner; cross-owner moves would silently transfer both).
+## What the server stores
 
-## Data model
+| Data | Form |
+|---|---|
+| File content | Client-encrypted containers under random names |
+| File/folder names | Client-encrypted (`name_enc`) plus a keyed hash (`name_hash`) for uniqueness |
+| Node keys | Wrapped under the parent folder's key (`wrapped_key`) |
+| Space keys | Space public key (signed by its creator), root key wrapped under the space secret, team secret sealed to each member (signed by the granter) |
+| User keys | Public keys plus the encrypted key bundle |
+| Shares | Node key sealed to the recipient and signed by the sharer; links: node key encrypted under a secret that exists only in the link's URL fragment |
+| Trash | Node key and name sealed to the space, signed by whoever trashed it |
+| Bearer secrets | Hashes only (sessions, app passwords, link tokens) |
 
-```
-users     (id, issuer, subject, email?, root_id, quota_bytes, used_bytes)
-nodes     (id, owner_id, parent_id?, name, name_key, kind, size, sha256, version_id,
-           revision, trashed_at?, purging, purge_lease?)
-versions  (id, node_id, owner_id, blob_key, wrapped_key, size, sha256, created_*)
-shares    (id, kind, node_id, owner_id, permission, recipient_id? | token_hash, password_hash,
-           expires_at, max_downloads, downloads, failed_attempts, locked_until)
-sessions, app_passwords, login_requests   (secrets stored only as SHA-256 hashes)
-```
+Integrity rules are database constraints (`internal/store/postgres/migrations/0001_init.sql`):
+unique live name hash per folder; links can only grant read; a node with stored versions cannot be
+deleted; quota is charged by `UPDATE ... WHERE used + n <= quota` in the same transaction that
+records the content.
 
-Notable constraints (`internal/store/postgres/migrations/0001_init.sql`):
+## Uploads, downloads and versions
 
-- `UNIQUE (parent_id, name_key) WHERE trashed_at IS NULL`: one live item per (case-folded) name
-  per folder; trashed items free their name.
-- `CHECK (kind = 'user' OR permission = 'read')`: a public link cannot grant write, even if a
-  future bug tries to create one.
-- `versions.node_id ... ON DELETE RESTRICT`: a node cannot be deleted while it still has stored
-  content, so quota accounting cannot silently drift.
-- Quota is charged with `UPDATE users SET used = used + $n WHERE used + $n <= quota`: the check
-  and the increment are one atomic statement, so concurrent uploads cannot overshoot. The test
-  suite proves this with 20 concurrent uploads against a quota that fits 10.
-- Every write that depends on state uses a revision or state condition in the same statement
-  (optimistic concurrency: a stale client gets 412, never a lost update).
+The client encrypts a file into a container (header, 64 KiB STREAM chunks, signature trailer) and
+uploads it with its encrypted directory entry. The server, without any key:
 
-## Encryption at rest
+1. authorizes write on the destination folder (or file, for a new version);
+2. parses the container header to learn its declared plaintext size and owning space, and refuses
+   containers sealed to a different space;
+3. streams the body to storage while hashing it, requiring the exact length the header implies;
+4. re-authorizes (an upload can take minutes), then commits node, version and quota atomically.
 
-Implemented in `internal/blobcrypt`.
+Downloads return the container unchanged; the client checks the key commitment, decrypts, and
+verifies the uploader's signature before trusting the result. Restoring an old version copies that
+version's container into a new version; history is never rewritten.
 
-**Envelope encryption.** A small keyring file holds one or more 256-bit key-encryption keys
-(KEKs); the first is primary. Each stored version gets its own random 256-bit data key (DEK).
-The DEK encrypts the content; the KEK encrypts the DEK; the wrapped DEK is stored in the
-`versions` row. The wrapping is AES-256-GCM with the blob's key as authenticated data, so a
-wrapped DEK copied to a different row will not unwrap.
+## Independent backup and restore
 
-**Content format (STREAM construction).** Content is split into 64 KiB chunks, each sealed with
-AES-256-GCM. The nonce is the chunk index plus a flag marking the final chunk. This is the same
-construction used by `age` and Google Tink, and it gives:
+Each container carries the file's key sealed to its **owner space**, plus encrypted metadata
+(name, type, modification time) and the uploader's signature. Therefore:
 
-- confidentiality and integrity per chunk;
-- protection against reordering (the index is in the nonce) and truncation (the final flag);
-- random access, which makes HTTP Range requests (video seeking, resumed downloads) possible
-  without decrypting from the start.
+- **Single file.** Download it (`Backup` in the app, `noddanas-cli backup`, WebDAV). To restore,
+  the owner's client opens the owner seal with the space keys, verifies the signature, and uploads
+  the container byte-for-byte unchanged with a new encrypted directory entry.
+- **Offline.** `noddanas-cli decrypt` needs only the container, the key backup (the encrypted key
+  bundle plus team grants) and the passphrase or recovery code.
+- **Whole trees.** The WebDAV view and `noddanas-cli backup` write ID-named containers plus
+  encrypted folder records (`_noddanas-folder.json`) and the space record
+  (`_noddanas-space.json`). `noddanas-cli decrypt-tree` rebuilds the full tree, with real names,
+  entirely offline. The backup medium never sees a plaintext name.
 
-**Why bother when disks can be encrypted?** Disk encryption protects a powered-off disk. It does
-nothing for a running server's NFS export, a backup copied elsewhere, a snapshot, or a storage
-volume attached to the wrong machine. Application-level encryption keeps the storage tier
-untrusted, which is also what makes a future S3-compatible backend safe to point at a third party.
+The server no longer encrypts at rest itself: an extra server-side layer would tie each stored
+blob to a server key and database row, which is exactly what independent restore must avoid.
+Disk-level encryption (LUKS, encrypted ZFS) remains a good idea for metadata.
 
-**Crypto-shredding.** The DEK exists only in the `versions` row. Deleting the row makes the blob
-permanently unreadable, even if a storage snapshot or backup still contains it.
+## Sign-in
 
-**Key rotation.** Add a new key as the first line of the keyring and restart: new content uses it,
-old content still decrypts with the old key. Old DEKs can later be re-wrapped (roadmap: a
-`rewrap` command); blobs never need re-encrypting.
+- **OIDC**: authorization-code flow with PKCE, state bound to a single-use server-side request
+  and a `__Host-` cookie, nonce checked, ID token verified (signature, issuer, audience, expiry).
+- **SAML**: SP-initiated only; `crewjam/saml` validates signatures, audience, issuer, destination
+  and validity; NoddaNAS adds a single-use request binding (the AuthnRequest ID is stored
+  server-side and consumed on first use; the browser carries a `SameSite=None` `__Host-` cookie
+  because the IdP returns with a cross-site POST), refuses the artifact binding, and treats
+  emails as verified only when the operator says so.
+- Both feed the same **policy** (allowed groups / email domains) and refresh the user's groups and
+  administrator flag at every sign-in. Accounts are keyed by (issuer, subject), never by email.
 
-## Uploads and downloads
-
-Uploads stream through the server: body → size limiter → SHA-256 hasher → encryptor → blob
-store. Nothing is buffered whole, so memory use is constant regardless of file size. Then:
-
-1. if the client declared a size or SHA-256, they must match exactly or the upload is discarded;
-2. the caller is **re-authorized** (an upload can take minutes; access may have been revoked);
-3. the node, version and quota charge commit in one transaction;
-4. if anything fails, the blob is deleted. If the process dies before then, the orphaned blob's
-   key was never stored, so it is unreadable garbage (a GC is on the roadmap).
-
-Downloads decrypt on the fly through an `io.ReadSeeker`, handed to `http.ServeContent`, which
-implements Range, If-Range and ETag (the content's SHA-256) correctly.
+Browsers then hold only an opaque, HttpOnly, `__Host-` session cookie. Non-browser clients use
+app passwords. Key setup and app-password management require an interactive session, so a
+leaked app password cannot replace keys or mint more credentials.
 
 ## Background work
 
-Trash expiry and permanent deletion run inside each replica (`NODDANAS_WORKER=true`). Work is
-claimed with `SELECT ... FOR UPDATE SKIP LOCKED` plus a lease, so the `nodes` table doubles as a
-queue: any number of replicas cooperate without double-processing, and no message broker is
-needed. Purging deletes blobs first and rows second, so a crash at any point leaves work that is
-found and retried; each step is idempotent and quota is refunded exactly once.
+Trash expiry, permanent deletion and team-folder deletion run in each replica, claiming work
+with `FOR UPDATE SKIP LOCKED` plus a lease. Purges delete blobs before rows, so an interrupted
+purge is simply resumed; quota is refunded exactly once per version.
 
 ## Scaling
 
-- **Stateless replicas.** Sessions, locks on work items and all state live in PostgreSQL, so you
-  can run several `noddanas` replicas behind a load balancer.
-- **Shared storage.** Multiple replicas need a shared filesystem (NFS, CephFS, a ReadWriteMany
-  volume). An S3-compatible backend is on the roadmap.
-- **Rate limits** are per replica (in-memory). Put a global limiter in your proxy if needed.
-- **WebDAV locks** are in-memory per replica. With several replicas, use sticky sessions for
-  `/dav/`, or run WebDAV on one replica.
-- **Database.** Hot paths are indexed single-row lookups plus one recursive query per
-  authorization (depth ≤ 64). PostgreSQL replicas, connection pooling (PgBouncer) and partitioning
-  are available if you ever outgrow one instance.
+Replicas are stateless (sessions and work queues live in PostgreSQL). Several replicas need shared
+storage (NFS, CephFS, ReadWriteMany volumes). Rate limits and WebDAV locks are per replica.
+Because clients do all cryptography, server CPU is spent on I/O and SQL only.
 
 ## Web client
 
-`web/static` is plain HTML/CSS/ES modules embedded into the binary at build time: no build
-step, no npm dependency tree to audit, and no separate asset server. It is written only against
-DOM APIs (`textContent`, `createElement`) so it can run under a CSP that enforces Trusted Types
-with no policies: the browser refuses every string-to-HTML sink outright.
-
-Public links carry their token in the URL fragment (`/s#token`). Browsers never send fragments
-to servers, so tokens do not appear in access logs, proxies or `Referer` headers; the client
-sends the token in POST bodies only.
+`web/static` is plain ES modules embedded into the binary: no build step and no npm dependencies.
+It uses only DOM APIs, so it can run under a CSP that enforces Trusted Types with no policies.
+Keys are held in memory for the tab's lifetime (WebCrypto private keys are imported
+non-extractable); reloading asks for the passphrase again. Large browser downloads are assembled
+in memory or disk-backed Blob storage; `noddanas-cli` streams with constant memory.

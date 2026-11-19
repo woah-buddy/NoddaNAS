@@ -3,8 +3,8 @@
 # Prerequisites (created out-of-band, never committed):
 #   kubectl -n noddanas create secret generic noddanas-secrets \
 #     --from-literal=database_url='postgres://...?...sslmode=verify-full' \
-#     --from-file=noddanas_keyring=./noddanas_keyring \
 #     --from-literal=oidc_client_secret='...'
+# Files are end-to-end encrypted by clients; the server holds no content keys.
 # PostgreSQL: use a managed service or an operator (e.g. CloudNativePG).
 # Storage: more than one replica needs a ReadWriteMany volume (NFS, CephFS,
 # Longhorn RWX, ...). With ReadWriteOnce storage, keep replicas: 1.
@@ -31,8 +31,11 @@ data:
   NODDANAS_PUBLIC_URL: https://files.example.com
   NODDANAS_OIDC_ISSUER: https://id.example.com/realms/home
   NODDANAS_OIDC_CLIENT_ID: noddanas
-  NODDANAS_OIDC_ALLOWED_GROUPS: noddanas-users
+  # Or/also SAML: NODDANAS_SAML_IDP_METADATA_URL: https://idp.example.com/metadata
+  NODDANAS_ALLOWED_GROUPS: noddanas-users
+  NODDANAS_ADMIN_GROUPS: noddanas-admins
   NODDANAS_DEFAULT_QUOTA: 10GiB
+  NODDANAS_DEFAULT_TEAM_QUOTA: 50GiB
   # Pod CIDR of your ingress controller, so client IPs are logged and rate
   # limited correctly. Adjust to your cluster.
   NODDANAS_TRUSTED_PROXIES: 10.0.0.0/8
@@ -81,7 +84,6 @@ spec:
             - configMapRef: {name: noddanas}
           env:
             - {name: NODDANAS_DATABASE_URL_FILE, value: /run/secrets/noddanas/database_url}
-            - {name: NODDANAS_KEYRING_FILE, value: /run/secrets/noddanas/noddanas_keyring}
             - {name: NODDANAS_OIDC_CLIENT_SECRET_FILE, value: /run/secrets/noddanas/oidc_client_secret}
           securityContext:
             allowPrivilegeEscalation: false

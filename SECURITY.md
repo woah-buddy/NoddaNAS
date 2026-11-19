@@ -27,3 +27,10 @@ and an update to the threat model.
    condition), not only in Go.
 6. No new runtime dependency without a clear need; prefer the standard library and `golang.org/x`.
 7. Every security property gets a test that would fail if it regressed.
+8. The server never receives plaintext content, names or usable keys. Any change to what clients
+   encrypt goes through [docs/E2EE.md](docs/E2EE.md) first, then into **both** implementations
+   (`internal/e2ee` and `web/static/e2ee.js`), and the interoperability test must pass.
+9. Every key a client accepts from the server is authenticated: by an AEAD binding to its node or
+   space, a key commitment, or a signature from the user who granted it.
+10. SAML changes keep: signatures required, SP-initiated only, single-use request binding,
+    HTTP-POST binding only.
