@@ -424,3 +424,50 @@ func TestContacts(t *testing.T) {
 		}
 	}
 }
+
+// A Verifier fed by a random-access Reader verifies the signature when the
+// file is read in order, and cannot be satisfied any other way.
+func TestStreamingVerifier(t *testing.T) {
+	for _, size := range []int{0, 10, ChunkSize, 2*ChunkSize + 7} {
+		f := newFixture(t, size)
+		k, _ := f.prefix.Keys(f.nk)
+		trailer := f.ct[len(f.ct)-TrailerSize:]
+		read := func(seekFirst bool) (*Verifier, []byte) {
+			v, err := f.prefix.NewVerifier(f.alice.Public())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := NewReader(bytes.NewReader(f.ct), f.prefix, k)
+			r.OnChunk = func(i int64, ct []byte) { v.Chunk(i, ct) }
+			if seekFirst && size > ChunkSize {
+				r.Read(make([]byte, 1))           // chunk 0 ...
+				r.Seek(2*ChunkSize, io.SeekStart) // ... then skip chunk 1
+			}
+			out, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v, out
+		}
+		v, out := read(false)
+		if !bytes.Equal(out, f.plain) || !v.Complete() || v.Finish(trailer) != nil {
+			t.Fatalf("size %d: in-order read did not verify", size)
+		}
+		bad := bytes.Clone(trailer)
+		bad[10] ^= 1
+		if v.Finish(bad) == nil {
+			t.Fatalf("size %d: forged signature accepted", size)
+		}
+		if size > ChunkSize {
+			v, _ = read(true)
+			if v.Complete() || v.Finish(trailer) == nil {
+				t.Fatalf("size %d: a read that skipped a chunk claimed verification", size)
+			}
+		}
+	}
+	f := newFixture(t, 10)
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	if _, err := f.prefix.NewVerifier(mallory.Public()); err == nil {
+		t.Fatal("verifier accepted a signer the header does not name")
+	}
+}

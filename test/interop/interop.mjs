@@ -55,6 +55,46 @@ const result = await page.evaluate(async () => {
     const goUser = await E.verifyUser(v.bundle.userId, { enc: v.bundle.pub.enc, sig: v.bundle.pub.sig, selfSig: v.bundle.selfSig });
     try { await E.decryptFile(new Blob([bad]), child, async () => goUser); return false; } catch { return true; }
   });
+  // Streaming decryption: the same container arriving in small pieces, as
+  // from the network. Every chunk is released as it authenticates; the last
+  // only after the signature verifies.
+  const pieces = (bytes, size = 7777) => new ReadableStream({
+    start(c) { for (let i = 0; i < bytes.length; i += size) c.enqueue(bytes.slice(i, i + size)); c.close(); },
+  });
+  const goSigner = async () => E.verifyUser(v.bundle.userId, { enc: v.bundle.pub.enc, sig: v.bundle.pub.sig, selfSig: v.bundle.selfSig });
+  const drain = async (dec) => {
+    const parts = [];
+    try {
+      for (;;) { const r = await dec.next(); if (r.done) return { parts, err: null }; parts.push(r.value); }
+    } catch (err) { return { parts, err }; }
+  };
+  await check('container-stream', async () => {
+    const bytes = E.unb64u(v.container);
+    const dec = await E.openContainerStream(pieces(bytes), child, goSigner, bytes.length);
+    const { parts, err } = await drain(dec);
+    return !err && dec.meta.name === v.childName && new TextDecoder().decode(E.concat(...parts)) === v.plaintext && parts.length > 2;
+  });
+  await check('container-stream-forged-signature-withholds-last-chunk', async () => {
+    const bad = E.unb64u(v.container);
+    bad[bad.length - 1] ^= 1;
+    const dec = await E.openContainerStream(pieces(bad), child, goSigner, bad.length);
+    const { parts, err } = await drain(dec);
+    const n = Math.ceil(new TextEncoder().encode(v.plaintext).length / E.CHUNK);
+    return err !== null && parts.length === n - 1 && (await dec.next().then(() => false, () => true));
+  });
+  await check('container-stream-tampered-chunk-rejected', async () => {
+    const bad = E.unb64u(v.container);
+    bad[bad.length - 100] ^= 1; // inside the last chunk
+    const { err } = await drain(await E.openContainerStream(pieces(bad), child, goSigner, bad.length));
+    return err !== null;
+  });
+  await check('container-stream-truncated-rejected', async () => {
+    const bytes = E.unb64u(v.container);
+    const cut = bytes.slice(0, bytes.length - 68);
+    const { err } = await drain(await E.openContainerStream(pieces(cut), child, goSigner));
+    try { await E.openContainerStream(pieces(cut), child, goSigner, cut.length); return false; } catch { /* length checked up front */ }
+    return err !== null;
+  });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
   await check('open-contacts', async () => {
     const c = await E.openContacts(goAcct, v.contacts);

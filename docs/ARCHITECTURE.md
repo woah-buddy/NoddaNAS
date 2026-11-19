@@ -181,10 +181,32 @@ Because clients do all cryptography, server CPU is spent on I/O and SQL only.
 ## Web client
 
 `web/static` is plain ES modules embedded into the binary: no build step and no npm dependencies.
-It uses only DOM APIs, so it can run under a CSP that enforces Trusted Types with no policies.
+It uses only DOM APIs, so it can run under a CSP that enforces Trusted Types with a single, narrow
+policy (below).
 Keys are held in memory for the tab's lifetime (WebCrypto private keys are imported
-non-extractable); reloading asks for the passphrase again. Large browser downloads are assembled
-in memory or disk-backed Blob storage; `frontdir-cli` streams with constant memory.
+non-extractable); reloading asks for the passphrase again.
+
+Downloads under 64 MiB are decrypted in memory and verified completely before they are offered.
+Larger ones stream to disk: the page fetches the container, decrypts it chunk by chunk
+(`openContainerStream` in `e2ee.js`), and hands each chunk to a service worker (`/dl/sw.js`,
+registered with scope `/dl/` so it sees no other request), which turns the stream into an
+ordinary browser download. The worker fetches nothing and keeps nothing; the page holds the keys.
+Registering it needs a Trusted Types script URL, so the CSP allows exactly one policy,
+`frontdir-sw`, which can only produce that one constant URL.
+
+## Local drive (`frontdir-cli mount`)
+
+`internal/davgw` is a WebDAV server that runs on the user's computer with their unlocked keys and
+serves their spaces decrypted: Home and each team folder. Reads use `client.RemoteFile`, which
+fetches only the byte ranges asked for (pinned to one version) and decrypts them with random
+access; writes are buffered (spilling to disk only under a throwaway key), then encrypted and
+uploaded on close. It listens on loopback only, requires a random token in the path, refuses
+requests from browsers, and keeps operating-system clutter (`.DS_Store`, `._*`, `Thumbs.db`,
+Office lock files) in memory. See [MOUNT.md](MOUNT.md).
+
+Both paths release plaintext before a whole file has been read, so they share one rule, from
+`e2ee.Verifier`: every chunk released has passed AES-GCM; the last chunk is released only after the
+author's signature over all chunks verifies; on failure the transfer is aborted.
 
 Colors are CSS custom properties defined only in `/theme.css`, which `internal/theme` generates at
 startup from validated tokens. It uses cascade layers (mode, then accent, then high contrast), so

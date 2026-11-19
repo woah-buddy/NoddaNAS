@@ -173,6 +173,17 @@ every version's content key unique even though versions share `NK`.
 Signature: `Ed25519(signerSigPriv, "L/container" \0 || SHA-256(bytes[0, 12+H)) || BH)` where
 `BH = SHA-256(SHA-256(chunk_0) || … || SHA-256(chunk_{n-1}))` over the encrypted chunks.
 
+**Readers that cannot hold a whole file** (streaming browser downloads, the local WebDAV drive)
+release plaintext chunk by chunk. They follow one rule: a chunk is released only after AES-GCM
+authenticated it (so nobody without `NK`, the server included, can alter, reorder, drop, swap or
+truncate anything unnoticed), and when chunks are read in order, the final chunk is released only
+after the signature over all of them verifies. If it does not, the transfer is aborted (the
+browser discards the partial download; a copy from the drive fails), so a forged file never
+arrives whole. Ranged reads that skip chunks cannot check the signature and are authenticated by
+AES-GCM alone; what they lack is attribution (proof of which key holder wrote the file), not
+integrity. Small downloads in the browser, `frontdir-cli get` and restores still verify
+everything before releasing anything.
+
 Why each part exists:
 
 - `owner.key` makes the container **independently restorable**: whoever holds the space secret

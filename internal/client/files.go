@@ -168,11 +168,17 @@ func (c *Client) Rename(ctx context.Context, n *Node, newName string) error {
 
 // Move moves a node into another folder of the same space.
 func (c *Client) Move(ctx context.Context, n *Node, destID string) error {
+	return c.MoveTo(ctx, n, destID, n.Name)
+}
+
+// MoveTo moves a node into another folder of the same space under a
+// (possibly new) name, in one step.
+func (c *Client) MoveTo(ctx context.Context, n *Node, destID, name string) error {
 	nk, err := c.cachedKey(ctx, n.ID)
 	if err != nil {
 		return err
 	}
-	e, err := c.entry(ctx, destID, n.ID, n.Name, nk)
+	e, err := c.entry(ctx, destID, n.ID, name, nk)
 	if err != nil {
 		return err
 	}

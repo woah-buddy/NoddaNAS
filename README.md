@@ -40,6 +40,8 @@ in the browser.
 | Kill switches | Revoke all of your own public links, or (administrators) every link on the server; shell commands for break-glass link revocation and user offboarding |
 | Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
 | Clients | Web app (no build step, no npm dependencies) and `frontdir-cli` (Go) |
+| Mount as a drive | `frontdir-cli mount`: your files, decrypted on your computer only, in Finder or File Explorer |
+| Large downloads | Files of any size stream to disk in the browser, decrypted and verified chunk by chunk |
 | Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
 
 Not included (yet): calendar/contacts, document editing, the Nextcloud sync protocol, a plaintext
@@ -135,6 +137,15 @@ frontdir-cli decrypt-tree ./nas-backup ./restored --keys ./nas-backup/keys.json 
 frontdir-cli decrypt ./somefile.fdenc ./somefile --keys ./keys.json
 ```
 
+**Your files as a drive.** `frontdir-cli mount` serves your files, decrypted, as a WebDAV drive
+on your own computer only, for Finder, File Explorer or GNOME Files. Opening a file fetches and
+decrypts just the parts that are read; saving encrypts and uploads a new version; deleting moves
+to the trash. See [docs/MOUNT.md](docs/MOUNT.md).
+
+```sh
+frontdir-cli mount        # prints the address to connect to; Ctrl+C stops and locks
+```
+
 Backups contain no plaintext names: files are stored by ID, and names live encrypted in
 `_frontdir-folder.json`. The same layout is served read-only at `https://<host>/dav/`, so
 `rclone sync`/`restic` can mirror it with an app password. In the web app, **Backup** saves one file
@@ -154,9 +165,9 @@ as `name.fdenc` and **Restore backup…** puts it back (byte-for-byte unchanged)
   unsolicited assertions.
 - **Integrity in the database**: name-hash uniqueness, atomic quota, optimistic concurrency and
   "links are read-only" are SQL constraints or single-statement conditions.
-- **Hardened web client**: strict CSP with Trusted Types enforced and no policies, so the browser
-  itself refuses HTML injection. Containers are always served as sandboxed `octet-stream`
-  attachments.
+- **Hardened web client**: strict CSP with Trusted Types enforced, so the browser itself refuses
+  HTML injection (the only policy can produce one constant URL: the download worker's).
+  Containers, and decrypted downloads, are always served as sandboxed `octet-stream` attachments.
 - **Minimal container**: distroless, non-root, read-only root filesystem, no capabilities.
 
 ## Development
@@ -197,8 +208,6 @@ docs/                  administrator guide, disaster recovery, E2EE spec, archit
 
 ## Roadmap
 
-- Local decrypting WebDAV gateway in `frontdir-cli` (mount plaintext in Finder/Explorer)
-- Streaming decryption for very large browser downloads (service-worker stream)
 - Key rotation for team folders when members leave (today: access revoked, old key not rotated)
 - Key transparency / verified contacts to remove trust in the server's key directory
 - Passkey (WebAuthn PRF) unlock as an alternative to the passphrase

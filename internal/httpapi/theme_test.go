@@ -96,12 +96,12 @@ func TestThemeEndpoints(t *testing.T) {
 
 	t.Run("theming does not loosen the UI's CSP", func(t *testing.T) {
 		csp := get(h, "/").Header.Get("Content-Security-Policy")
-		for _, want := range []string{"style-src 'self';", "script-src 'self';", "trusted-types 'none'"} {
+		for _, want := range []string{"style-src 'self';", "script-src 'self';", "trusted-types frontdir-sw"} {
 			if !strings.Contains(csp, want) {
 				t.Fatalf("UI CSP %q lacks %q", csp, want)
 			}
 		}
-		if strings.Contains(csp, "unsafe-inline") || strings.Contains(csp, "unsafe-eval") {
+		if strings.Contains(csp, "unsafe-inline") || strings.Contains(csp, "unsafe-eval") || strings.Contains(csp, "allow-duplicates") {
 			t.Fatalf("UI CSP loosened: %q", csp)
 		}
 		if resp := get(h, "/theme-init.js"); !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/javascript") {

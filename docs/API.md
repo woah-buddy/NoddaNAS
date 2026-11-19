@@ -149,6 +149,13 @@ All *session* and administrators only. Changes need a recent sign-in (`reauth_re
 | `GET /theme.css` | Generated stylesheet (`ETag`, revalidated) |
 | `GET /branding/logo` | Re-encoded PNG logo, or 404 |
 
+## Streaming downloads (web client)
+
+| Method & path | |
+|---|---|
+| `GET /dl/sw.js` | The download service worker (scope `/dl/`); see ARCHITECTURE.md, "Web client" |
+| `GET /dl/<id>` | Answered inside the browser by the worker. If a request ever reaches the server, it answers `204 No Content`, so the page stays where it is. |
+
 ## Health
 
 `GET /healthz` (204) and `GET /readyz` (204 or 503).

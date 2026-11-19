@@ -214,6 +214,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/dav/", s.dav)
 	}
 	if s.ui != nil {
+		// Streaming downloads: the download worker (/dl/sw.js, scope /dl/)
+		// answers /dl/<id> inside the browser. Should a request ever reach
+		// the server instead, 204 leaves the page where it is rather than
+		// navigating away to the app shell.
+		mux.Handle("GET /dl/sw.js", s.uiHandler())
+		mux.HandleFunc("GET /dl/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 		mux.Handle("/", s.uiHandler())
 	}
 
