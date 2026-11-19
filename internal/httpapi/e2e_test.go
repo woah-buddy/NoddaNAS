@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -471,8 +472,24 @@ func TestEndToEnd(t *testing.T) {
 		if _, _, err := carol.NodeKey(ctx, up.ID); err == nil {
 			t.Fatal("carol decrypted before being granted the key")
 		}
-		if n := must[int](t)(alice.GrantPending(ctx, team.ID)); n != 1 {
-			t.Fatalf("granted %d", n)
+		// Keys are only ever given to members the manager approves, with their fingerprint.
+		carolMe := must[*client.Me](t)(carol.Me(ctx))
+		carolFP := must[*e2ee.PublicUser](t)(alice.UserKeys(ctx, carolMe.User.ID)).Finger
+		if _, err := alice.GrantPending(ctx, team.ID, nil); err == nil {
+			t.Fatal("blind grant allowed")
+		}
+		if n := must[int](t)(alice.GrantPending(ctx, team.ID, func(client.Member, string) bool { return false })); n != 0 {
+			t.Fatalf("granted %d without approval", n)
+		}
+		if _, _, err := carol.NodeKey(ctx, up.ID); err == nil {
+			t.Fatal("carol decrypted without an approved grant")
+		}
+		seen := ""
+		if n := must[int](t)(alice.GrantPending(ctx, team.ID, func(m client.Member, fp string) bool {
+			seen = fp
+			return m.UserID == carolMe.User.ID
+		})); n != 1 || seen != carolFP {
+			t.Fatalf("granted %d (fingerprint shown %q, want %q)", n, seen, carolFP)
 		}
 		out.Reset()
 		must[*e2ee.Meta](t)(carol.Download(ctx, up.ID, &out))
@@ -726,6 +743,54 @@ func TestEndToEnd(t *testing.T) {
 		}
 		if code, body = call(aliceB, "POST", "/api/v1/admin/links/revoke-all", ""); code != 200 || !strings.Contains(body, `"revoked":`) {
 			t.Fatalf("admin revoke: %d %s", code, body)
+		}
+	})
+
+	t.Run("verified contacts are sealed, per user and revision-checked", func(t *testing.T) {
+		req := func(b *http.Client, method, body string) (int, string) {
+			t.Helper()
+			r, _ := http.NewRequest(method, h.base+"/api/v1/contacts", strings.NewReader(body))
+			r.Header.Set("Sec-Fetch-Site", "same-origin")
+			r.Header.Set("Content-Type", "application/json")
+			resp, err := b.Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(raw)
+		}
+		bobMe := must[*client.Me](t)(bob.Me(ctx))
+		bobKeys := must[*e2ee.PublicUser](t)(alice.UserKeys(ctx, bobMe.User.ID))
+		sealed := must[string](t)(alice.Account().SealContacts(&e2ee.Contacts{V: 1, Contacts: map[string]e2ee.Contact{
+			bobMe.User.ID: {FP: bobKeys.Finger, Name: "Bob", VerifiedAt: time.Now().UnixMilli()}}}))
+		body := func(rev int) string { return fmt.Sprintf(`{"contacts":%q,"revision":%d}`, sealed, rev) }
+
+		code, got := req(aliceB, "GET", "")
+		var cur struct {
+			Contacts string
+			Revision int
+		}
+		json.Unmarshal([]byte(got), &cur)
+		if code != 200 {
+			t.Fatalf("get: %d %s", code, got)
+		}
+		if code, got = req(aliceB, "PUT", body(cur.Revision)); code != 200 {
+			t.Fatalf("put: %d %s", code, got)
+		}
+		if code, _ = req(aliceB, "PUT", body(cur.Revision)); code != http.StatusPreconditionFailed {
+			t.Fatalf("stale revision accepted: %d", code)
+		}
+		// The server holds only ciphertext, and nobody else receives it.
+		_, got = req(aliceB, "GET", "")
+		if strings.Contains(got, "Bob") || !strings.Contains(got, sealed) {
+			t.Fatalf("contacts stored in the clear or not at all: %.200s", got)
+		}
+		if _, other := req(bobB, "GET", ""); strings.Contains(other, sealed) {
+			t.Fatal("another user received alice's contact list")
+		}
+		if code, _ = req(aliceB, "PUT", `{"contacts":"`+strings.Repeat("A", 70000)+`","revision":2}`); code < 400 {
+			t.Fatalf("oversized contact list accepted: %d", code)
 		}
 	})
 

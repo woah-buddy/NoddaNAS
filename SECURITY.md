@@ -44,3 +44,7 @@ and an update to the threat model.
     (for example a stale advisory record), add an entry to `.github/govulncheck-exceptions.json`
     naming the exact advisory and module, with the evidence and an expiry at most 90 days away.
     `tools/vulngate` enforces all of this and fails when an exception expires.
+14. Clients never grant a key, or extend trust, because the server says so. Membership lists,
+    names and emails are the server's claims: a key grant needs an explicit decision by a person
+    who has been shown the recipient's fingerprint, and identity comes only from fingerprints the
+    user verified (E2EE.md §3 and §8).

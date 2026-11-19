@@ -892,6 +892,35 @@ func (s *Store) ListSharesByRecipient(ctx context.Context, userID string) ([]*do
 	return scanShares(s.db.Query(ctx, "SELECT "+shareCols+" FROM shares WHERE recipient_id=$1 ORDER BY created_at DESC LIMIT 1000", userID))
 }
 
+// GetContacts returns a user's sealed contact list ("" if none) and its revision.
+func (s *Store) GetContacts(ctx context.Context, userID string) (string, int64, error) {
+	var enc *string
+	var rev int64
+	err := s.db.QueryRow(ctx, "SELECT contacts_enc, contacts_rev FROM users WHERE id=$1", userID).Scan(&enc, &rev)
+	if err != nil {
+		return "", 0, mapErr(err)
+	}
+	if enc == nil {
+		return "", rev, nil
+	}
+	return *enc, rev, nil
+}
+
+// SetContacts replaces a user's sealed contact list if its revision is still
+// expectRev, in one statement, and returns the new revision.
+func (s *Store) SetContacts(ctx context.Context, userID, enc string, expectRev int64) (int64, error) {
+	var rev int64
+	err := s.db.QueryRow(ctx, `UPDATE users SET contacts_enc=$2, contacts_rev=contacts_rev+1
+		WHERE id=$1 AND contacts_rev=$3 RETURNING contacts_rev`, userID, enc, expectRev).Scan(&rev)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, domain.E(domain.CodePrecondition, "the contact list changed on another device; reload and try again")
+	}
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return rev, nil
+}
+
 // ListSharesByCreator returns up to limit shares the user created, newest first.
 func (s *Store) ListSharesByCreator(ctx context.Context, userID string, limit int) ([]*domain.Share, error) {
 	return scanShares(s.db.Query(ctx, "SELECT "+shareCols+" FROM shares WHERE created_by=$1 ORDER BY created_at DESC LIMIT $2", userID, limit))

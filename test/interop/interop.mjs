@@ -56,6 +56,27 @@ const result = await page.evaluate(async () => {
     try { await E.decryptFile(new Blob([bad]), child, async () => goUser); return false; } catch { return true; }
   });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
+  await check('open-contacts', async () => {
+    const c = await E.openContacts(goAcct, v.contacts);
+    return c.contacts[v.contactId].fp === v.contactFp && c.contacts[v.contactId].name === 'Bob \u2713';
+  });
+  await check('tampered-contacts-rejected', async () => {
+    const bad = E.unb64u(v.contacts);
+    bad[bad.length - 5] ^= 1;
+    try { await E.openContacts(goAcct, E.b64u(bad)); return false; } catch { return true; }
+  });
+  await check('classify-contacts', async () => {
+    const A = '1'.repeat(32), B = '2'.repeat(32);
+    const cl = { v: 1, contacts: { [A]: { fp: 'a'.repeat(40), name: 'Alice Smith', email: 'alice@example.com', verifiedAt: 1 } } };
+    const lv = (u) => E.classifyContact(cl, u).level;
+    return lv({ id: A, fp: 'a'.repeat(40), name: 'Alice Smith' }) === 'verified'
+      && lv({ id: A, fp: 'b'.repeat(40), name: 'Alice Smith' }) === 'changed'
+      && lv({ id: B, fp: 'c'.repeat(40), name: 'alice  smith' }) === 'lookalike'
+      && lv({ id: B, fp: 'c'.repeat(40), name: '\u0410l\u0456ce Sm1th' }) === 'lookalike'
+      && lv({ id: B, fp: 'c'.repeat(40), name: 'Al\u200bice Smith' }) === 'lookalike'
+      && lv({ id: B, fp: 'c'.repeat(40), name: 'Someone', email: 'ALICE@example.com' }) === 'lookalike'
+      && lv({ id: B, fp: 'c'.repeat(40), name: 'Alicia Smith' }) === 'unverified';
+  });
 
   // ---- write for Go to read ----
   const jsUserId = 'ab'.repeat(16);
@@ -71,6 +92,7 @@ const result = await page.evaluate(async () => {
   const goPub = await E.verifyUser(v.bundle.userId, { enc: v.bundle.pub.enc, sig: v.bundle.pub.sig, selfSig: v.bundle.selfSig });
   const team = await E.Space.newTeam(v.teamId);
   const linkSecret = E.random(32);
+  await check('contacts-bound-to-owner', async () => { try { await E.openContacts(account, v.contacts); return false; } catch { return true; } });
   out.js = {
     bundle, recoveryCode, passphrase: 'browser passphrase 123', spaceId: v.jsSpaceId,
     spacePub: E.b64u(jsSpace.publicKey), spaceKeySig: await E.signSpaceKey(account, v.jsSpaceId, jsSpace.publicKey),
@@ -81,6 +103,7 @@ const result = await page.evaluate(async () => {
     teamSecret: E.b64u(team.secret), teamGrant: await team.grant(account, goPub), teamName: await team.encryptName('Team ✓'),
     linkSecret: E.b64u(linkSecret), linkKey: await E.linkKey(linkSecret, v.shareId, v.childId, 'Linked', jsChild),
     trash: await E.trashKey(account, E.unb64u(v.spacePub), v.childId, 'trashed.txt', 'file', jsChild),
+    contacts: await E.sealContacts(account, { v: 1, contacts: { ['d'.repeat(32)]: { fp: 'e'.repeat(40), name: 'From the browser \u2713', verifiedAt: 2 } } }),
   };
   return out;
 });

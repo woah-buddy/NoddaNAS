@@ -389,15 +389,21 @@ read at startup, so restart NoddaNAS after renewing them.
    include one in `NODDANAS_ADMIN_GROUPS` (see [Troubleshooting](#15-troubleshooting)).
 6. Create team folders (Team folders → **New team folder**) and, on each folder's **Members**
    page, map IdP groups under **Identity-provider groups**. Members of a mapped group get access
-   immediately. Their copy of the folder key is granted the next time a manager opens that
-   Members page.
+   immediately, but cannot open anything until a manager gives them the folder key: they appear
+   under **Waiting for the team key** on the Members page, with their key fingerprint, and the
+   manager approves each one (or everyone listed, after reviewing the list). Keys are never
+   granted automatically, because the member list comes from the server, and anyone who
+   controls the server could add a name to it.
 7. Send users a short notice. For example:
 
    > Our new file storage is end-to-end encrypted: not even the administrators can read your
    > files. When you first sign in you will choose an encryption passphrase and receive a
    > recovery code. **Keep the recovery code safe.** If you forget your passphrase and lose the
    > code, your files cannot be recovered by anyone. Under Settings, download your key backup
-   > and keep it with your own backups.
+   > and keep it with your own backups. Before sharing anything sensitive with a colleague,
+   > verify them once: choose **Verify…** next to their name and compare the fingerprint with
+   > them in person or on a call. From then on you will see ✔ next to them, and a warning if
+   > anyone imitates them.
 
 ---
 
@@ -855,7 +861,8 @@ mode `0400` and the right owner. Keep both if you replace a file by hand.
 | Sign-in fails with OIDC | Wrong redirect URI, issuer or secret | The redirect URI must be exactly `https://<host>/auth/callback`. |
 | Logged-in user has no "admin" | Their admin group is not in the token or assertion | Check the groups claim or attribute and `NODDANAS_ADMIN_GROUPS`, then sign out and in again. |
 | Cannot share with someone by email | Their email is not verified, or they have not set up encryption yet | See [§2](#2-prepare-your-identity-provider) on verified emails. The recipient must sign in once and create keys. |
-| A team member sees "you have not received this team folder's key yet" | No manager has opened the folder since they joined | A manager opens the folder's Members page. Keys are granted automatically. |
+| A team member sees "you have not been given this team folder's key yet" | No manager has approved them since they joined | A manager opens the folder's Members page and chooses **Give key** next to them under **Waiting for the team key**. |
+| Someone is shown with "⚠ Key changed" or "⚠ Possible impersonation" | The account's keys differ from the ones the user verified, or a different account imitates a verified person's name or email | Treat it as a security incident: published keys never change, so this means tampering or impersonation. Check the audit log and the `users` table, and see [§13](#13-incident-response). |
 | Large uploads fail or stall | The proxy limits body size, buffers, or times out | See [§5](#5-using-your-own-reverse-proxy-or-tls). |
 | Many users get "rate limited" | `NODDANAS_TRUSTED_PROXIES` is unset, so everyone shares the proxy's IP | Set it to the proxy's address or range. |
 | `/readyz` returns 503 | The database is unreachable, or the data directory is not writable | Check `docker compose ps`, the database logs, and the volume mount and its ownership (UID 65532). |

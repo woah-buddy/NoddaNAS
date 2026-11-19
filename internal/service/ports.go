@@ -123,6 +123,8 @@ type Store interface {
 	DeleteLinksByCreator(ctx context.Context, userID string) (int64, error)
 	DeleteAllLinks(ctx context.Context) (int64, error)
 	ListVersionBlobs(ctx context.Context, after string, limit int) ([]*domain.Version, error)
+	GetContacts(ctx context.Context, userID string) (string, int64, error)
+	SetContacts(ctx context.Context, userID, enc string, expectRev int64) (int64, error)
 	GetGrants(ctx context.Context, userID string, nodeIDs []string) ([]*domain.Share, error)
 	RecordLinkDownload(ctx context.Context, id string) error
 	RecordLinkFailure(ctx context.Context, id string, threshold int64, until time.Time) error

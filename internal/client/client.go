@@ -479,9 +479,15 @@ func (c *Client) GrantKey(ctx context.Context, spaceID, userID string) error {
 	return c.json(ctx, "PUT", "/api/v1/spaces/"+spaceID+"/members/"+userID, map[string]any{"grant": grant, "grantSig": sig}, nil)
 }
 
-// GrantPending grants the key to every member who has access but no key
-// yet (e.g. arrived through an IdP group). Returns how many were granted.
-func (c *Client) GrantPending(ctx context.Context, spaceID string) (int, error) {
+// GrantPending offers each member who has access but not yet the team key
+// to approve, with their verified key fingerprint, and gives the key only to
+// those approve accepts. There is deliberately no way to grant blindly: the
+// member list is the server's claim, and whoever controls the server could
+// add to it (docs/E2EE.md §3).
+func (c *Client) GrantPending(ctx context.Context, spaceID string, approve func(m Member, fingerprint string) bool) (int, error) {
+	if approve == nil {
+		return 0, errors.New("GrantPending needs an approval function")
+	}
 	members, err := c.Members(ctx, spaceID)
 	if err != nil {
 		return 0, err
@@ -489,6 +495,13 @@ func (c *Client) GrantPending(ctx context.Context, spaceID string) (int, error) 
 	n := 0
 	for _, m := range members {
 		if m.HasGrant || m.Keys == nil {
+			continue
+		}
+		pu, err := c.UserKeys(ctx, m.UserID) // checks the self-signature
+		if err != nil {
+			return n, err
+		}
+		if !approve(m, pu.Finger) {
 			continue
 		}
 		if err := c.GrantKey(ctx, spaceID, m.UserID); err != nil {

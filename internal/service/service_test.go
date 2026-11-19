@@ -959,3 +959,35 @@ func TestVerifyStorage(t *testing.T) {
 		t.Fatalf("hash check: %+v", full)
 	}
 }
+
+func TestContactsStorage(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.user("alice"), e.user("bob")
+	sealed, rev, err := e.svc.Contacts(e.ctx, a.p)
+	if err != nil || sealed != "" || rev != 0 {
+		t.Fatalf("fresh contacts: %q %d %v", sealed, rev, err)
+	}
+	list := &e2ee.Contacts{V: 1, Contacts: map[string]e2ee.Contact{
+		b.u.ID: {FP: b.acct.Fingerprint(), Name: "bob", VerifiedAt: 1}}}
+	s1 := must[string](t)(a.acct.SealContacts(list))
+	if rev, err = e.svc.SetContacts(e.ctx, a.p, s1, 0); err != nil || rev != 1 {
+		t.Fatalf("first save: %d %v", rev, err)
+	}
+	// A second device still holding revision 0 cannot silently overwrite it.
+	_, err = e.svc.SetContacts(e.ctx, a.p, s1, 0)
+	wantCode(t, err, domain.CodePrecondition)
+	_, err = e.svc.SetContacts(e.ctx, service.Principal{UserID: a.u.ID, ReadOnly: true}, s1, 1)
+	wantCode(t, err, domain.CodeForbidden)
+	for _, bad := range []string{"", "not base64!", e2ee.B64(make([]byte, 8)), e2ee.B64(make([]byte, e2ee.MaxContactsSize+1))} {
+		_, err = e.svc.SetContacts(e.ctx, a.p, bad, 1)
+		wantCode(t, err, domain.CodeInvalid)
+	}
+	// Each user only ever gets their own list, and only they can open it.
+	got, rev, _ := e.svc.Contacts(e.ctx, a.p)
+	if c, err := a.acct.OpenContacts(got); err != nil || rev != 1 || c.Contacts[b.u.ID].FP != b.acct.Fingerprint() {
+		t.Fatalf("read back: %v", err)
+	}
+	if other, _, _ := e.svc.Contacts(e.ctx, b.p); other != "" {
+		t.Fatal("bob received alice's contact list")
+	}
+}

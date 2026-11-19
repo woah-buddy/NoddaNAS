@@ -369,6 +369,68 @@ export async function openTrashKey(space, trasher, node) {
   return parseKeyAndName(await unseal(space.key, s, label('trash', node.id)));
 }
 
+// ---- verified contacts (spec §8) ----------------------------------------------------------------
+// The list of people a user has verified (by comparing fingerprints out of
+// band) is sealed under a key derived from their master key, bound to their
+// user ID. The server stores it but cannot read, forge or swap it.
+const CONTACT_ID = /^[0-9a-f]{32}$/, CONTACT_FP = /^[0-9a-f]{40}$/;
+function checkContacts(c) {
+  const ok = c && c.v === 1 && c.contacts && typeof c.contacts === 'object' && !Array.isArray(c.contacts)
+    && Object.entries(c.contacts).every(([id, x]) => CONTACT_ID.test(id) && x && CONTACT_FP.test(x.fp)
+      && typeof x.name === 'string' && x.name.length <= 200 && (x.email === undefined || (typeof x.email === 'string' && x.email.length <= 320))
+      && Number.isSafeInteger(x.verifiedAt) && x.verifiedAt > 0);
+  if (!ok) throw new E2EEError('malformed contact list');
+  return c;
+}
+export const emptyContacts = () => ({ v: 1, contacts: {} });
+export async function sealContacts(account, contacts) {
+  checkContacts(contacts);
+  return b64u(await gcmSeal(await hkdf(account.mk, null, 'mk/contacts'), utf8(JSON.stringify(contacts)), label('contacts', account.userId)));
+}
+export async function openContacts(account, sealed) {
+  const pt = await gcmOpen(await hkdf(account.mk, null, 'mk/contacts'), unb64u(sealed), label('contacts', account.userId));
+  return checkContacts(JSON.parse(td.decode(pt)));
+}
+
+// nameSkeleton reduces a display name or email to a form in which common
+// look-alikes collide: case, accents, spacing, punctuation and invisible
+// characters are dropped, and frequent homoglyphs (Cyrillic and Greek
+// letters that look Latin; 0 with o; 1, i and l together) are folded. Used
+// only to warn, never to grant anything.
+const LOOKALIKE = { // escapes, so a reviewer can see which characters these are
+  '\u0430': 'a', '\u0435': 'e', '\u043e': 'o', '\u0440': 'p', '\u0441': 'c', '\u0443': 'y',
+  '\u0445': 'x', '\u0456': 'l', '\u0458': 'j', '\u0455': 's', '\u0501': 'd', '\u04bb': 'h',
+  '\u04cf': 'l', '\u051b': 'q', '\u051d': 'w', '\u03bf': 'o', '\u03b1': 'a', '\u03c1': 'p',
+  '\u03bd': 'v', '\u03c4': 't', '\u03ba': 'k', '\u03b9': 'l', '\u03f2': 'c', '\u03b5': 'e',
+  '\u03bc': 'm', '\u03b7': 'n', '\u0131': 'l', '\u2113': 'l', '0': 'o', '1': 'l', 'i': 'l' }; // i, l and 1 are one class
+export function nameSkeleton(s) {
+  return [...String(s || '').normalize('NFKD').toLowerCase()]
+    .filter((ch) => !/\p{M}/u.test(ch))
+    .map((ch) => LOOKALIKE[ch] || ch)
+    .filter((ch) => /[\p{L}\p{N}@]/u.test(ch))
+    .join('');
+}
+
+// classifyContact says how far to trust a user (spec §8):
+//   verified   their current keys match the fingerprint you verified;
+//   changed    same account, different keys: impossible honestly (public
+//              keys never change), so someone is tampering;
+//   lookalike  a different account whose name or email resembles someone
+//              you verified: likely impersonation;
+//   unverified none of the above.
+export function classifyContact(contacts, user) {
+  const list = contacts?.contacts || {};
+  if (Object.hasOwn(list, user.id)) {
+    const c = list[user.id];
+    return { level: c.fp === user.fp ? 'verified' : 'changed', contact: c };
+  }
+  const n = nameSkeleton(user.name), e = nameSkeleton(user.email);
+  for (const [id, c] of Object.entries(list)) {
+    if (id !== user.id && ((n && n === nameSkeleton(c.name)) || (e && e === nameSkeleton(c.email)))) return { level: 'lookalike', contact: c };
+  }
+  return { level: 'unverified', contact: null };
+}
+
 // ---- file containers (spec §5) --------------------------------------------------------------------
 const chunkCount = (size) => (size === 0 ? 1 : Math.ceil(size / CHUNK));
 function chunkNonce(i, last) {

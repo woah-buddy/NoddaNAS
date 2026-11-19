@@ -11,7 +11,7 @@
 import * as E from './e2ee.js';
 
 const main = document.getElementById('main');
-const S = { me: null, acct: null, bundle: null, keys: new Map(), spaces: new Map(), users: new Map(), pubs: new Map() };
+const S = { me: null, acct: null, bundle: null, contacts: null, keys: new Map(), spaces: new Map(), users: new Map(), pubs: new Map() };
 
 // ---- DOM helpers --------------------------------------------------------------------------
 function h(tag, attrs = {}, ...children) {
@@ -160,7 +160,7 @@ async function openSpace(sp) {
   let space;
   if (sp.kind === 'personal') space = await S.acct.personalSpace(sp.id);
   else if (sp.myGrant) space = await E.Space.openGrant(S.acct, await userKeys(sp.myGrant.grantedBy), sp.id, sp.myGrant.grant, sp.myGrant.grantSig);
-  else throw new Error('You have not received this team folder’s key yet. A manager needs to open it once.');
+  else throw new Error('You have not been given this team folder’s key yet. Ask a manager to approve you on its Members page.');
   if (E.b64u(space.publicKey) !== sp.publicKey) throw new Error('Space key mismatch');
   S.keys.set(sp.rootId, await space.unwrapRoot(sp.rootId, sp.rootKey));
   const name = sp.kind === 'team' ? await space.decryptName(sp.nameEnc) : 'Home';
@@ -200,6 +200,98 @@ async function nodeKey(id) {
   return S.keys.get(id);
 }
 const signerFor = (id) => userKeys(id);
+
+// ---- verified people (E2EE.md §8) ----------------------------------------------------------------
+// Names and emails come from the server, which could fake them. What cannot
+// be faked is a key fingerprint compared in person. The list of people this
+// user has verified is sealed under their own key and stored on the server,
+// which can withhold it but cannot read or forge it.
+async function loadContacts() {
+  let list = E.emptyContacts(), rev = 0, problem = '';
+  try {
+    const r = await api('GET', '/api/v1/contacts');
+    rev = r.revision;
+    if (r.contacts) {
+      try { list = await E.openContacts(S.acct, r.contacts); } catch {
+        problem = 'Your list of verified people failed its integrity check and is being ignored. Verify people again, and tell your administrator.';
+      }
+    }
+  } catch { problem = 'Your list of verified people could not be loaded.'; }
+  S.contacts = { rev, list, problem };
+  if (problem) toast(problem);
+}
+// saveContacts applies change() and saves. If another device saved first,
+// the change is re-applied on top of that version instead of overwriting it.
+async function saveContacts(change) {
+  for (let attempt = 0; ; attempt++) {
+    const next = structuredClone(S.contacts.list);
+    change(next.contacts);
+    try {
+      const { revision } = await api('PUT', '/api/v1/contacts', { contacts: await E.sealContacts(S.acct, next), revision: S.contacts.rev });
+      S.contacts = { rev: revision, list: next, problem: '' };
+      return;
+    } catch (e) {
+      if (e.status !== 412 || attempt > 0) throw e;
+      await loadContacts();
+    }
+  }
+}
+const nameOf = (pu) => pu.displayName || pu.email || 'this person';
+function trust(pu) {
+  return E.classifyContact(S.contacts?.list, { id: pu.id, fp: pu.fp, name: pu.displayName, email: pu.email });
+}
+function trustText(pu, t = trust(pu)) {
+  switch (t.level) {
+    case 'verified': return `You verified ${t.contact.name || nameOf(pu)} on ${new Date(t.contact.verifiedAt).toLocaleDateString()}.`;
+    case 'changed': return 'This account’s keys are not the ones you verified. Keys never change, so someone is tampering with what the server shows you. Do not trust this account.';
+    case 'lookalike': return `This is NOT ${t.contact.name || t.contact.email}, whom you verified: it is a different account with a similar name or email. It may be impersonating them.`;
+    default: return 'You have not verified this person. Their name and email come from the server and could be faked; comparing fingerprints proves who they are.';
+  }
+}
+const TRUST_LABEL = { verified: '✔ Verified', unverified: 'Not verified', changed: '⚠ Key changed', lookalike: '⚠ Possible impersonation' };
+// trustBadge shows a person's status, with a Verify button when useful and,
+// for warnings, the explanation in full (not only as a tooltip).
+function trustBadge(pu, onChange) {
+  if (!pu || pu.id === S.me.user.id) return null;
+  const t = trust(pu);
+  const badge = h('span', { class: `trust trust-${t.level}`, title: trustText(pu, t) }, TRUST_LABEL[t.level]);
+  const btn = h('button', { class: 'link', onclick: async () => { if (await verifyDialog(pu)) (onChange || route)(); } }, t.level === 'verified' ? 'Details' : 'Verify…');
+  const warn = t.level === 'changed' || t.level === 'lookalike';
+  return h('span', { class: 'trust-wrap' }, badge, btn, warn ? h('div', { class: 'error' }, trustText(pu, t)) : null);
+}
+async function verifyDialog(pu) {
+  const mine = await S.acct.fingerprint();
+  const t = trust(pu);
+  return new Promise((resolve) => {
+    const finish = (v) => { resolve(v); d.close(); };
+    const save = async (change, msg) => {
+      try { await saveContacts(change); toast(msg); finish(true); } catch (e) { toast(e.message); }
+    };
+    const d = dialog(`Verify ${nameOf(pu)}`,
+      h('p', {}, 'Compare fingerprints in person, or on a phone or video call where you recognise them. Not by chat or email: whoever controls the server could fake those too.'),
+      h('p', { class: 'note' }, `${nameOf(pu)}${pu.email ? ` (${pu.email})` : ''} should see this under Settings → Encryption:`),
+      h('div', { class: 'secret', 'data-fp': 'theirs' }, E.formatFingerprint(pu.fp)),
+      h('p', { class: 'note' }, 'Yours, for them to check:'),
+      h('div', { class: 'secret' }, E.formatFingerprint(mine)),
+      h('p', { class: t.level === 'changed' || t.level === 'lookalike' ? 'error' : 'note' }, trustText(pu, t)),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', onclick: () => finish(false) }, 'Cancel'),
+        t.level === 'verified' && h('button', { type: 'button', class: 'danger', onclick: () => save((c) => { delete c[pu.id]; }, 'Verification removed') }, 'Remove verification'),
+        t.level !== 'verified' && h('button', { type: 'button', class: 'primary', onclick: () => save((c) => {
+          c[pu.id] = { fp: pu.fp, name: (pu.displayName || '').slice(0, 200), ...(pu.email ? { email: pu.email.slice(0, 320) } : {}), verifiedAt: Date.now() };
+        }, `${nameOf(pu)} verified`) }, 'The fingerprints match')));
+    d.addEventListener('cancel', () => resolve(false));
+  });
+}
+// confirmList is confirmBox with a list of items (e.g. people) shown in full.
+function confirmList(title, intro, items, ok) {
+  return new Promise((resolve) => {
+    const d = dialog(title, h('p', {}, intro), h('ul', { class: 'confirm-list' }, items.map((x) => h('li', {}, x))),
+      h('form', { method: 'dialog', class: 'row' },
+        h('button', { onclick: () => resolve(false) }, 'Cancel'), h('button', { class: 'primary', onclick: () => resolve(true) }, ok)));
+    d.addEventListener('cancel', () => resolve(false));
+  });
+}
 
 // ---- branding and appearance ------------------------------------------------------------------------------
 // Colors come from /theme.css, which the server generates from validated
@@ -303,6 +395,7 @@ async function route() {
     }
     if (!S.me.user.keys) return setupKeys();
     if (!S.acct) return unlockScreen();
+    if (!S.contacts) await loadContacts();
     document.getElementById('nav').hidden = false;
     renderQuota();
     for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', path === a.getAttribute('href') || (a.getAttribute('href') !== '/' && path.startsWith(a.getAttribute('href'))));
@@ -651,7 +744,10 @@ async function shareDialog(c) {
       try {
         const u = await api('GET', `/api/v1/users/lookup?email=${encodeURIComponent(email.value)}`);
         const recipient = await E.verifyUser(u.id, u.keys);
-        if (!(await confirmBox('Confirm recipient', `Share with ${u.displayName || u.email}? Their key fingerprint is ${E.formatFingerprint(recipient.fp)}. Compare it with theirs (Settings) if this matters.`, 'Share'))) return;
+        recipient.displayName = u.displayName; recipient.email = u.email;
+        const t = trust(recipient);
+        if (t.level === 'changed') { toast(`Not shared. ${trustText(recipient, t)}`); return; }
+        if (!(await confirmBox('Confirm recipient', `Share with ${nameOf(recipient)}${u.email ? ` (${u.email})` : ''}? Key fingerprint: ${E.formatFingerprint(recipient.fp)}. ${trustText(recipient, t)}`, t.level === 'lookalike' ? 'Share anyway' : 'Share'))) return;
         const shareId = E.newId();
         const sealed = await E.shareNode(S.acct, recipient, shareId, c.id, perm.value, c.name, await nodeKey(c.id));
         await api('POST', `/api/v1/nodes/${c.id}/shares`, { type: 'user', shareId, recipientId: recipient.id, permission: perm.value, ...sealed });
@@ -695,12 +791,13 @@ async function sharedWithMeView() {
       S.keys.set(it.share.nodeId, sh.nk);
       name = sh.name;
     } catch (e) { name = '⚠ unverifiable share'; err = e.message; }
-    const sharer = (await userKeys(it.share.createdBy).catch(() => ({})))?.displayName || '';
+    const sharerKeys = await userKeys(it.share.createdBy).catch(() => null);
+    const sharer = sharerKeys ? nameOf(sharerKeys) : 'unknown';
     rows.push(h('tr', { title: err },
       h('td', {}, h('div', { class: 'name' }, h('span', { class: 'icon' }, it.node.kind === 'folder' ? '📁' : '📄'),
         err ? name : it.node.kind === 'folder' ? h('a', { href: `/f/${it.node.id}`, 'data-nav': '' }, name)
           : h('a', { href: '#', onclick: (e) => { e.preventDefault(); downloadFile({ ...it.node, name }); } }, name))),
-      h('td', {}, `from ${sharer}`),
+      h('td', {}, `from ${sharer} `, trustBadge(sharerKeys)),
       h('td', {}, it.share.permission === 'write' ? 'Can edit' : 'Can view'),
       h('td', { class: 'actions' }, h('button', { class: 'link danger', onclick: async () => {
         if (await confirmBox('Leave share', `Remove “${name}” from your shared items?`, 'Leave')) await act(() => api('DELETE', `/api/v1/shares/${it.share.id}`), 'Removed');
@@ -757,8 +854,9 @@ async function sharedByMeView() {
       h('td', { class: 'actions' }, revoke(x, 'Revoke link', `The public link to “${x.name}” stops working immediately for everyone who has it.`)));
   });
   const peopleRows = await Promise.all(people.map(async (x) => {
-    const who = (await userKeys(x.share.recipientId).catch(() => null))?.displayName || 'Unknown user';
-    return h('tr', {}, h('td', {}, label(x)), h('td', {}, who),
+    const pu = await userKeys(x.share.recipientId).catch(() => null);
+    const who = pu ? nameOf(pu) : 'Unknown user';
+    return h('tr', {}, h('td', {}, label(x)), h('td', {}, who, ' ', trustBadge(pu)),
       h('td', {}, x.share.permission === 'write' ? 'Can edit' : 'Can view'),
       h('td', { class: 'num' }, fmtDate(x.share.createdAt)),
       h('td', { class: 'actions' }, revoke(x, 'Stop sharing', `${who} loses access to “${x.name}”.`)));
@@ -825,37 +923,65 @@ async function teamView(spaceId) {
   let opened = true;
   try { await openSpace(sp); } catch { opened = false; }
   const manager = sp.role === 'manage';
-  let granted = 0;
-  if (manager && opened) {
-    // Managers' clients hand the team key to members who have access but no key yet.
-    const { members } = await api('GET', `/api/v1/spaces/${spaceId}/members`);
-    for (const m of members.filter((x) => !x.hasGrant && x.keys)) {
-      try {
-        const g = await S.spaces.get(spaceId).space.grant(S.acct, await E.verifyUser(m.userId, m.keys));
-        await api('PUT', `/api/v1/spaces/${spaceId}/members/${m.userId}`, g);
-        granted++;
-      } catch (e) { toast(`${m.displayName}: ${e.message}`); }
-    }
-    if (granted) toast(`Gave the team key to ${granted} new member(s).`);
-  }
   const { members } = await api('GET', `/api/v1/spaces/${spaceId}/members`);
   const groups = (await api('GET', `/api/v1/spaces/${spaceId}/groups`).catch(() => ({ groups: [] }))).groups;
+  // Member keys come from the server's directory: check every self-signature.
+  const people = await Promise.all(members.map(async (m) => {
+    let pu = null;
+    if (m.keys) {
+      try { pu = await E.verifyUser(m.userId, m.keys); pu.displayName = m.displayName; pu.email = m.email; } catch { pu = null; }
+    }
+    return { m, pu };
+  }));
+  // Nobody gets the team key automatically. The member list is the
+  // server's claim, and whoever controls the server could add to it, so a
+  // manager gives each key deliberately (E2EE.md §3, "Granting the key").
+  const pending = manager && opened ? people.filter(({ m, pu }) => !m.hasGrant && pu && m.userId !== S.me.user.id) : [];
+  const how = (m) => [m.directRole ? `added directly (${m.directRole})` : '', m.groupRoles?.length ? `via an identity-provider group (${m.groupRoles.join(', ')})` : '']
+    .filter(Boolean).join('; ');
   const roleSel = (value, onchange) => {
     const s = h('select', { onchange: () => onchange(s.value) }, ...['read', 'write', 'manage'].map((r) => h('option', { value: r }, r)));
     s.value = value;
     return s;
   };
-  const rows = members.map((m) => h('tr', {},
-    h('td', {}, m.displayName || m.email || m.userId.slice(0, 8), m.userId === S.me.user.id ? ' (you)' : ''),
+  const removeBtn = (m) => (manager || m.userId === S.me.user.id) && m.directRole && h('button', { class: 'link danger', onclick: async () => {
+    if (await confirmBox(m.userId === S.me.user.id ? 'Leave team folder' : 'Remove member', 'Their direct membership and key grant will be removed.', 'Remove')) {
+      await act(() => api('DELETE', `/api/v1/spaces/${spaceId}/members/${m.userId}`), 'Removed');
+      if (m.userId === S.me.user.id) navigate('/teams');
+    }
+  } }, m.userId === S.me.user.id ? 'Leave' : 'Remove');
+  const giveKey = async ({ m, pu }) => {
+    const t = trust(pu);
+    if (t.level === 'changed') return toast(`Key not given. ${trustText(pu, t)}`);
+    const can = m.role === 'read' ? 'read' : 'read and change';
+    const ok = await confirmBox(`Give ${nameOf(pu)} the key to “${spaceName(sp)}”?`,
+      `${nameOf(pu)}${pu.email ? ` (${pu.email})` : ''} will be able to ${can} everything in this team folder, including everything already in it. ` +
+      `Key fingerprint: ${E.formatFingerprint(pu.fp)}. ${trustText(pu, t)} If you do not expect this person here, choose Cancel and remove them, or ask an administrator.`,
+      t.level === 'lookalike' ? 'Give key anyway' : 'Give key');
+    if (!ok) return;
+    await act(async () => api('PUT', `/api/v1/spaces/${spaceId}/members/${m.userId}`, await S.spaces.get(spaceId).space.grant(S.acct, pu)), `${nameOf(pu)} can now open the folder`);
+  };
+  const giveAll = async () => {
+    const eligible = pending.filter(({ pu }) => !['changed', 'lookalike'].includes(trust(pu).level));
+    const skipped = pending.length - eligible.length;
+    const ok = await confirmList(`Give the key to ${eligible.length} people?`,
+      `Each will be able to open everything in “${spaceName(sp)}”. Check that you expect every one of them.` +
+      (skipped ? ` ${skipped} flagged ${skipped === 1 ? 'person is' : 'people are'} left out; review them one by one.` : ''),
+      eligible.map(({ m, pu }) => `${nameOf(pu)}${pu.email ? ` (${pu.email})` : ''}, ${how(m) || m.role}, key ${E.formatFingerprint(pu.fp).slice(0, 19)}…, ${TRUST_LABEL[trust(pu).level]}`),
+      'Give keys');
+    if (!ok) return;
+    await act(async () => {
+      for (const { m, pu } of eligible) await api('PUT', `/api/v1/spaces/${spaceId}/members/${m.userId}`, await S.spaces.get(spaceId).space.grant(S.acct, pu));
+    }, `Gave the key to ${eligible.length} people`);
+  };
+
+  const rows = people.map(({ m, pu }) => h('tr', {},
+    h('td', {}, m.displayName || m.email || m.userId.slice(0, 8), m.userId === S.me.user.id ? ' (you)' : '', m.email && m.displayName ? h('div', { class: 'note' }, m.email) : null),
     h('td', {}, manager && m.directRole ? roleSel(m.directRole, (r) => act(() => api('PUT', `/api/v1/spaces/${spaceId}/members/${m.userId}`, { role: r }), 'Role changed')) : m.role,
       m.groupRoles?.length ? h('span', { class: 'note' }, ` via group (${m.groupRoles.join(', ')})`) : ''),
-    h('td', {}, m.hasGrant ? '🔑 has key' : m.keys ? '⏳ key pending' : '⚠ no encryption keys yet'),
-    h('td', { class: 'actions' }, (manager || m.userId === S.me.user.id) && m.directRole && h('button', { class: 'link danger', onclick: async () => {
-      if (await confirmBox(m.userId === S.me.user.id ? 'Leave team folder' : 'Remove member', 'Their direct membership and key grant will be removed.', 'Remove')) {
-        await act(() => api('DELETE', `/api/v1/spaces/${spaceId}/members/${m.userId}`), 'Removed');
-        if (m.userId === S.me.user.id) navigate('/teams');
-      }
-    } }, m.userId === S.me.user.id ? 'Leave' : 'Remove'))));
+    h('td', {}, m.hasGrant ? '🔑 has key' : pu ? '⏳ waiting for a manager' : '⚠ no encryption keys yet'),
+    h('td', {}, trustBadge(pu)),
+    h('td', { class: 'actions' }, removeBtn(m))));
   const email = h('input', { type: 'email', placeholder: 'person@example.com', required: true });
   const role = roleSel('write', () => {});
   const group = h('input', { placeholder: 'IdP group name', required: true });
@@ -873,20 +999,39 @@ async function teamView(spaceId) {
           navigate('/teams');
         }
       } }, 'Delete')),
-    !opened && h('p', { class: 'note' }, 'You have access, but a manager has not given you the team key yet. It happens automatically the next time a manager opens this page.'),
+    !opened && h('p', { class: 'note' }, 'You have access, but no manager has given you the team key yet. Ask a manager to approve you on this page.'),
+    pending.length ? [
+      h('div', { class: 'toolbar' }, h('h2', {}, `Waiting for the team key (${pending.length})`),
+        pending.length > 1 && h('button', { onclick: giveAll }, 'Give key to everyone listed…')),
+      h('p', { class: 'note' }, 'The server says these people belong here, but they cannot open anything until a manager gives them the key. ' +
+        'Anyone who controls the server could add a name to this list, so give the key only to people you expect.'),
+      h('table', { class: 'pending' }, h('tbody', {}, pending.map((p) => h('tr', {},
+        h('td', {}, nameOf(p.pu), p.pu.email && p.pu.displayName ? h('div', { class: 'note' }, p.pu.email) : null),
+        h('td', { class: 'note' }, how(p.m) || p.m.role),
+        h('td', {}, h('code', { title: E.formatFingerprint(p.pu.fp) }, E.formatFingerprint(p.pu.fp).slice(0, 19) + '…'), ' ', trustBadge(p.pu)),
+        h('td', { class: 'actions' }, h('button', { class: 'primary', onclick: () => giveKey(p) }, 'Give key'), ' ', removeBtn(p.m)))))),
+    ] : null,
     h('h2', {}, 'Members'),
     h('table', {}, h('tbody', {}, rows)),
     manager && opened && h('form', { class: 'toolbar', onsubmit: async (e) => {
       e.preventDefault();
-      await act(async () => {
+      try {
         const u = await api('GET', `/api/v1/users/lookup?email=${encodeURIComponent(email.value)}`);
         const pu = await E.verifyUser(u.id, u.keys);
-        await api('PUT', `/api/v1/spaces/${spaceId}/members/${u.id}`, { role: role.value });
-        await api('PUT', `/api/v1/spaces/${spaceId}/members/${u.id}`, await S.spaces.get(spaceId).space.grant(S.acct, pu));
-      }, 'Member added');
+        pu.displayName = u.displayName; pu.email = u.email;
+        const t = trust(pu);
+        if (t.level === 'changed') return toast(`Not added. ${trustText(pu, t)}`);
+        if (!(await confirmBox(`Add ${nameOf(pu)} as ${role.value}?`,
+          `${nameOf(pu)}${u.email ? ` (${u.email})` : ''} will get the key and be able to open everything in this team folder. Key fingerprint: ${E.formatFingerprint(pu.fp)}. ${trustText(pu, t)}`,
+          t.level === 'lookalike' ? 'Add anyway' : 'Add and give key'))) return;
+        await act(async () => {
+          await api('PUT', `/api/v1/spaces/${spaceId}/members/${u.id}`, { role: role.value });
+          await api('PUT', `/api/v1/spaces/${spaceId}/members/${u.id}`, await S.spaces.get(spaceId).space.grant(S.acct, pu));
+        }, 'Member added');
+      } catch (err) { toast(err.message); }
     } }, email, role, h('button', { class: 'primary' }, 'Add member')),
     h('h2', {}, 'Identity-provider groups'),
-    h('p', { class: 'note' }, 'Everyone in a mapped group gets the role below. Only administrators can change mappings.'),
+    h('p', { class: 'note' }, 'Everyone in a mapped group gets the role below. Only administrators can change mappings. New group members still need a manager to give them the key.'),
     h('table', {}, h('tbody', {}, groups.length ? groups.map((g) => h('tr', {}, h('td', {}, g.group), h('td', {}, g.role),
       h('td', { class: 'actions' }, S.me.user.admin && h('button', { class: 'link danger', onclick: () => act(() => api('DELETE', `/api/v1/spaces/${spaceId}/groups/${encodeURIComponent(g.group)}`), 'Mapping removed') }, 'Remove'))))
       : h('tr', {}, h('td', { class: 'note' }, 'No groups mapped.')))),
@@ -959,8 +1104,21 @@ async function settingsView() {
         if (np) { try { await changePassphrase(np); } catch (e) { toast(e.message); } }
       } }, 'Change passphrase'),
       h('button', { onclick: exportKeys }, 'Download key backup'),
-      h('button', { onclick: () => { S.acct = null; S.keys.clear(); S.spaces.clear(); route(); } }, 'Lock now')),
+      h('button', { onclick: () => { S.acct = null; S.contacts = null; S.keys.clear(); S.spaces.clear(); route(); } }, 'Lock now')),
     h('p', { class: 'note' }, 'The key backup is encrypted: it opens only with your passphrase or recovery code. With it, any backed-up file (.ndne) or WebDAV mirror can be decrypted offline using the noddanas-cli tool.'),
+    h('h2', {}, 'Verified people'),
+    h('p', { class: 'note' }, 'People whose key fingerprints you compared with them directly. NoddaNAS marks them ✔ wherever they appear and warns you about other accounts that imitate them. This list is encrypted with your own key: the server cannot read or change it.'),
+    S.contacts?.problem ? h('p', { class: 'error' }, S.contacts.problem) : null,
+    h('table', {}, h('tbody', {}, Object.keys(S.contacts?.list.contacts || {}).length
+      ? Object.entries(S.contacts.list.contacts).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([id, c]) => h('tr', {},
+        h('td', {}, c.name || c.email || id.slice(0, 8), c.email && c.name ? h('div', { class: 'note' }, c.email) : null),
+        h('td', {}, h('code', {}, E.formatFingerprint(c.fp))),
+        h('td', { class: 'num' }, `verified ${new Date(c.verifiedAt).toLocaleDateString()}`),
+        h('td', { class: 'actions' }, h('button', { class: 'link danger', onclick: async () => {
+          if (!(await confirmBox('Remove verification', `Stop treating ${c.name || c.email || 'this person'} as verified?`, 'Remove'))) return;
+          try { await saveContacts((list) => { delete list[id]; }); toast('Verification removed'); settingsView(); } catch (e) { toast(e.message); }
+        } }, 'Remove'))))
+      : h('tr', {}, h('td', { class: 'note' }, 'You have not verified anyone yet. Use “Verify…” next to a person’s name.')))),
     h('h2', {}, 'App passwords'),
     h('p', { class: 'note' }, 'For the noddanas-cli tool and for backing up encrypted files over WebDAV (', `${location.origin}/dav/`, '). WebDAV is read-only and serves ciphertext only.'),
     note && h('p', { class: 'error' }, note),
