@@ -1,24 +1,24 @@
-// Command noddanas-cli is the NoddaNAS end-to-end encrypted command-line
+// Command frontdir-cli is the FrontDir end-to-end encrypted command-line
 // client. Everything is encrypted and decrypted locally; the server only
 // ever sees ciphertext.
 //
-// Online (needs NODDANAS_URL and an app password in NODDANAS_TOKEN or
-// NODDANAS_TOKEN_FILE; your encryption passphrase is prompted for, or read
-// from NODDANAS_PASSPHRASE_FILE):
+// Online (needs FRONTDIR_URL and an app password in FRONTDIR_TOKEN or
+// FRONTDIR_TOKEN_FILE; your encryption passphrase is prompted for, or read
+// from FRONTDIR_PASSPHRASE_FILE):
 //
-//	noddanas-cli ls [path]                  list a folder (decrypted names)
-//	noddanas-cli get <path> [local-file]    download and decrypt a file
-//	noddanas-cli put <local-file> [folder]  encrypt and upload (new version if it exists)
-//	noddanas-cli mkdir <path>               create a folder
-//	noddanas-cli teams                      list team folders
-//	noddanas-cli backup <dir>               save your personal space, still encrypted
-//	noddanas-cli restore <file.ndne> [folder]  restore one backed-up file
-//	noddanas-cli export-keys <file>         save your (encrypted) key backup
+//	frontdir-cli ls [path]                  list a folder (decrypted names)
+//	frontdir-cli get <path> [local-file]    download and decrypt a file
+//	frontdir-cli put <local-file> [folder]  encrypt and upload (new version if it exists)
+//	frontdir-cli mkdir <path>               create a folder
+//	frontdir-cli teams                      list team folders
+//	frontdir-cli backup <dir>               save your personal space, still encrypted
+//	frontdir-cli restore <file.fdenc> [folder]  restore one backed-up file
+//	frontdir-cli export-keys <file>         save your (encrypted) key backup
 //
 // Offline (no server, no network):
 //
-//	noddanas-cli decrypt <file.ndne> <out> --keys <keys.json> [--recovery]
-//	noddanas-cli decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
+//	frontdir-cli decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
+//	frontdir-cli decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
 //
 // Paths are relative to your personal space, e.g. "Documents/taxes.pdf".
 package main
@@ -39,7 +39,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/woah-buddy/NoddaNAS/internal/client"
+	"github.com/woah-buddy/FrontDir/internal/client"
 )
 
 func main() {
@@ -49,6 +49,14 @@ func main() {
 	ctx := context.Background()
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
+	// Variables from before the rename from NoddaNAS are no longer read;
+	// say so rather than failing later with a puzzling "no server URL".
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "NODDANAS_") {
+			fmt.Fprintf(os.Stderr, "frontdir-cli: %s is no longer read: rename it to FRONTDIR_%s\n", name, strings.TrimPrefix(name, "NODDANAS_"))
+			os.Exit(2)
+		}
+	}
 	switch cmd {
 	case "decrypt", "decrypt-tree":
 		err = offline(cmd, args)
@@ -58,20 +66,20 @@ func main() {
 		usage()
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "noddanas-cli:", err)
+		fmt.Fprintln(os.Stderr, "frontdir-cli:", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: noddanas-cli <command> [args]
+	fmt.Fprintln(os.Stderr, `usage: frontdir-cli <command> [args]
 
 online:   ls [path] | get <path> [local] | put <local> [folder] | mkdir <path> | teams
-          backup <dir> | restore <file.ndne> [folder] | export-keys <file>
-offline:  decrypt <file.ndne> <out> --keys <keys.json> [--recovery]
+          backup <dir> | restore <file.fdenc> [folder] | export-keys <file>
+offline:  decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
           decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
 
-Online commands need NODDANAS_URL and an app password (NODDANAS_TOKEN or NODDANAS_TOKEN_FILE).`)
+Online commands need FRONTDIR_URL and an app password (FRONTDIR_TOKEN or FRONTDIR_TOKEN_FILE).`)
 	os.Exit(2)
 }
 
@@ -92,12 +100,12 @@ func secret(fileEnv, prompt string) (string, error) {
 }
 
 func online(ctx context.Context, cmd string, args []string) error {
-	base := os.Getenv("NODDANAS_URL")
+	base := os.Getenv("FRONTDIR_URL")
 	if base == "" {
-		return errors.New("set NODDANAS_URL (e.g. https://files.example.com)")
+		return errors.New("set FRONTDIR_URL (e.g. https://files.example.com)")
 	}
-	token := os.Getenv("NODDANAS_TOKEN")
-	if f := os.Getenv("NODDANAS_TOKEN_FILE"); f != "" {
+	token := os.Getenv("FRONTDIR_TOKEN")
+	if f := os.Getenv("FRONTDIR_TOKEN_FILE"); f != "" {
 		b, err := os.ReadFile(f) // #nosec G304 G703 -- the user's own CLI configuration
 		if err != nil {
 			return err
@@ -105,10 +113,10 @@ func online(ctx context.Context, cmd string, args []string) error {
 		token = strings.TrimSpace(string(b))
 	}
 	if token == "" {
-		return errors.New("set NODDANAS_TOKEN or NODDANAS_TOKEN_FILE to an app password (create one under Settings)")
+		return errors.New("set FRONTDIR_TOKEN or FRONTDIR_TOKEN_FILE to an app password (create one under Settings)")
 	}
 	c := client.New(base, &http.Client{}, token)
-	pass, err := secret("NODDANAS_PASSPHRASE_FILE", "Encryption passphrase: ")
+	pass, err := secret("FRONTDIR_PASSPHRASE_FILE", "Encryption passphrase: ")
 	if err != nil {
 		return err
 	}
@@ -213,7 +221,7 @@ func online(ctx context.Context, cmd string, args []string) error {
 			return err
 		}
 		raw, _ := json.MarshalIndent(kb, "", "  ")
-		return writeAtomically(arg(0, "noddanas-keys.json"), func(w io.Writer) error { _, err := w.Write(raw); return err })
+		return writeAtomically(arg(0, "frontdir-keys.json"), func(w io.Writer) error { _, err := w.Write(raw); return err })
 	}
 	return nil
 }
@@ -233,9 +241,9 @@ func backup(ctx context.Context, c *client.Client, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	rec, _ := json.MarshalIndent(map[string]any{"format": "noddanas-space/v1", "id": sp.ID, "kind": sp.Kind, "rootId": sp.RootID,
+	rec, _ := json.MarshalIndent(map[string]any{"format": "frontdir-space/v1", "id": sp.ID, "kind": sp.Kind, "rootId": sp.RootID,
 		"nameEnc": sp.NameEnc, "rootKey": sp.RootKey}, "", "  ")
-	if err := os.WriteFile(filepath.Join(dir, "_noddanas-space.json"), rec, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "_frontdir-space.json"), rec, 0o600); err != nil {
 		return err
 	}
 	files := 0
@@ -258,7 +266,7 @@ func backup(ctx context.Context, c *client.Client, dir string) error {
 			Format   string  `json:"format"`
 			ID       string  `json:"id"`
 			Children []entry `json:"children"`
-		}{Format: "noddanas-folder/v1", ID: id}
+		}{Format: "frontdir-folder/v1", ID: id}
 		for _, k := range kids {
 			fr.Children = append(fr.Children, entry{k.ID, k.Kind, k.NameEnc, k.WrappedKey})
 			if k.Kind == "folder" {
@@ -267,7 +275,7 @@ func backup(ctx context.Context, c *client.Client, dir string) error {
 				}
 				continue
 			}
-			if err := writeAtomically(filepath.Join(local, k.ID+".ndne"), func(w io.Writer) error {
+			if err := writeAtomically(filepath.Join(local, k.ID+".fdenc"), func(w io.Writer) error {
 				return c.DownloadContainer(ctx, k.ID, w)
 			}); err != nil {
 				return err
@@ -275,7 +283,7 @@ func backup(ctx context.Context, c *client.Client, dir string) error {
 			files++
 		}
 		raw, _ := json.MarshalIndent(fr, "", "  ")
-		return os.WriteFile(filepath.Join(local, "_noddanas-folder.json"), raw, 0o600)
+		return os.WriteFile(filepath.Join(local, "_frontdir-folder.json"), raw, 0o600)
 	}
 	if err := walk(sp.RootID, dir); err != nil {
 		return err
@@ -310,7 +318,7 @@ func offline(cmd string, args []string) error {
 	if *recovery {
 		prompt = "Recovery code: "
 	}
-	pass, err := secret("NODDANAS_PASSPHRASE_FILE", prompt)
+	pass, err := secret("FRONTDIR_PASSPHRASE_FILE", prompt)
 	if err != nil {
 		return err
 	}
@@ -346,7 +354,7 @@ func offline(cmd string, args []string) error {
 // writeAtomically writes to a temporary file and renames it into place only
 // on success, so a failed decryption never leaves partial plaintext behind.
 func writeAtomically(dst string, fn func(io.Writer) error) error {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".noddanas-*")
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".frontdir-*")
 	if err != nil {
 		return err
 	}

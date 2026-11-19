@@ -22,9 +22,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // Store is a filesystem-backed blob store.

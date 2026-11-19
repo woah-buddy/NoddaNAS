@@ -15,22 +15,22 @@ import (
 
 	"golang.org/x/net/webdav"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 // WebDAV exposes the caller's spaces as a read-only tree of encrypted
 // containers, for backup tools (rclone, restic, Duplicati, plain mounts).
 // With end-to-end encryption the server cannot offer plaintext WebDAV;
-// the NoddaNAS CLI decrypts locally instead.
+// the FrontDir CLI decrypts locally instead.
 //
 // Layout (names are IDs, because real names are encrypted):
 //
-//	/dav/<spaceId>/_noddanas-space.json     the space's public, encrypted key record
-//	/dav/<spaceId>/_noddanas-folder.json    this folder's children: encrypted names + wrapped keys
+//	/dav/<spaceId>/_frontdir-space.json     the space's public, encrypted key record
+//	/dav/<spaceId>/_frontdir-folder.json    this folder's children: encrypted names + wrapped keys
 //	/dav/<spaceId>/<folderId>/...           subfolders, recursively
-//	/dav/<spaceId>/<fileId>.ndne            each file's current container
+//	/dav/<spaceId>/<fileId>.fdenc            each file's current container
 //
 // A mirror of this tree is a complete backup that stays encrypted: every
 // container restores on its own (docs/E2EE.md §5), and the JSON records let
@@ -40,9 +40,9 @@ import (
 // Only app passwords are accepted; responses are sandboxed octet-streams.
 
 const (
-	davSpaceFile  = "_noddanas-space.json"
-	davFolderFile = "_noddanas-folder.json"
-	davExt        = ".ndne"
+	davSpaceFile  = "_frontdir-space.json"
+	davFolderFile = "_frontdir-folder.json"
+	davExt        = ".fdenc"
 )
 
 func (s *Server) newDAV() http.Handler {
@@ -56,7 +56,7 @@ func (s *Server) newDAV() http.Handler {
 				http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
 				return
 			}
-			w.Header().Set("WWW-Authenticate", `Basic realm="NoddaNAS WebDAV (use an app password)", charset="UTF-8"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="FrontDir WebDAV (use an app password)", charset="UTF-8"`)
 			http.Error(w, "app password required", http.StatusUnauthorized)
 			return
 		}
@@ -69,7 +69,7 @@ func (s *Server) newDAV() http.Handler {
 			w.Header().Set("Content-Disposition", "attachment")
 		case http.MethodOptions, "PROPFIND", "LOCK", "UNLOCK":
 		default:
-			http.Error(w, "NoddaNAS WebDAV is read-only (end-to-end encrypted); use the web app or CLI to change files",
+			http.Error(w, "FrontDir WebDAV is read-only (end-to-end encrypted); use the web app or CLI to change files",
 				http.StatusMethodNotAllowed)
 			return
 		}
@@ -250,7 +250,7 @@ func (f *davFS) listFolder(ctx context.Context, folder *domain.Node) ([]fs.FileI
 
 // SpaceRecord and FolderRecord are the backup metadata formats.
 type SpaceRecord struct {
-	Format    string `json:"format"` // "noddanas-space/v1"
+	Format    string `json:"format"` // "frontdir-space/v1"
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
 	RootID    string `json:"rootId"`
@@ -262,7 +262,7 @@ type SpaceRecord struct {
 }
 
 type FolderRecord struct {
-	Format   string        `json:"format"` // "noddanas-folder/v1"
+	Format   string        `json:"format"` // "frontdir-folder/v1"
 	ID       string        `json:"id"`
 	SpaceID  string        `json:"spaceId"`
 	ParentID string        `json:"parentId,omitempty"`
@@ -282,7 +282,7 @@ type FolderEntry struct {
 func (f *davFS) record(ctx context.Context, t *davTarget) ([]byte, error) {
 	if t.virtual == davSpaceFile {
 		sp := t.space.Space
-		return json.MarshalIndent(SpaceRecord{Format: "noddanas-space/v1", ID: sp.ID, Kind: string(sp.Kind),
+		return json.MarshalIndent(SpaceRecord{Format: "frontdir-space/v1", ID: sp.ID, Kind: string(sp.Kind),
 			RootID: sp.RootID, NameEnc: sp.NameEnc, PublicKey: sp.PublicKey, KeySig: sp.KeySig,
 			KeySigner: sp.KeySigner, RootKey: sp.RootKey}, "", "  ")
 	}
@@ -290,7 +290,7 @@ func (f *davFS) record(ctx context.Context, t *davTarget) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	rec := FolderRecord{Format: "noddanas-folder/v1", ID: t.node.ID, SpaceID: t.node.SpaceID, ParentID: t.node.ParentID,
+	rec := FolderRecord{Format: "frontdir-folder/v1", ID: t.node.ID, SpaceID: t.node.SpaceID, ParentID: t.node.ParentID,
 		Children: make([]FolderEntry, len(kids))}
 	for i, k := range kids {
 		rec.Children[i] = FolderEntry{k.ID, string(k.Kind), k.NameEnc, k.WrappedKey, k.Size, k.SHA256}

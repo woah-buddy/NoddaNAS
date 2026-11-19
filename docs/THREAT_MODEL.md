@@ -1,6 +1,6 @@
 # Threat model
 
-What NoddaNAS protects, from whom, how, and what risk remains. STRIDE per trust boundary; each
+What FrontDir protects, from whom, how, and what risk remains. STRIDE per trust boundary; each
 mitigation points to code or tests so the claim can be checked.
 
 ## Assets
@@ -25,7 +25,7 @@ mitigation points to code or tests so the claim can be checked.
 - **Compromised client device** holding an app password.
 - **Storage / backup attacker**: obtains the volume, a snapshot or a backup.
 - **Database attacker**: obtains a database dump.
-- **Malicious or compromised server operator**: controls the NoddaNAS process and its data.
+- **Malicious or compromised server operator**: controls the FrontDir process and its data.
 - **Malicious identity provider response** (forged, replayed or unsolicited assertions).
 
 Out of scope: a compromised end-user device or browser (it sees plaintext by definition), and a
@@ -72,10 +72,10 @@ server is still responsible for (access control, integrity of structure, availab
 | Stolen server backup (database dump, data volume, logs) | Contents, names and keys are end-to-end encrypted; tokens and link passwords are hashes; link secrets are never stored; the server refuses key bundles below the PBKDF2 work factor, so offline guessing stays expensive; backups should still be encrypted (metadata, key bundles) | `TestDisasterRecovery` (scans a full backup for plaintext in raw/hex/base64), `TestWeakKeyBundlesRefused` |
 | A restore silently brings back revoked sessions, links or members | Runbook step: `revoke-sessions --all` and re-apply later revocations from the audit log | [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md) §7 |
 | Backup incomplete or corrupted, discovered only when needed | `verify-storage --hash` checks presence, size and SHA-256 of every stored ciphertext without keys | `TestVerifyStorage` |
-| Leaked or abused public links at scale | Per-user and instance-wide kill switches revoke links in one SQL statement; the global web switch needs an admin *session* (not an app password) and a typed confirmation; per-user and global revocation are separate store methods, so no input can widen one into the other; `noddanas revoke-links` works without the web UI | `TestSharedByMeAndLinkKillSwitches`, e2e |
-| Departed or compromised user keeps access through existing sessions or app passwords | `noddanas revoke-access` ends sessions, deletes app passwords and revokes links; the IdP blocks new sign-ins | e2e "operator offboarding" |
+| Leaked or abused public links at scale | Per-user and instance-wide kill switches revoke links in one SQL statement; the global web switch needs an admin *session* (not an app password) and a typed confirmation; per-user and global revocation are separate store methods, so no input can widen one into the other; `frontdir revoke-links` works without the web UI | `TestSharedByMeAndLinkKillSwitches`, e2e |
+| Departed or compromised user keeps access through existing sessions or app passwords | `frontdir revoke-access` ends sessions, deletes app passwords and revokes links; the IdP blocks new sign-ins | e2e "operator offboarding" |
 | CSRF | Go `CrossOriginProtection`, `SameSite=Lax` sessions, Host validation; the SAML ACS is exempt because it is authenticated by signature plus single-use binding | e2e |
-| Bad settings saved from the web (typos, contradictions, lockouts) | One validator for environment and web values; sign-in changes tried against the IdP before saving; changes refused that would exclude or demote the administrator making them or switch sign-in off; optimistic concurrency between administrators; saved settings that stop validating stop startup rather than being skipped (skipping "allowed groups" would fail open); `noddanas settings reset` and `setup-link` as break-glass | `TestBuildRejectsWithFieldErrors`, `TestUpdateRules`, `TestAdminGroupsApplyImmediatelyAndGuardSelf` |
+| Bad settings saved from the web (typos, contradictions, lockouts) | One validator for environment and web values; sign-in changes tried against the IdP before saving; changes refused that would exclude or demote the administrator making them or switch sign-in off; optimistic concurrency between administrators; saved settings that stop validating stop startup rather than being skipped (skipping "allowed groups" would fail open); `frontdir settings reset` and `setup-link` as break-glass | `TestBuildRejectsWithFieldErrors`, `TestUpdateRules`, `TestAdminGroupsApplyImmediatelyAndGuardSelf` |
 
 ### Repudiation
 
@@ -88,7 +88,7 @@ events (identifiers only; never names, tokens or passwords).
 | Threat | Mitigation | Evidence |
 |---|---|---|
 | Server operator / database dump reads files or names | End-to-end encryption; server holds only wrapped/sealed keys | `TestE2EEFileLifecycle`, e2e "server holds only ciphertext" |
-| Stolen volume or backup | Containers are ciphertext under random names; backups are ID-named | `noddanas-cli backup` smoke test |
+| Stolen volume or backup | Containers are ciphertext under random names; backups are ID-named | `frontdir-cli backup` smoke test |
 | Offline guessing of a passphrase from the stored bundle | PBKDF2-SHA256, 600k iterations; 12-character minimum; the recovery code has 160 bits | `e2ee/account.go` |
 | Horizontal access | Single authorization point; whole-chain checks; 404 for invisible items | `TestTenantIsolation` |
 | Link leaks to servers or logs | Link secret only in the URL fragment; token only in POST bodies; `Referrer-Policy: no-referrer` | e2e "public link" |
@@ -141,10 +141,10 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
    until it expires or is revoked; link passwords add a server-enforced gate on top.
 9. **Per-replica rate limits and WebDAV locks.** See ARCHITECTURE.md › Scaling.
 8. **Administrators can redirect sign-in.** An administrator who passes "confirm it's you" can
-   point NoddaNAS at another identity provider. That cannot take over existing accounts or
+   point FrontDir at another identity provider. That cannot take over existing accounts or
    decrypt anything, but people who then sign in through the new provider get new accounts, and
    its groups decide who administers from then on. Lock sign-in to the server's configuration
-   (`NODDANAS_OIDC_ISSUER` / `NODDANAS_SAML_IDP_METADATA_URL`, or `NODDANAS_WEB_SETTINGS=false`)
+   (`FRONTDIR_OIDC_ISSUER` / `FRONTDIR_SAML_IDP_METADATA_URL`, or `FRONTDIR_WEB_SETTINGS=false`)
    where that is a concern; changes are audited either way.
 9. **The database is trusted for settings.** Anyone who can write to the database can change
    settings directly, as they could change any other metadata. Settings are not signed; the

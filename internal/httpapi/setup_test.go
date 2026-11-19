@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/config"
-	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/settings"
-	"github.com/woah-buddy/NoddaNAS/internal/testutil"
-	"github.com/woah-buddy/NoddaNAS/web"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/blob/fsblob"
+	"github.com/woah-buddy/FrontDir/internal/config"
+	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/settings"
+	"github.com/woah-buddy/FrontDir/internal/testutil"
+	"github.com/woah-buddy/FrontDir/web"
 )
 
 // A server started with no sign-in method, set up through the one-time
@@ -114,12 +114,12 @@ func TestSetupLinkAndWebSettings(t *testing.T) {
 	}
 	// A typo is caught by trying the provider before saving.
 	code, m := call(anon, "POST", "/api/v1/setup/save", map[string]any{"token": token, "revision": view["revision"],
-		"set": map[string]string{"OIDC_ISSUER": idp.srv.URL + "/typo", "OIDC_CLIENT_ID": "noddanas"}})
+		"set": map[string]string{"OIDC_ISSUER": idp.srv.URL + "/typo", "OIDC_CLIENT_ID": "frontdir"}})
 	if code != 400 || !strings.Contains(jsonString(m), "OIDC_ISSUER") {
 		t.Fatalf("typo saved: %d %v", code, m)
 	}
 	code, m = call(anon, "POST", "/api/v1/setup/save", map[string]any{"token": token, "revision": view["revision"],
-		"set": map[string]string{"OIDC_ISSUER": idp.srv.URL, "OIDC_CLIENT_ID": "noddanas", "OIDC_CLIENT_SECRET": "s3cret"}})
+		"set": map[string]string{"OIDC_ISSUER": idp.srv.URL, "OIDC_CLIENT_ID": "frontdir", "OIDC_CLIENT_SECRET": "s3cret"}})
 	if code != 200 || m["setupMode"] != false {
 		t.Fatalf("setup save: %d %v", code, m)
 	}

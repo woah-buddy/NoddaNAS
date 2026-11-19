@@ -3,9 +3,9 @@ package service
 import (
 	"context"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // Contacts returns the caller's sealed verified-contacts list ("" if they

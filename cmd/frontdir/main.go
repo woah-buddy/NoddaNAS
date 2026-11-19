@@ -1,21 +1,21 @@
-// Command noddanas is the NoddaNAS server and admin tool.
+// Command frontdir is the FrontDir server and admin tool.
 //
-//	noddanas serve                 run the server (default)
-//	noddanas migrate               apply database migrations and exit
-//	noddanas set-quota EMAIL SIZE  set a user's personal storage quota (e.g. 50GiB)
-//	noddanas revoke-links --user EMAIL|ID | --all
+//	frontdir serve                 run the server (default)
+//	frontdir migrate               apply database migrations and exit
+//	frontdir set-quota EMAIL SIZE  set a user's personal storage quota (e.g. 50GiB)
+//	frontdir revoke-links --user EMAIL|ID | --all
 //	                               revoke public links (break-glass; works without the web UI)
-//	noddanas revoke-access --user EMAIL|ID
+//	frontdir revoke-access --user EMAIL|ID
 //	                               offboard: end sessions, delete app passwords, revoke links
-//	noddanas revoke-sessions --all sign everyone out of every browser (e.g. after a restore)
-//	noddanas verify-storage [--hash]
+//	frontdir revoke-sessions --all sign everyone out of every browser (e.g. after a restore)
+//	frontdir verify-storage [--hash]
 //	                               check every stored file is present and intact (no keys needed)
-//	noddanas setup-link            print a one-time link to set up sign-in and become an administrator
-//	noddanas settings show         list settings and where each value comes from (secrets hidden)
-//	noddanas settings reset KEY|GROUP|all ...
+//	frontdir setup-link            print a one-time link to set up sign-in and become an administrator
+//	frontdir settings show         list settings and where each value comes from (secrets hidden)
+//	frontdir settings reset KEY|GROUP|all ...
 //	                               clear settings saved in the web admin area (break-glass)
-//	noddanas healthcheck           probe the local server (for container HEALTHCHECK)
-//	noddanas version               print the version
+//	frontdir healthcheck           probe the local server (for container HEALTHCHECK)
+//	frontdir version               print the version
 package main
 
 import (
@@ -31,15 +31,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/config"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/settings"
-	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
-	"github.com/woah-buddy/NoddaNAS/web"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/blob/fsblob"
+	"github.com/woah-buddy/FrontDir/internal/config"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/settings"
+	"github.com/woah-buddy/FrontDir/internal/store/postgres"
+	"github.com/woah-buddy/FrontDir/web"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -78,7 +78,7 @@ func main() {
 		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, setup-link, settings, healthcheck, version)", cmd)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "noddanas:", err)
+		fmt.Fprintln(os.Stderr, "frontdir:", err)
 		os.Exit(1)
 	}
 }
@@ -131,17 +131,17 @@ func serve() error {
 	rt := sm.Runtime()
 	switch {
 	case sm.SetupMode():
-		log.Warn("NoddaNAS is not set up yet: no sign-in method is configured. " +
-			"On the server, run `noddanas setup-link` for a one-time setup link (it is printed there, never logged)")
+		log.Warn("FrontDir is not set up yet: no sign-in method is configured. " +
+			"On the server, run `frontdir setup-link` for a one-time setup link (it is printed there, never logged)")
 	case rt.Policy.Open():
 		log.Warn("no sign-in policy set: every account your identity provider authenticates can sign in " +
-			"(set allowed groups or email domains in the admin area, or NODDANAS_ALLOWED_GROUPS / NODDANAS_ALLOWED_EMAIL_DOMAINS)")
+			"(set allowed groups or email domains in the admin area, or FRONTDIR_ALLOWED_GROUPS / FRONTDIR_ALLOWED_EMAIL_DOMAINS)")
 	}
 	if rt.SAML != nil && !rt.SAML.TrustEmail {
 		log.Info("SAML emails are not treated as verified; turn on \"trust asserted emails\" if your IdP verifies them (needed for sharing by email)")
 	}
 	if cfg.SettingsKey == nil {
-		log.Info("NODDANAS_SETTINGS_KEY is not set: secrets such as the OIDC client secret cannot be saved from the web admin area")
+		log.Info("FRONTDIR_SETTINGS_KEY is not set: secrets such as the OIDC client secret cannot be saved from the web admin area")
 	}
 	api := httpapi.New(svc, am, httpapi.Config{
 		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV, Theme: rt.Theme, Settings: sm,
@@ -180,7 +180,7 @@ func serve() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("noddanas listening", "addr", cfg.Listen, "public_url", cfg.PublicURL.String(), "version", version,
+		log.Info("frontdir listening", "addr", cfg.Listen, "public_url", cfg.PublicURL.String(), "version", version,
 			"webdav", cfg.WebDAV, "worker", cfg.Worker)
 		if cfg.TLSCertFile != "" {
 			errc <- srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -220,7 +220,7 @@ func migrate() error {
 // administrator, so it is never written to a log.
 func setupLink(args []string) error {
 	if len(args) != 0 {
-		return errors.New("usage: noddanas setup-link")
+		return errors.New("usage: frontdir setup-link")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -237,7 +237,7 @@ func setupLink(args []string) error {
 	}
 	fmt.Printf("Open this link to set up sign-in. The first person to sign in through it becomes an administrator.\n\n  %s\n\n"+
 		"It works once, until %s, and replaces any earlier setup link. Treat it like a password: share it only with\n"+
-		"the person setting up NoddaNAS, over a channel you trust.\n", link, exp.Format(time.RFC1123))
+		"the person setting up FrontDir, over a channel you trust.\n", link, exp.Format(time.RFC1123))
 	return nil
 }
 
@@ -245,7 +245,7 @@ func setupLink(args []string) error {
 // is the way out when saved settings stop the server from starting, or
 // lock everyone out; running servers pick the change up within seconds.
 func settingsCmd(args []string) error {
-	const usage = "usage: noddanas settings show\n       noddanas settings reset KEY|GROUP|all ...   (e.g. OIDC_CLIENT_SECRET, oidc, saml, branding)"
+	const usage = "usage: frontdir settings show\n       frontdir settings reset KEY|GROUP|all ...   (e.g. OIDC_CLIENT_SECRET, oidc, saml, branding)"
 	if len(args) == 0 || args[0] != "show" && args[0] != "reset" || args[0] == "show" && len(args) != 1 || args[0] == "reset" && len(args) < 2 {
 		return errors.New(usage)
 	}
@@ -314,7 +314,7 @@ func adminService() (*operator, func(), error) {
 
 func setQuota(args []string) error {
 	if len(args) != 2 {
-		return errors.New("usage: noddanas set-quota EMAIL SIZE (e.g. 50GiB)")
+		return errors.New("usage: frontdir set-quota EMAIL SIZE (e.g. 50GiB)")
 	}
 	size, err := config.ParseSize(args[1])
 	if err != nil {
@@ -336,8 +336,8 @@ func setQuota(args []string) error {
 // web session, so it works even if the UI is down or admin accounts are
 // compromised. The scope must be stated explicitly: there is no default.
 func revokeLinks(args []string) error {
-	const usage = "usage: noddanas revoke-links --user EMAIL|ID   (one user's links)\n" +
-		"       noddanas revoke-links --all             (every public link on this instance)"
+	const usage = "usage: frontdir revoke-links --user EMAIL|ID   (one user's links)\n" +
+		"       frontdir revoke-links --all             (every public link on this instance)"
 	var all bool
 	var who string
 	switch {
@@ -373,7 +373,7 @@ func revokeLinks(args []string) error {
 // healthcheck lets a distroless image (no shell, no curl) define a
 // container HEALTHCHECK.
 func healthcheck() error {
-	addr := os.Getenv("NODDANAS_LISTEN")
+	addr := os.Getenv("FRONTDIR_LISTEN")
 	if addr == "" {
 		addr = ":8080"
 	}
@@ -381,7 +381,7 @@ func healthcheck() error {
 		addr = "127.0.0.1" + addr
 	}
 	scheme := "http"
-	if os.Getenv("NODDANAS_TLS_CERT_FILE") != "" {
+	if os.Getenv("FRONTDIR_TLS_CERT_FILE") != "" {
 		scheme = "https"
 	}
 	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
@@ -407,7 +407,7 @@ func healthcheck() error {
 // left in place for an administrator to reassign or remove.
 func revokeAccess(args []string) error {
 	if len(args) != 2 || args[0] != "--user" || args[1] == "" {
-		return errors.New("usage: noddanas revoke-access --user EMAIL|ID")
+		return errors.New("usage: frontdir revoke-access --user EMAIL|ID")
 	}
 	op, closeFn, err := adminService()
 	if err != nil {
@@ -438,7 +438,7 @@ func revokeAccess(args []string) error {
 // so everyone signs in afresh through the identity provider's current rules.
 func revokeSessions(args []string) error {
 	if len(args) != 1 || args[0] != "--all" {
-		return errors.New("usage: noddanas revoke-sessions --all")
+		return errors.New("usage: frontdir revoke-sessions --all")
 	}
 	op, closeFn, err := adminService()
 	if err != nil {
@@ -464,7 +464,7 @@ func verifyStorage(args []string) error {
 	case len(args) == 1 && args[0] == "--hash":
 		hash = true
 	default:
-		return errors.New("usage: noddanas verify-storage [--hash]")
+		return errors.New("usage: frontdir verify-storage [--hash]")
 	}
 	op, closeFn, err := adminService()
 	if err != nil {

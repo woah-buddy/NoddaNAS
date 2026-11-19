@@ -12,10 +12,10 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 type ctxKey int

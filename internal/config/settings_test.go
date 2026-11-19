@@ -84,7 +84,7 @@ func TestBuildRejectsWithFieldErrors(t *testing.T) {
 	}
 	// At startup the message names the environment variable.
 	_, err := Build(Values{"THEME": "{"}, testFixed)
-	if err == nil || !strings.Contains(err.Error(), "NODDANAS_THEME_FILE") {
+	if err == nil || !strings.Contains(err.Error(), "FRONTDIR_THEME_FILE") {
 		t.Errorf("env name missing from %v", err)
 	}
 }

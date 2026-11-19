@@ -1,9 +1,12 @@
-# NoddaNAS
+# FrontDir
 
 Self-hosted, **end-to-end encrypted** file storage and sharing: a lean alternative to Nextcloud's
 file features, built **secure-by-design first, functionality second**. It ships as a single
 container image and runs anywhere containers run (home server, NAS, on-premises, Kubernetes,
 any cloud), with no cloud-provider dependencies.
+
+*FrontDir was called NoddaNAS. Existing installations: see
+[Upgrading from NoddaNAS](docs/ADMIN_GUIDE.md#upgrading-from-noddanas).*
 
 - **End-to-end encryption.** Files, file and folder names, and team names are encrypted on your
   device (browser or CLI) before upload. The server stores and serves ciphertext only and never
@@ -27,16 +30,16 @@ in the browser.
 | | |
 |---|---|
 | Files & folders | Upload, download, folders, rename, move, versions (restore any), trash with automatic purge |
-| Backups | Download any file as an encrypted `.ndne` container and restore it later, anywhere in the same space; `noddanas-cli backup`; read-only WebDAV for rclone/restic mirrors |
-| Disaster recovery | Whole-server backups stay end-to-end encrypted; `noddanas verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
-| Offline recovery | `noddanas-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
+| Backups | Download any file as an encrypted `.fdenc` container and restore it later, anywhere in the same space; `frontdir-cli backup`; read-only WebDAV for rclone/restic mirrors |
+| Disaster recovery | Whole-server backups stay end-to-end encrypted; `frontdir verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
+| Offline recovery | `frontdir-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
 | Personal spaces | Every user has one, with a per-user quota |
 | Team folders | Direct members (read / write / manage), IdP group mappings (admin), separate quota, signed key grants that a manager approves person by person (never automatic) |
 | Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links; one **Shared** page (with me / by me) |
-| Verified people | Compare key fingerprints once, out of band; NoddaNAS then marks that person ✔ everywhere and warns about swapped keys and look-alike accounts (encrypted list the server cannot read or forge) |
+| Verified people | Compare key fingerprints once, out of band; FrontDir then marks that person ✔ everywhere and warns about swapped keys and look-alike accounts (encrypted list the server cannot read or forge) |
 | Kill switches | Revoke all of your own public links, or (administrators) every link on the server; shell commands for break-glass link revocation and user offboarding |
 | Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
-| Clients | Web app (no build step, no npm dependencies) and `noddanas-cli` (Go) |
+| Clients | Web app (no build step, no npm dependencies) and `frontdir-cli` (Go) |
 | Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
 
 Not included (yet): calendar/contacts, document editing, the Nextcloud sync protocol, a plaintext
@@ -71,23 +74,23 @@ user offboarding and incident response step by step.
 Requirements: Docker with Compose, a DNS name pointing at the host, ports 80/443 reachable, and an
 OIDC or SAML identity provider.
 
-1. **Register NoddaNAS with your identity provider.**
+1. **Register FrontDir with your identity provider.**
    - *OIDC*: a confidential client using the authorization-code flow, redirect URI
      `https://<host>/auth/callback`, scopes `openid email profile`, with a `groups` claim.
-   - *SAML*: start NoddaNAS once, then import `https://<host>/auth/saml/metadata` (ACS
+   - *SAML*: start FrontDir once, then import `https://<host>/auth/saml/metadata` (ACS
      `https://<host>/auth/saml/acs`, NameID format *persistent*), and release email, display name
      and group attributes.
-   Put the people who may sign in into a group (e.g. `noddanas-users`) and administrators into
-   another (e.g. `noddanas-admins`).
+   Put the people who may sign in into a group (e.g. `frontdir-users`) and administrators into
+   another (e.g. `frontdir-admins`).
 
 2. **Configure and start:**
 
    ```sh
    cd deploy/compose
-   cp .env.example .env            # set NODDANAS_HOST; the rest can wait for the web
+   cp .env.example .env            # set FRONTDIR_HOST; the rest can wait for the web
    sudo ../../scripts/init-secrets.sh
    docker compose up -d --build
-   docker compose exec noddanas /noddanas setup-link   # prints a one-time setup link
+   docker compose exec frontdir /frontdir setup-link   # prints a one-time setup link
    ```
 
 3. Open the setup link, enter your identity provider's details (they are tried before they are
@@ -102,9 +105,9 @@ locked in the web admin area. Next steps: the
 
 ## Configuration
 
-Settings are environment variables, validated at startup (NoddaNAS refuses to start with an
+Settings are environment variables, validated at startup (FrontDir refuses to start with an
 unsafe or incomplete configuration and lists every problem). The required ones are
-`NODDANAS_PUBLIC_URL` and `NODDANAS_DATABASE_URL` (or `_FILE`). Everything an app owner decides
+`FRONTDIR_PUBLIC_URL` and `FRONTDIR_DATABASE_URL` (or `_FILE`). Everything an app owner decides
 (sign-in method, who may sign in, administrators, quotas, link lifetimes, sessions, branding) can
 also be changed by administrators in the web app's **Admin** area, validated by the same code. A
 value set in the environment wins and is locked there. Changes on the web need a fresh
@@ -120,22 +123,22 @@ The complete reference, with defaults, is in the
 Build the client with `make cli` and create an **app password** under Settings.
 
 ```sh
-export NODDANAS_URL=https://files.example.com NODDANAS_TOKEN_FILE=~/.noddanas-token
-noddanas-cli ls Documents
-noddanas-cli put report.pdf Documents        # encrypts locally, then uploads
-noddanas-cli get Documents/report.pdf        # downloads, decrypts and verifies the signature
-noddanas-cli backup ./nas-backup             # whole personal space, still encrypted, ID-named
-noddanas-cli export-keys ./nas-backup/keys.json
+export FRONTDIR_URL=https://files.example.com FRONTDIR_TOKEN_FILE=~/.frontdir-token
+frontdir-cli ls Documents
+frontdir-cli put report.pdf Documents        # encrypts locally, then uploads
+frontdir-cli get Documents/report.pdf        # downloads, decrypts and verifies the signature
+frontdir-cli backup ./nas-backup             # whole personal space, still encrypted, ID-named
+frontdir-cli export-keys ./nas-backup/keys.json
 
 # Later, with no server at all:
-noddanas-cli decrypt-tree ./nas-backup ./restored --keys ./nas-backup/keys.json --recovery
-noddanas-cli decrypt ./somefile.ndne ./somefile --keys ./keys.json
+frontdir-cli decrypt-tree ./nas-backup ./restored --keys ./nas-backup/keys.json --recovery
+frontdir-cli decrypt ./somefile.fdenc ./somefile --keys ./keys.json
 ```
 
 Backups contain no plaintext names: files are stored by ID, and names live encrypted in
-`_noddanas-folder.json`. The same layout is served read-only at `https://<host>/dav/`, so
+`_frontdir-folder.json`. The same layout is served read-only at `https://<host>/dav/`, so
 `rclone sync`/`restic` can mirror it with an app password. In the web app, **Backup** saves one file
-as `name.ndne` and **Restore backup…** puts it back (byte-for-byte unchanged).
+as `name.fdenc` and **Restore backup…** puts it back (byte-for-byte unchanged).
 
 ## Security at a glance
 
@@ -159,7 +162,7 @@ as `name.ndne` and **Restore backup…** puts it back (byte-for-byte unchanged).
 ## Development
 
 ```sh
-export NODDANAS_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/noddanas_test?sslmode=disable'
+export FRONTDIR_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/frontdir_test?sslmode=disable'
 make test           # unit + integration + HTTP end-to-end tests (real PostgreSQL, race detector)
 make test-browser   # Go <-> browser E2EE interoperability (needs node + playwright)
 make lint vuln gosec
@@ -173,8 +176,8 @@ independent restore, public links, and decrypting a WebDAV mirror offline.
 ### Repository layout
 
 ```
-cmd/noddanas/          server binary (+ migrate, set-quota, healthcheck)
-cmd/noddanas-cli/      end-to-end encrypted command-line client
+cmd/frontdir/          server binary (+ migrate, set-quota, healthcheck)
+cmd/frontdir-cli/      end-to-end encrypted command-line client
 internal/e2ee/         E2EE implementation (Go) of docs/E2EE.md
 internal/client/       Go API client doing all crypto locally; offline decryption
 internal/domain/       core types and client-safe errors
@@ -194,7 +197,7 @@ docs/                  administrator guide, disaster recovery, E2EE spec, archit
 
 ## Roadmap
 
-- Local decrypting WebDAV gateway in `noddanas-cli` (mount plaintext in Finder/Explorer)
+- Local decrypting WebDAV gateway in `frontdir-cli` (mount plaintext in Finder/Explorer)
 - Streaming decryption for very large browser downloads (service-worker stream)
 - Key rotation for team folders when members leave (today: access revoked, old key not rotated)
 - Key transparency / verified contacts to remove trust in the server's key directory

@@ -1,4 +1,4 @@
-// Package service implements NoddaNAS's use cases: spaces and team folders,
+// Package service implements FrontDir's use cases: spaces and team folders,
 // files, versions, trash, sharing and public links. It is the only place
 // that makes authorization decisions (see access.go); transports such as the
 // JSON API and WebDAV call into it and never touch storage directly.

@@ -16,14 +16,14 @@ import (
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
 
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 // SAML 2.0 single sign-on (service-provider side).
 //
 // SAML is notoriously easy to get wrong (XML signature wrapping, replay,
-// unsolicited responses). NoddaNAS relies on crewjam/saml for XML signature
+// unsolicited responses). FrontDir relies on crewjam/saml for XML signature
 // validation and assertion checks (signature required, audience, issuer,
 // destination, validity window, InResponseTo) and adds its own rules:
 //
@@ -74,10 +74,10 @@ var (
 
 // SAMLCookie binds an in-flight SAML sign-in to the browser. It must be
 // SameSite=None: the IdP returns the user with a cross-site POST.
-const SAMLCookie = "__Host-ndn_saml"
+const SAMLCookie = "__Host-fd_saml"
 
 // SAML is a lazily-initialized service provider (IdP metadata is fetched
-// on first use, so NoddaNAS starts even if the IdP is down).
+// on first use, so FrontDir starts even if the IdP is down).
 type SAML struct {
 	raw    SAMLConfig // as given, to detect changes
 	cfg    SAMLConfig // with defaults applied

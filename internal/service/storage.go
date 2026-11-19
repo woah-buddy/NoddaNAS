@@ -7,7 +7,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 // BlobLister is implemented by blob stores that can enumerate their keys.

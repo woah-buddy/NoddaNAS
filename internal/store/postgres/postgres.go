@@ -1,4 +1,4 @@
-// Package postgres implements NoddaNAS's metadata store on PostgreSQL.
+// Package postgres implements FrontDir's metadata store on PostgreSQL.
 //
 // Every query is parameterized (no SQL built from input), and every rule the
 // service relies on for safety (name uniqueness, quota, optimistic
@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 //go:embed migrations/*.sql
@@ -42,7 +42,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: invalid DSN: %w", err)
 	}
-	cfg.ConnConfig.RuntimeParams["application_name"] = "noddanas"
+	cfg.ConnConfig.RuntimeParams["application_name"] = "frontdir"
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "30000"
 	cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "60000"
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

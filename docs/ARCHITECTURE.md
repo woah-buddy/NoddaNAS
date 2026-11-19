@@ -1,17 +1,17 @@
 # Architecture
 
-NoddaNAS is a single stateless Go server in front of PostgreSQL (metadata) and a filesystem
+FrontDir is a single stateless Go server in front of PostgreSQL (metadata) and a filesystem
 volume (encrypted containers), with all content cryptography done in clients: the browser
 (`web/static/e2ee.js`) and the Go CLI (`internal/e2ee`, `internal/client`). Identity is
 delegated to an OIDC or SAML provider.
 
 ```
  browser (WebCrypto) ─┐                          ┌──────────────────────┐
- noddanas-cli (Go)  ──┼── HTTPS ── reverse proxy │ OIDC and/or SAML IdP │
+ frontdir-cli (Go)  ──┼── HTTPS ── reverse proxy │ OIDC and/or SAML IdP │
  rclone (WebDAV, ro) ─┘               │          └──────────┬───────────┘
                                       ▼                     │ sign-in only
                      ┌────────────────────────────────────┐ │
-                     │ noddanas (1..N stateless replicas) │◀┘
+                     │ frontdir (1..N stateless replicas) │◀┘
                      │  httpapi   JSON API, WebDAV, UI     │
                      │  auth      sessions, app passwords  │
                      │  service   THE authorization point  │
@@ -54,7 +54,7 @@ A *space* is an independently owned tree with its own quota and its own key mate
 Because the server cannot read the team key, joining has two halves: the server records the
 membership (access is authorized immediately), and a manager's client *grants* the member the
 team secret (sealed to their public key and signed). The web app does this automatically when a
-manager opens the team page; `noddanas-cli` and the API expose it too. A team must always keep a
+manager opens the team page; `frontdir-cli` and the API expose it too. A team must always keep a
 manager who holds the key, or nobody could grant it again.
 
 Leaving a group, being removed, or an administrator deleting a group mapping revokes access at
@@ -116,14 +116,14 @@ version's container into a new version; history is never rewritten.
 Each container carries the file's key sealed to its **owner space**, plus encrypted metadata
 (name, type, modification time) and the uploader's signature. Therefore:
 
-- **Single file.** Download it (`Backup` in the app, `noddanas-cli backup`, WebDAV). To restore,
+- **Single file.** Download it (`Backup` in the app, `frontdir-cli backup`, WebDAV). To restore,
   the owner's client opens the owner seal with the space keys, verifies the signature, and uploads
   the container byte-for-byte unchanged with a new encrypted directory entry.
-- **Offline.** `noddanas-cli decrypt` needs only the container, the key backup (the encrypted key
+- **Offline.** `frontdir-cli decrypt` needs only the container, the key backup (the encrypted key
   bundle plus team grants) and the passphrase or recovery code.
-- **Whole trees.** The WebDAV view and `noddanas-cli backup` write ID-named containers plus
-  encrypted folder records (`_noddanas-folder.json`) and the space record
-  (`_noddanas-space.json`). `noddanas-cli decrypt-tree` rebuilds the full tree, with real names,
+- **Whole trees.** The WebDAV view and `frontdir-cli backup` write ID-named containers plus
+  encrypted folder records (`_frontdir-folder.json`) and the space record
+  (`_frontdir-space.json`). `frontdir-cli decrypt-tree` rebuilds the full tree, with real names,
   entirely offline. The backup medium never sees a plaintext name.
 
 The server no longer encrypts at rest itself: an extra server-side layer would tie each stored
@@ -135,7 +135,7 @@ Disk-level encryption (LUKS, encrypted ZFS) remains a good idea for metadata.
 - **OIDC**: authorization-code flow with PKCE, state bound to a single-use server-side request
   and a `__Host-` cookie, nonce checked, ID token verified (signature, issuer, audience, expiry).
 - **SAML**: SP-initiated only; `crewjam/saml` validates signatures, audience, issuer, destination
-  and validity; NoddaNAS adds a single-use request binding (the AuthnRequest ID is stored
+  and validity; FrontDir adds a single-use request binding (the AuthnRequest ID is stored
   server-side and consumed on first use; the browser carries a `SameSite=None` `__Host-` cookie
   because the IdP returns with a cross-site POST), refuses the artifact binding, and treats
   emails as verified only when the operator says so.
@@ -163,7 +163,7 @@ revisioned document in PostgreSQL (secrets AES-GCM-encrypted under a key from th
 checks changes (recent re-authentication, live identity-provider checks, lockout guards,
 confirmation before stranding accounts), and swaps the result into the running service, the
 sign-in manager and the theme atomically. Replicas notice a new revision within 15 seconds. With
-no sign-in method at all, the server runs in setup mode until the one-time setup link (`noddanas
+no sign-in method at all, the server runs in setup mode until the one-time setup link (`frontdir
 setup-link`) is used.
 
 ## Background work
@@ -184,7 +184,7 @@ Because clients do all cryptography, server CPU is spent on I/O and SQL only.
 It uses only DOM APIs, so it can run under a CSP that enforces Trusted Types with no policies.
 Keys are held in memory for the tab's lifetime (WebCrypto private keys are imported
 non-extractable); reloading asks for the passphrase again. Large browser downloads are assembled
-in memory or disk-backed Blob storage; `noddanas-cli` streams with constant memory.
+in memory or disk-backed Blob storage; `frontdir-cli` streams with constant memory.
 
 Colors are CSS custom properties defined only in `/theme.css`, which `internal/theme` generates at
 startup from validated tokens. It uses cascade layers (mode, then accent, then high contrast), so

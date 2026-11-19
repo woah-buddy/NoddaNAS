@@ -30,15 +30,15 @@ import (
 	"github.com/crewjam/saml"
 	jose "github.com/go-jose/go-jose/v4"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/client"
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
-	"github.com/woah-buddy/NoddaNAS/internal/testutil"
-	"github.com/woah-buddy/NoddaNAS/web"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/blob/fsblob"
+	"github.com/woah-buddy/FrontDir/internal/client"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/store/postgres"
+	"github.com/woah-buddy/FrontDir/internal/testutil"
+	"github.com/woah-buddy/FrontDir/web"
 )
 
 const pass = "correct horse battery staple"
@@ -220,7 +220,7 @@ func newHarnessWith(t *testing.T, o harnessOpts) *harness {
 	h.base = h.srv.URL
 	pub, _ := url.Parse(h.base)
 	policy := auth.Policy{AllowedGroups: []string{"nas-users"}}
-	oidc := auth.NewOIDC(auth.OIDCConfig{Issuer: h.oidc.srv.URL, ClientID: "noddanas", ClientSecret: "s3cret",
+	oidc := auth.NewOIDC(auth.OIDCConfig{Issuer: h.oidc.srv.URL, ClientID: "frontdir", ClientSecret: "s3cret",
 		RedirectURL: h.base + "/auth/callback", Policy: policy, AllowLoopback: true})
 	idpMD, _ := xml.Marshal(h.saml.idp.Metadata())
 	samlSP := auth.NewSAML(auth.SAMLConfig{MetadataURL: h.base + "/auth/saml/metadata", ACSURL: h.base + "/auth/saml/acs",
@@ -600,7 +600,7 @@ func TestEndToEnd(t *testing.T) {
 			return resp
 		}
 		status(t, dav("PROPFIND", "/dav/"), nil, 207)
-		status(t, dav("PUT", "/dav/"+me.PersonalSpace.ID+"/x.ndne"), nil, http.StatusMethodNotAllowed)
+		status(t, dav("PUT", "/dav/"+me.PersonalSpace.ID+"/x.fdenc"), nil, http.StatusMethodNotAllowed)
 
 		// Mirror the space the way a sync tool would.
 		mirror := t.TempDir()
@@ -618,20 +618,20 @@ func TestEndToEnd(t *testing.T) {
 				return b
 			}
 			var fr client.FolderRecord
-			json.Unmarshal(get("_noddanas-folder.json"), &fr)
+			json.Unmarshal(get("_frontdir-folder.json"), &fr)
 			for _, ch := range fr.Children {
 				if ch.Kind == "folder" {
 					fetch(davPath+"/"+ch.ID, filepath.Join(local, ch.ID))
 				} else {
-					get(ch.ID + ".ndne")
+					get(ch.ID + ".fdenc")
 				}
 			}
 		}
 		fetch("/dav/"+me.PersonalSpace.ID, mirror)
-		r := dav("GET", "/dav/"+me.PersonalSpace.ID+"/_noddanas-space.json")
+		r := dav("GET", "/dav/"+me.PersonalSpace.ID+"/_frontdir-space.json")
 		sb, _ := io.ReadAll(r.Body)
 		r.Body.Close()
-		os.WriteFile(filepath.Join(mirror, "_noddanas-space.json"), sb, 0o600)
+		os.WriteFile(filepath.Join(mirror, "_frontdir-space.json"), sb, 0o600)
 
 		// Offline: key backup + recovery code, no server.
 		kb := must[*client.KeyBackup](t)(alice.ExportKeys(ctx))
@@ -645,6 +645,31 @@ func TestEndToEnd(t *testing.T) {
 		got, err := os.ReadFile(filepath.Join(out, "Docs", "report.txt"))
 		if err != nil || string(got) != secret {
 			t.Fatalf("offline tree: %q %v", got, err)
+		}
+
+		// Backups made before the rename from NoddaNAS (old file names,
+		// extensions and format tags) still decrypt.
+		legacy := t.TempDir()
+		filepath.WalkDir(mirror, func(p string, d os.DirEntry, err error) error {
+			rel, _ := filepath.Rel(mirror, p)
+			dst := filepath.Join(legacy, strings.NewReplacer("_frontdir-", "_noddanas-", ".fdenc", ".ndne").Replace(rel))
+			if d.IsDir() {
+				return os.MkdirAll(dst, 0o700)
+			}
+			b, _ := os.ReadFile(p)
+			if strings.HasSuffix(p, ".json") {
+				b = []byte(strings.ReplaceAll(string(b), `"frontdir-`, `"noddanas-`))
+			}
+			return os.WriteFile(dst, b, 0o600)
+		})
+		oldKB := strings.Replace(string(kbJSON), `"frontdir-keys/v1"`, `"noddanas-keys/v1"`, 1)
+		oldKeys := must[*client.OfflineKeys](t)(client.UnlockBackup([]byte(oldKB), code, true))
+		legacyOut := t.TempDir()
+		if n, skipped, err := oldKeys.DecryptTree(legacy, legacyOut, nil); err != nil || n != 1 || len(skipped) != 0 {
+			t.Fatalf("pre-rename mirror: %d files, skipped %v, %v", n, skipped, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(legacyOut, "Docs", "report.txt")); err != nil || string(got) != secret {
+			t.Fatalf("pre-rename mirror: %q %v", got, err)
 		}
 
 		// Restoring into a directory where a symlink stands in for a folder
@@ -661,7 +686,7 @@ func TestEndToEnd(t *testing.T) {
 		}
 		// A tampered folder record with a path-shaped ID is refused before
 		// any path is built from it.
-		recPath := filepath.Join(mirror, "_noddanas-folder.json")
+		recPath := filepath.Join(mirror, "_frontdir-folder.json")
 		rec, _ := os.ReadFile(recPath)
 		var fr map[string]any
 		if err := json.Unmarshal(rec, &fr); err != nil {

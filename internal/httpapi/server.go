@@ -1,4 +1,4 @@
-// Package httpapi exposes NoddaNAS over HTTP: the JSON API used by the web
+// Package httpapi exposes FrontDir over HTTP: the JSON API used by the web
 // UI and scripts, browser sign-in, public links, WebDAV, and the static UI.
 package httpapi
 
@@ -11,10 +11,10 @@ import (
 	"net/url"
 	"sync/atomic"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/settings"
-	"github.com/woah-buddy/NoddaNAS/internal/theme"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/settings"
+	"github.com/woah-buddy/FrontDir/internal/theme"
 )
 
 // Config configures the HTTP layer.
@@ -122,7 +122,7 @@ func (s *Server) Handler() http.Handler {
 	// "Confirm it's you": sign in again at the IdP before administrative changes.
 	mux.HandleFunc("GET /auth/reauth", s.rateLimited(s.loginLimit, s.sessionOnly(s.handleReauth)))
 
-	// First-time setup with the one-time link from `noddanas setup-link`.
+	// First-time setup with the one-time link from `frontdir setup-link`.
 	// The token is 256 random bits, so the public budget is plenty against
 	// guessing, and setup does not use up the sign-in budget.
 	mux.HandleFunc("POST /api/v1/setup/view", s.public(s.handleSetupView))

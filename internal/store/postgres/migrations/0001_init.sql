@@ -1,4 +1,4 @@
--- NoddaNAS schema v1 (end-to-end encrypted).
+-- FrontDir schema v1 (end-to-end encrypted).
 --
 -- The server stores no plaintext names and no usable keys: names are
 -- client-encrypted (name_enc) with a client-computed keyed hash for

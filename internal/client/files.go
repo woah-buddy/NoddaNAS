@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/secure"
 )
 
 // Resolve finds a node by a slash-separated path of real (decrypted)
@@ -141,7 +141,7 @@ func (c *Client) RestoreContainer(ctx context.Context, parentID string, containe
 	hdr, _ := json.Marshal(e)
 	var n Node
 	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", bytes.NewReader(container), int64(len(container)),
-		map[string]string{"X-NoddaNAS-Entry": string(hdr)}, &n); err != nil {
+		map[string]string{"X-FrontDir-Entry": string(hdr)}, &n); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
@@ -298,7 +298,7 @@ func (c *Client) CreateLink(ctx context.Context, n *Node, password string, expir
 // encrypted: the key bundle (unlocked by passphrase or recovery code) and
 // the user's team-folder grants with their granters' public keys.
 type KeyBackup struct {
-	Format string       `json:"format"` // "noddanas-keys/v1"
+	Format string       `json:"format"` // "frontdir-keys/v1"
 	Bundle *e2ee.Bundle `json:"bundle"`
 	Teams  []TeamGrant  `json:"teams,omitempty"`
 }
@@ -319,7 +319,7 @@ func (c *Client) ExportKeys(ctx context.Context) (*KeyBackup, error) {
 	if err != nil {
 		return nil, err
 	}
-	kb := &KeyBackup{Format: "noddanas-keys/v1", Bundle: b}
+	kb := &KeyBackup{Format: "frontdir-keys/v1", Bundle: b}
 	var resp struct {
 		Spaces []*Space `json:"spaces"`
 	}

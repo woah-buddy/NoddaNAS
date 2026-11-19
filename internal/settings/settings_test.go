@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/config"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
-	"github.com/woah-buddy/NoddaNAS/internal/testutil"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/blob/fsblob"
+	"github.com/woah-buddy/FrontDir/internal/config"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/store/postgres"
+	"github.com/woah-buddy/FrontDir/internal/testutil"
 )
 
 func TestSecretBox(t *testing.T) {

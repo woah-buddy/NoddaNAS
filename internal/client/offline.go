@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // Offline decryption: no server, no database. Everything here works from
@@ -27,8 +27,8 @@ type OfflineKeys struct {
 // UnlockBackup opens a key backup file with a passphrase or recovery code.
 func UnlockBackup(data []byte, secret string, recovery bool) (*OfflineKeys, error) {
 	var kb KeyBackup
-	if err := json.Unmarshal(data, &kb); err != nil || kb.Format != "noddanas-keys/v1" || kb.Bundle == nil {
-		return nil, errors.New("not a NoddaNAS key backup")
+	if err := json.Unmarshal(data, &kb); err != nil || !formatIs(kb.Format, "keys") || kb.Bundle == nil {
+		return nil, errors.New("not a FrontDir key backup")
 	}
 	var acct *e2ee.Account
 	var err error
@@ -65,7 +65,7 @@ func (k *OfflineKeys) Space(id string, personal bool) (*e2ee.Space, error) {
 	return nil, fmt.Errorf("no key for team folder %s in this backup", id)
 }
 
-// DecryptContainer decrypts one container (e.g. a .ndne backup file) using
+// DecryptContainer decrypts one container (e.g. a .fdenc backup file) using
 // only its owner seal. signer verifies the signature; pass nil to accept a
 // container signed by the backup's own user only.
 func (k *OfflineKeys) DecryptContainer(r io.Reader, w io.Writer, signer *e2ee.PublicUser) (*e2ee.Meta, error) {
@@ -125,7 +125,7 @@ type FolderRecord struct {
 }
 
 // DecryptTree turns a WebDAV mirror of one space (a directory holding
-// _noddanas-space.json) into a plaintext directory tree at out, with real
+// _frontdir-space.json) into a plaintext directory tree at out, with real
 // names. signers resolves other users' public keys for signature checks;
 // files signed by unknown users are skipped and reported.
 //
@@ -141,13 +141,13 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 		return 0, nil, err
 	}
 	defer in.Close()
-	raw, err := in.ReadFile("_noddanas-space.json")
+	raw, err := readLegacy(in, "", "_frontdir-space.json", "_noddanas-space.json")
 	if err != nil {
 		return 0, nil, err
 	}
 	var sr SpaceRecord
-	if err := json.Unmarshal(raw, &sr); err != nil || sr.Format != "noddanas-space/v1" {
-		return 0, nil, errors.New("not a NoddaNAS space mirror")
+	if err := json.Unmarshal(raw, &sr); err != nil || !formatIs(sr.Format, "space") {
+		return 0, nil, errors.New("not a FrontDir space mirror")
 	}
 	s, err := k.Space(sr.ID, sr.Kind == "personal")
 	if err != nil {
@@ -173,7 +173,7 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 	// src and rel are paths relative to the mirror and output roots.
 	var walk func(src, rel string, nk *e2ee.NodeKey) error
 	walk = func(src, rel string, nk *e2ee.NodeKey) error {
-		raw, err := in.ReadFile(filepath.Join(src, "_noddanas-folder.json"))
+		raw, err := readLegacy(in, src, "_frontdir-folder.json", "_noddanas-folder.json")
 		if err != nil {
 			return err
 		}
@@ -205,7 +205,11 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 				}
 				continue
 			}
-			ok, err := decryptFile(in, filepath.Join(src, ch.ID+".ndne"), dst, filepath.Join(rel, name), ck, signers)
+			file := filepath.Join(src, ch.ID+".fdenc")
+			if _, serr := in.Stat(file); serr != nil {
+				file = filepath.Join(src, ch.ID+".ndne") // mirrored before the rename
+			}
+			ok, err := decryptFile(in, file, dst, filepath.Join(rel, name), ck, signers)
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
@@ -223,6 +227,26 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 
 // decryptFile decrypts one container from the mirror into the output tree.
 // It writes to a temporary name first and never replaces an existing file.
+// Backups and mirrors made before the project was renamed from NoddaNAS
+// use the old file names and format tags. They are read as before; only
+// what is written uses the new names.
+
+// formatIs accepts a format tag under the current or the former name.
+func formatIs(tag, kind string) bool {
+	return tag == "frontdir-"+kind+"/v1" || tag == "noddanas-"+kind+"/v1"
+}
+
+// readLegacy reads dir/name, or dir/legacy if only the old name exists.
+func readLegacy(in *os.Root, dir, name, legacy string) ([]byte, error) {
+	raw, err := in.ReadFile(filepath.Join(dir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		if old, lerr := in.ReadFile(filepath.Join(dir, legacy)); lerr == nil {
+			return old, nil
+		}
+	}
+	return raw, err
+}
+
 func decryptFile(in *os.Root, src string, out *os.Root, dst string, nk *e2ee.NodeKey, signers map[string]*e2ee.PublicUser) (bool, error) {
 	f, err := in.Open(src)
 	if err != nil {

@@ -1,4 +1,4 @@
-// Package secure contains NoddaNAS's small set of cryptographic helpers.
+// Package secure contains FrontDir's small set of cryptographic helpers.
 // Everything here uses the Go standard library or golang.org/x/crypto; there
 // is no home-grown cryptography.
 package secure
@@ -43,7 +43,9 @@ func ValidToken(t string) bool {
 }
 
 // Hash purposes. Domain separation means a hash computed for one purpose can
-// never be replayed as a valid hash for another.
+// never be replayed as a valid hash for another. They keep the project's
+// former name on purpose: stored hashes depend on them, so changing them
+// would invalidate every session, link and app password.
 const (
 	PurposeLinkToken   = "noddanas/link-token/v1"
 	PurposeSession     = "noddanas/session/v1"
@@ -62,16 +64,24 @@ func HashToken(purpose, token string) string {
 
 // AppPasswordPrefix makes leaked app passwords recognizable to secret
 // scanners (e.g. GitHub push protection) and to humans.
-const AppPasswordPrefix = "ndn_"
+const AppPasswordPrefix = "fd_"
+
+// LegacyAppPasswordPrefix marks app passwords created before the project
+// was renamed from NoddaNAS. They keep working unchanged: the stored hash
+// covers the whole token, prefix included.
+const LegacyAppPasswordPrefix = "ndn_"
 
 // NewAppPassword returns a new app password: prefix + 256-bit token.
 func NewAppPassword() string { return AppPasswordPrefix + NewToken() }
 
 // ValidAppPassword checks an app password's shape.
 func ValidAppPassword(s string) bool {
-	return len(s) == len(AppPasswordPrefix)+TokenLen &&
-		s[:len(AppPasswordPrefix)] == AppPasswordPrefix &&
-		ValidToken(s[len(AppPasswordPrefix):])
+	for _, p := range []string{AppPasswordPrefix, LegacyAppPasswordPrefix} {
+		if len(s) == len(p)+TokenLen && s[:len(p)] == p && ValidToken(s[len(p):]) {
+			return true
+		}
+	}
+	return false
 }
 
 func domainHash(domain, msg string) string {

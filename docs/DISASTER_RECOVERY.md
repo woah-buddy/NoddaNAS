@@ -1,13 +1,13 @@
 # Disaster recovery
 
-This document explains how a server administrator backs up an entire NoddaNAS server at the
+This document explains how a server administrator backs up an entire FrontDir server at the
 operating-system level and rebuilds it on new hardware after the original is lost to a fire,
 flood, theft, ransomware or a failed disk. Throughout, users' files stay end-to-end encrypted.
 The administrator, the backup software, the off-site storage provider and anyone who steals a
 backup can copy the files, but cannot read them. Only the users who own or share a file can.
 
 It assumes the Docker Compose installation from the [administrator guide](ADMIN_GUIDE.md),
-installed in `/opt/NoddaNAS`. On Kubernetes the same principles apply; see
+installed in `/opt/FrontDir`. On Kubernetes the same principles apply; see
 [Kubernetes](#kubernetes) at the end.
 
 **Contents**
@@ -32,9 +32,9 @@ installed in `/opt/NoddaNAS`. On Kubernetes the same principles apply; see
 - **Keep the repository password somewhere a fire at the server cannot reach,** and not
   only on the server.
 - **Restore** on any new Linux host: restore the files, `pg_restore` the database, copy the
-  encrypted files back, start NoddaNAS, and run `noddanas verify-storage --hash`.
+  encrypted files back, start FrontDir, and run `frontdir verify-storage --hash`.
 - **Before letting users in,** re-apply security decisions made after the backup was taken
-  (`noddanas revoke-sessions --all`, plus any offboarding or link revocations since).
+  (`frontdir revoke-sessions --all`, plus any offboarding or link revocations since).
 - **Users** sign in and unlock with their own passphrase or recovery code, exactly as before.
   Nobody else, including you, can open their files at any point in this process.
 - **Practise it** every quarter on a scratch machine, using a canary account.
@@ -43,7 +43,7 @@ installed in `/opt/NoddaNAS`. On Kubernetes the same principles apply; see
 
 ## 2. Why the backups stay end-to-end encrypted
 
-NoddaNAS encrypts every file, file name and folder name in the user's browser or CLI before
+FrontDir encrypts every file, file name and folder name in the user's browser or CLI before
 upload, with keys derived from secrets only the user knows. The server stores, and therefore
 every backup contains, only what the server has:
 
@@ -59,13 +59,13 @@ every backup contains, only what the server has:
 | Metadata: email addresses, display names, group names, IDs, file sizes, timestamps, who shares with whom, quotas | Not encrypted (the server needs it to work) | Anyone with the backup |
 | Server and proxy logs | Metadata only (user IDs, IP addresses, URLs of API calls, event types, sizes); never names, contents or keys | Anyone with the logs |
 
-**There is no server key to back up or lose.** NoddaNAS has no master key, keyring or escrow
+**There is no server key to back up or lose.** FrontDir has no master key, keyring or escrow
 key. Its own secrets (the database password, the OIDC client secret, an optional SAML key pair)
 protect access to services, not files, and can be regenerated after a disaster without losing
 anything.
 
 **One honest caveat: the passphrase.** A stolen database backup contains each user's key
-bundle, and an attacker can try to guess passphrases offline against it. NoddaNAS makes each
+bundle, and an attacker can try to guess passphrases offline against it. FrontDir makes each
 guess expensive: the server refuses any key bundle that does not use the full 600,000-iteration
 work factor, and clients require passphrases of at least 12 characters. The recovery-code half of
 the bundle cannot be guessed. Even so, the confidentiality of a stolen backup ultimately rests on
@@ -79,18 +79,18 @@ access to them, as defence in depth and to protect the metadata.
 | Item | Where (Compose) | Needed to restore? | Notes |
 |---|---|---|---|
 | Database | `postgres` service; back up as a `pg_dump` file | **Required** | The folder tree, encrypted names and keys, key bundles, shares, team memberships, users |
-| Encrypted files | Docker volume `noddanas_noddanas-data` | **Required** | Ciphertext containers, one per file version |
-| Deployment configuration | `/opt/NoddaNAS/deploy/compose` (`.env`, `secrets/`, `branding/`, and `compose.yaml` / `Caddyfile` if you changed them) | **Required** | `secrets/` holds credentials, including `settings_key`; the backup repository is encrypted |
-| NoddaNAS version | The git commit you run | **Required** | Restore the same version, then upgrade |
-| SAML SP key pair, if you configured one | Wherever `NODDANAS_SAML_SP_KEY_FILE` / `_CERT_FILE` point | Recommended | Otherwise generate a new pair and give the IdP the new certificate |
-| TLS certificates | Docker volume `noddanas_caddy-data` | Optional | Caddy obtains new ones automatically |
+| Encrypted files | Docker volume `frontdir_frontdir-data` | **Required** | Ciphertext containers, one per file version |
+| Deployment configuration | `/opt/FrontDir/deploy/compose` (`.env`, `secrets/`, `branding/`, and `compose.yaml` / `Caddyfile` if you changed them) | **Required** | `secrets/` holds credentials, including `settings_key`; the backup repository is encrypted |
+| FrontDir version | The git commit you run | **Required** | Restore the same version, then upgrade |
+| SAML SP key pair, if you configured one | Wherever `FRONTDIR_SAML_SP_KEY_FILE` / `_CERT_FILE` point | Recommended | Otherwise generate a new pair and give the IdP the new certificate |
+| TLS certificates | Docker volume `frontdir_caddy-data` | Optional | Caddy obtains new ones automatically |
 | Logs | Docker's container logs, or your log system | Optional | Useful for audit and for step 8 of the restore |
 
 Outside this server, but just as necessary:
 
 - **The identity provider.** Accounts are tied to the IdP's issuer and each user's subject ID.
   If the IdP is lost and recreated with new IDs, users get new, empty accounts (see
-  [§8](#8-when-something-else-changed-too)). Back it up as carefully as NoddaNAS.
+  [§8](#8-when-something-else-changed-too)). Back it up as carefully as FrontDir.
 - **DNS** for the hostname.
 - **The backup repository's password and location** (see the next section).
 
@@ -118,7 +118,7 @@ at least two people:
 - a printed or off-line copy of this document.
 
 **Encourage user-level backups as well.** The [administrator guide](ADMIN_GUIDE.md#user-backups-each-user-independent-of-the-server)
-describes them: users' own encrypted copies (`noddanas-cli backup`) and key backups. They cover
+describes them: users' own encrypted copies (`frontdir-cli backup`) and key backups. They cover
 files saved after your last server backup, and they still work if the server is gone for good.
 
 ---
@@ -132,47 +132,47 @@ encryption mainly protects the database dump (metadata and key bundles) and the 
 
 ### One-time setup
 
-As root on the NoddaNAS host:
+As root on the FrontDir host:
 
 ```sh
 apt install restic                           # or your distribution's equivalent
-install -m 600 /dev/null /root/.noddanas-restic-password
-openssl rand -base64 32 > /root/.noddanas-restic-password
+install -m 600 /dev/null /root/.frontdir-restic-password
+openssl rand -base64 32 > /root/.frontdir-restic-password
 # Put a copy of this password in your disaster-recovery kit NOW.
-export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/noddanas
-export RESTIC_PASSWORD_FILE=/root/.noddanas-restic-password
+export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/frontdir
+export RESTIC_PASSWORD_FILE=/root/.frontdir-restic-password
 restic init
 ```
 
 ### Method A: online backup (recommended)
 
 No downtime, and the database dump restores into any newer PostgreSQL version. Save this as
-`/usr/local/sbin/noddanas-backup` (mode `0700`, owned by root):
+`/usr/local/sbin/frontdir-backup` (mode `0700`, owned by root):
 
 ```sh
 #!/bin/sh
-# NoddaNAS whole-system backup: database dump, encrypted files, configuration.
+# FrontDir whole-system backup: database dump, encrypted files, configuration.
 set -eu
-export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/noddanas
-export RESTIC_PASSWORD_FILE=/root/.noddanas-restic-password
-APP=/opt/NoddaNAS
+export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/frontdir
+export RESTIC_PASSWORD_FILE=/root/.frontdir-restic-password
+APP=/opt/FrontDir
 COMPOSE=$APP/deploy/compose
-STAGE=/var/backups/noddanas
+STAGE=/var/backups/frontdir
 umask 077
 mkdir -p "$STAGE"
 cd "$COMPOSE"
 
-# 1. Database first. pg_dump takes a consistent snapshot while NoddaNAS keeps running.
-docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > "$STAGE/noddanas-db.dump.part"
-mv "$STAGE/noddanas-db.dump.part" "$STAGE/noddanas-db.dump"
-git -C "$APP" rev-parse HEAD > "$STAGE/noddanas-version"
+# 1. Database first. pg_dump takes a consistent snapshot while FrontDir keeps running.
+docker compose exec -T postgres pg_dump -U frontdir -d frontdir -Fc > "$STAGE/frontdir-db.dump.part"
+mv "$STAGE/frontdir-db.dump.part" "$STAGE/frontdir-db.dump"
+git -C "$APP" rev-parse HEAD > "$STAGE/frontdir-version"
 
 # 2. Then the encrypted files and the configuration.
-DATA=$(docker volume inspect -f '{{ .Mountpoint }}' noddanas_noddanas-data)
-restic backup --tag noddanas "$STAGE" "$DATA" "$COMPOSE"
+DATA=$(docker volume inspect -f '{{ .Mountpoint }}' frontdir_frontdir-data)
+restic backup --tag frontdir "$STAGE" "$DATA" "$COMPOSE"
 
 # 3. Retention. With an append-only repository, run this from a separate trusted machine instead.
-restic forget --tag noddanas --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
+restic forget --tag frontdir --keep-daily 14 --keep-weekly 8 --keep-monthly 12 --prune
 ```
 
 The order matters. Taken first, the database dump only refers to files that are already on disk,
@@ -182,7 +182,7 @@ the trash in the minutes between the two steps, which were being deleted anyway.
 Run it daily and make failures visible, for example with cron:
 
 ```cron
-17 2 * * * root /usr/local/sbin/noddanas-backup >>/var/log/noddanas-backup.log 2>&1 || logger -p user.err "noddanas backup FAILED"
+17 2 * * * root /usr/local/sbin/frontdir-backup >>/var/log/frontdir-backup.log 2>&1 || logger -p user.err "frontdir backup FAILED"
 ```
 
 ### Method B: offline copy
@@ -191,13 +191,13 @@ This is the simplest way to get a perfectly consistent copy, at the cost of a fe
 downtime. It copies the raw volume directories while the services are stopped:
 
 ```sh
-cd /opt/NoddaNAS/deploy/compose
-docker compose stop noddanas postgres
-restic backup --tag noddanas-cold \
-  "$(docker volume inspect -f '{{ .Mountpoint }}' noddanas_postgres-data)" \
-  "$(docker volume inspect -f '{{ .Mountpoint }}' noddanas_noddanas-data)" \
-  /opt/NoddaNAS/deploy/compose
-docker compose start postgres noddanas
+cd /opt/FrontDir/deploy/compose
+docker compose stop frontdir postgres
+restic backup --tag frontdir-cold \
+  "$(docker volume inspect -f '{{ .Mountpoint }}' frontdir_postgres-data)" \
+  "$(docker volume inspect -f '{{ .Mountpoint }}' frontdir_frontdir-data)" \
+  /opt/FrontDir/deploy/compose
+docker compose start postgres frontdir
 ```
 
 A copied PostgreSQL data directory restores only into the **same PostgreSQL major version**,
@@ -217,7 +217,7 @@ backups, not a replacement: a snapshot on the same storage burns with it.
   snapshot). The copy can be silently corrupt.
 - Do not back up only the data volume. Without the database, the folder structure, names,
   sharing and team access are gone. Users who kept a key backup can still decrypt individual
-  containers with `noddanas-cli decrypt`, because each container carries its own encrypted
+  containers with `frontdir-cli decrypt`, because each container carries its own encrypted
   name, but that is salvage, not recovery.
 - Do not keep the only copy of the repository password on the server.
 
@@ -229,11 +229,11 @@ You can prove that backups are complete and intact without ever being able to re
 
 | Check | How often | Command or method |
 |---|---|---|
-| The backup job ran | Daily | Your alert from the cron line above; `restic snapshots --tag noddanas` |
+| The backup job ran | Daily | Your alert from the cron line above; `restic snapshots --tag frontdir` |
 | Repository integrity | Monthly | `restic check --read-data-subset=5%` (a different 5% each time) |
 | Full restore drill | Quarterly | [§7](#7-restoring-after-losing-the-server) on a scratch machine, ending with the two checks below |
 
-**`noddanas verify-storage --hash`** checks every file version the database knows about. It
+**`frontdir verify-storage --hash`** checks every file version the database knows about. It
 confirms the encrypted container exists, has the recorded size, and has the recorded SHA-256 of
 its ciphertext. It needs no keys and decrypts nothing. It exits non-zero if anything is missing
 or corrupted, listing the affected items, and it also counts stored containers that nothing
@@ -264,51 +264,51 @@ time. Allow a few hours for a first run; practice makes it faster.
 **2. Restore the backup to a staging directory.**
 
 ```sh
-export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/noddanas
-export RESTIC_PASSWORD_FILE=/root/.noddanas-restic-password   # from the disaster-recovery kit
-restic snapshots --tag noddanas                                # pick a snapshot, usually the latest
-restic restore latest --tag noddanas --target /restore
+export RESTIC_REPOSITORY=sftp:backup@offsite.example.com:/srv/restic/frontdir
+export RESTIC_PASSWORD_FILE=/root/.frontdir-restic-password   # from the disaster-recovery kit
+restic snapshots --tag frontdir                                # pick a snapshot, usually the latest
+restic restore latest --tag frontdir --target /restore
 ```
 
 Files appear under `/restore` with their original paths, owners and permissions.
 
-**3. Put the same NoddaNAS version back, with its configuration.**
+**3. Put the same FrontDir version back, with its configuration.**
 
 ```sh
-git clone https://github.com/woah-buddy/NoddaNAS.git /opt/NoddaNAS
-git -C /opt/NoddaNAS checkout "$(cat /restore/var/backups/noddanas/noddanas-version)"
-cp -a /restore/opt/NoddaNAS/deploy/compose/. /opt/NoddaNAS/deploy/compose/
-cd /opt/NoddaNAS/deploy/compose
+git clone https://github.com/woah-buddy/FrontDir.git /opt/FrontDir
+git -C /opt/FrontDir checkout "$(cat /restore/var/backups/frontdir/frontdir-version)"
+cp -a /restore/opt/FrontDir/deploy/compose/. /opt/FrontDir/deploy/compose/
+cd /opt/FrontDir/deploy/compose
 ```
 
 **4. Restore the database.**
 
 ```sh
 docker compose up -d --wait postgres        # creates an empty database with the restored password
-docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner \
-  < /restore/var/backups/noddanas/noddanas-db.dump
+docker compose exec -T postgres pg_restore -U frontdir -d frontdir --no-owner \
+  < /restore/var/backups/frontdir/frontdir-db.dump
 ```
 
 **5. Restore the encrypted files.**
 
 ```sh
-docker compose build noddanas
-docker compose create noddanas               # creates the data volume without starting the service
-DATA=$(docker volume inspect -f '{{ .Mountpoint }}' noddanas_noddanas-data)
-OLD=$(find /restore/var/lib/docker/volumes -maxdepth 2 -path '*noddanas_noddanas-data/_data')
+docker compose build frontdir
+docker compose create frontdir               # creates the data volume without starting the service
+DATA=$(docker volume inspect -f '{{ .Mountpoint }}' frontdir_frontdir-data)
+OLD=$(find /restore/var/lib/docker/volumes -maxdepth 2 -path '*frontdir_frontdir-data/_data')
 cp -a "$OLD"/. "$DATA"/
 chown -R 65532:65532 "$DATA"
 ```
 
 (After an [offline backup](#method-b-offline-copy), skip step 4. After `docker compose create`,
-copy the restored PostgreSQL volume directory into the new `noddanas_postgres-data` volume in the
+copy the restored PostgreSQL volume directory into the new `frontdir_postgres-data` volume in the
 same way, `chown -R 70:70` it, and keep the same PostgreSQL image.)
 
 **6. Start and verify, before anyone can reach it.** Keep DNS pointing elsewhere for now.
 
 ```sh
 docker compose up -d --wait
-docker compose exec noddanas /noddanas verify-storage --hash
+docker compose exec frontdir /frontdir verify-storage --hash
 ```
 
 `verify-storage` must end with `OK`. If it lists missing or corrupted files, try an older
@@ -321,7 +321,7 @@ members who had been removed, and files that had been deleted (still end-to-end 
 Before opening the doors:
 
 ```sh
-docker compose exec noddanas /noddanas revoke-sessions --all     # everyone signs in again via the IdP
+docker compose exec frontdir /frontdir revoke-sessions --all     # everyone signs in again via the IdP
 ```
 
 Then, from your logs or change records of the time since the backup:
@@ -344,10 +344,10 @@ the same way as the data volume to reuse the old certificates.)
 that their files are back and remained end-to-end encrypted throughout. They unlock exactly as
 before, with their passphrase or recovery code. Anything they saved after the restore point needs
 to be uploaded again. If they keep their own encrypted backups, **Restore backup…** (or
-`noddanas-cli restore`) puts those files back as they were, because their space keys did not
+`frontdir-cli restore`) puts those files back as they were, because their space keys did not
 change.
 
-Finally, securely delete `/restore` and `/var/backups/noddanas` from the new host once you are
+Finally, securely delete `/restore` and `/var/backups/frontdir` from the new host once you are
 confident, or keep them as root-only files.
 
 ---
@@ -356,11 +356,11 @@ confident, or keep them as root-only files.
 
 | What changed | What to do |
 |---|---|
-| **Hostname** | Set `NODDANAS_HOST` in `.env`. Update the OIDC redirect URI at the IdP. For SAML, the SP entity ID defaults to the metadata URL, so either set `NODDANAS_SAML_ENTITY_ID` to the old value or update the IdP. Public links still work if people replace the host part of the URL. |
+| **Hostname** | Set `FRONTDIR_HOST` in `.env`. Update the OIDC redirect URI at the IdP. For SAML, the SP entity ID defaults to the metadata URL, so either set `FRONTDIR_SAML_ENTITY_ID` to the old value or update the IdP. Public links still work if people replace the host part of the URL. |
 | **Identity provider rebuilt** | Accounts are matched by issuer and subject ID. Restore the IdP from its own backup so both stay the same. If they change, users get new, empty accounts and their encrypted files remain with the old ones. There is currently no tool to relink them. |
 | **PostgreSQL major version** | A `pg_dump` restores into a newer version. An offline volume copy does not. |
-| **Newer NoddaNAS** | Restore the backed-up version first, confirm it works, then upgrade normally (migrations only move forward). |
-| **Settings key lost** (`secrets/settings_key`) | Only secrets saved in the web admin area (the OIDC client secret) depend on it, and NoddaNAS refuses to start with a message naming them. Create a new key (`scripts/init-secrets.sh` makes one if the file is missing), run `docker compose run --rm noddanas settings reset OIDC_CLIENT_SECRET`, start, and enter the client secret again (through a setup link if nobody can sign in without it). Settings themselves are in the database and come back with it. |
+| **Newer FrontDir** | Restore the backed-up version first, confirm it works, then upgrade normally (migrations only move forward). |
+| **Settings key lost** (`secrets/settings_key`) | Only secrets saved in the web admin area (the OIDC client secret) depend on it, and FrontDir refuses to start with a message naming them. Create a new key (`scripts/init-secrets.sh` makes one if the file is missing), run `docker compose run --rm frontdir settings reset OIDC_CLIENT_SECRET`, start, and enter the client secret again (through a setup link if nobody can sign in without it). Settings themselves are in the database and come back with it. |
 | **Database lost, files survived** | See "Things not to do" in [§5](#things-not-to-do): individual containers can be salvaged by their owners, but this is not a recovery path. |
 
 ---
@@ -414,7 +414,7 @@ The same rules apply, using your platform's tools:
   recovery.
 - **Data volume:** use CSI volume snapshots copied off-cluster, or a file-level backup tool such
   as Velero with restic or Kopia.
-- **Configuration:** your manifests (kept in git) and the `noddanas-secrets` Secret (kept in a
+- **Configuration:** your manifests (kept in git) and the `frontdir-secrets` Secret (kept in a
   secret manager).
-- **Run the operator commands** with `kubectl -n noddanas exec deploy/noddanas -- /noddanas …`
+- **Run the operator commands** with `kubectl -n frontdir exec deploy/frontdir -- /frontdir …`
   (`verify-storage --hash`, `revoke-sessions --all`, and the rest).

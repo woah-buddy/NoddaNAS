@@ -1,9 +1,9 @@
 // Package auth authenticates callers and turns them into service.Principals.
 //
-// NoddaNAS deliberately does not store user passwords or implement MFA. It
+// FrontDir deliberately does not store user passwords or implement MFA. It
 // delegates sign-in to an external OpenID Connect provider (Keycloak,
 // Authentik, Zitadel, Pocket ID, Entra ID, Google, ...), which already does
-// those things well. Two credential types exist on the NoddaNAS side:
+// those things well. Two credential types exist on the FrontDir side:
 //
 //   - Browser sessions (backend-for-frontend pattern): the server completes
 //     the OIDC code flow itself (PKCE + state + nonce) and gives the browser
@@ -26,9 +26,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 // LoginRequest is the server-side state of an in-progress sign-in.
@@ -102,8 +102,8 @@ type Store interface {
 // cookies that are Secure, host-only (no Domain) and Path=/. That stops a
 // sibling subdomain from planting or overwriting them.
 const (
-	SessionCookie = "__Host-ndn_session"
-	LoginCookie   = "__Host-ndn_login"
+	SessionCookie = "__Host-fd_session"
+	LoginCookie   = "__Host-fd_login"
 )
 
 // Config controls session lifetimes.

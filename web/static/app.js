@@ -1,4 +1,4 @@
-// NoddaNAS web client (end-to-end encrypted).
+// FrontDir web client (end-to-end encrypted).
 //
 // Everything is encrypted and decrypted here, in the browser (see e2ee.js
 // and docs/E2EE.md). The server only ever receives ciphertext: file
@@ -298,10 +298,10 @@ function confirmList(title, intro, items, ok) {
 // tokens. This code never builds CSS or markup from data: it shows the brand
 // name as text, points an <img> at the same-origin, re-encoded logo, and picks
 // a mode and accent by setting two allowlisted attributes on <html>.
-const APPEARANCE_KEY = 'noddanas.appearance';
+const APPEARANCE_KEY = 'frontdir.appearance';
 const MODES = { system: 'Match system', light: 'Light', dark: 'Dark', contrast: 'High contrast' };
 const ACCENT_RE = /^[a-z][a-z0-9-]{0,23}$/;
-let branding = { name: 'NoddaNAS', logo: false, defaultAccent: '', accents: [] };
+let branding = { name: 'FrontDir', logo: false, defaultAccent: '', accents: [] };
 
 function loadAppearance() {
   try {
@@ -330,7 +330,7 @@ async function loadBranding() {
   try {
     const b = await api('GET', '/api/v1/branding');
     branding = {
-      name: typeof b.name === 'string' && b.name ? b.name : 'NoddaNAS',
+      name: typeof b.name === 'string' && b.name ? b.name : 'FrontDir',
       logo: b.logo === true,
       defaultAccent: typeof b.defaultAccent === 'string' ? b.defaultAccent : '',
       accents: (Array.isArray(b.accents) ? b.accents : [])
@@ -445,8 +445,8 @@ async function signIn() {
     return main.replaceChildren(h('div', { class: 'panel center narrow' },
       h('h1', {}, branding.name), h('p', {}, 'This server is not set up yet: no sign-in method is configured.'),
       h('p', { class: 'note' }, 'The person who runs the server can create a one-time setup link by running ',
-        h('code', {}, 'noddanas setup-link'), ' on the server (for Docker Compose: ',
-        h('code', {}, 'docker compose exec noddanas noddanas setup-link'), ').')));
+        h('code', {}, 'frontdir setup-link'), ' on the server (for Docker Compose: ',
+        h('code', {}, 'docker compose exec frontdir frontdir setup-link'), ').')));
   }
   main.replaceChildren(h('div', { class: 'panel center' },
     h('h1', {}, branding.name), h('p', {}, 'Private, end-to-end encrypted file storage.'),
@@ -495,7 +495,7 @@ function showRecoveryCode(code) {
       h('div', { class: 'secret' }, code),
       h('p', { class: 'note' }, 'Write it down or store it in a password manager, away from this device.'),
       h('div', { class: 'row' },
-        h('button', { type: 'button', onclick: () => saveBlob(new Blob([`NoddaNAS recovery code for ${S.me.user.email || S.me.user.id}\n${code}\n`], { type: 'text/plain' }), 'noddanas-recovery-code.txt') }, 'Download as file')),
+        h('button', { type: 'button', onclick: () => saveBlob(new Blob([`FrontDir recovery code for ${S.me.user.email || S.me.user.id}\n${code}\n`], { type: 'text/plain' }), 'frontdir-recovery-code.txt') }, 'Download as file')),
       h('form', { class: 'stack', onsubmit: (e) => {
         e.preventDefault();
         if (check.value.trim().toUpperCase() !== code.slice(-4)) { err.textContent = 'That does not match. Check the code you saved.'; return; }
@@ -579,7 +579,7 @@ async function folderView(id) {
   const panel = h('div', { class: 'panel dropzone' },
     h('div', { class: 'toolbar' }, h('div', { class: 'crumbs' }, ...crumbs),
       canWrite && h('button', { onclick: () => newFolder(ctx) }, 'New folder'),
-      canWrite && h('button', { onclick: async () => restoreBackups(ctx, await pickFiles('.ndne')) }, 'Restore backup…'),
+      canWrite && h('button', { onclick: async () => restoreBackups(ctx, await pickFiles('.fdenc,.ndne')) }, 'Restore backup…'),
       canWrite && h('button', { class: 'primary', onclick: async () => uploadMany(ctx, await pickFiles('')) }, 'Upload')),
     h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Size'), h('th', {}, 'Modified'), h('th', {}))),
       h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 4, class: 'empty' }, 'This folder is empty.')))));
@@ -644,7 +644,7 @@ async function uploadMany(ctx, files) {
       const container = await encryptFor(ctx, file, nk, file.name, (f) => b.set(f / 2));
       try {
         await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, container,
-          { 'Content-Type': 'application/octet-stream', 'X-NoddaNAS-Entry': JSON.stringify({ id, ...entry }) }, (f) => b.set(0.5 + f / 2));
+          { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }) }, (f) => b.set(0.5 + f / 2));
         S.keys.set(id, nk);
       } catch (e) {
         if (e.status !== 409 || e.detail.existingKind !== 'file') throw e;
@@ -672,7 +672,7 @@ async function downloadFile(c, versionId) {
 
 async function backupFile(c) {
   try {
-    saveBlob(await apiBlob(`/api/v1/nodes/${c.id}/content`), `${c.name}.ndne`);
+    saveBlob(await apiBlob(`/api/v1/nodes/${c.id}/content`), `${c.name}.fdenc`);
     toast('Encrypted backup saved. It can be restored, or decrypted offline, with your keys.');
   } catch (e) { toast(e.message); }
 }
@@ -691,7 +691,7 @@ async function restoreBackups(ctx, files) {
         const entry = await (await nodeKey(ctx.folderId)).entry(id, name, nk);
         try {
           await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, file,
-            { 'Content-Type': 'application/octet-stream', 'X-NoddaNAS-Entry': JSON.stringify({ id, ...entry }) });
+            { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }) });
           S.keys.set(id, nk);
           toast(`Restored ${name} (signed by ${res.signer.displayName || res.signer.id.slice(0, 8)})`);
           break;
@@ -1125,9 +1125,9 @@ async function settingsView() {
       } }, 'Change passphrase'),
       h('button', { onclick: exportKeys }, 'Download key backup'),
       h('button', { onclick: () => { S.acct = null; S.contacts = null; S.keys.clear(); S.spaces.clear(); route(); } }, 'Lock now')),
-    h('p', { class: 'note' }, 'The key backup is encrypted: it opens only with your passphrase or recovery code. With it, any backed-up file (.ndne) or WebDAV mirror can be decrypted offline using the noddanas-cli tool.'),
+    h('p', { class: 'note' }, 'The key backup is encrypted: it opens only with your passphrase or recovery code. With it, any backed-up file (.fdenc) or WebDAV mirror can be decrypted offline using the frontdir-cli tool.'),
     h('h2', {}, 'Verified people'),
-    h('p', { class: 'note' }, 'People whose key fingerprints you compared with them directly. NoddaNAS marks them ✔ wherever they appear and warns you about other accounts that imitate them. This list is encrypted with your own key: the server cannot read or change it.'),
+    h('p', { class: 'note' }, 'People whose key fingerprints you compared with them directly. FrontDir marks them ✔ wherever they appear and warns you about other accounts that imitate them. This list is encrypted with your own key: the server cannot read or change it.'),
     S.contacts?.problem ? h('p', { class: 'error' }, S.contacts.problem) : null,
     h('table', {}, h('tbody', {}, Object.keys(S.contacts?.list.contacts || {}).length
       ? Object.entries(S.contacts.list.contacts).sort((a, b) => a[1].name.localeCompare(b[1].name)).map(([id, c]) => h('tr', {},
@@ -1140,7 +1140,7 @@ async function settingsView() {
         } }, 'Remove'))))
       : h('tr', {}, h('td', { class: 'note' }, 'You have not verified anyone yet. Use “Verify…” next to a person’s name.')))),
     h('h2', {}, 'App passwords'),
-    h('p', { class: 'note' }, 'For the noddanas-cli tool and for backing up encrypted files over WebDAV (', `${location.origin}/dav/`, '). WebDAV is read-only and serves ciphertext only.'),
+    h('p', { class: 'note' }, 'For the frontdir-cli tool and for backing up encrypted files over WebDAV (', `${location.origin}/dav/`, '). WebDAV is read-only and serves ciphertext only.'),
     note && h('p', { class: 'error' }, note),
     h('table', {}, h('tbody', {}, aps.length ? aps.map((a) => h('tr', {}, h('td', {}, a.name, a.readOnly ? ' (read-only)' : ''),
       h('td', { class: 'num' }, a.lastUsedAt ? `last used ${fmtDate(a.lastUsedAt)}` : 'never used'),
@@ -1181,8 +1181,8 @@ async function exportKeys() {
       const u = await api('GET', `/api/v1/users/${sp.myGrant.grantedBy}/keys`);
       teams.push({ spaceId: sp.id, ...sp.myGrant, granterKeys: { enc: u.keys.enc, sig: u.keys.sig }, granterSelfSig: u.keys.selfSig });
     }
-    const backup = { format: 'noddanas-keys/v1', bundle: S.bundle, teams };
-    saveBlob(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }), 'noddanas-keys.json');
+    const backup = { format: 'frontdir-keys/v1', bundle: S.bundle, teams };
+    saveBlob(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }), 'frontdir-keys.json');
   } catch (e) { toast(e.message); }
 }
 
@@ -1296,7 +1296,7 @@ function emergencyTab(body) {
   body.replaceChildren(
     h('h2', {}, 'Revoke every public link'),
     h('p', { class: 'note' }, 'Links stop working immediately and cannot be restored. Shares with specific people and team folders are not affected. ' +
-      'From the server’s shell: noddanas revoke-links --all.'),
+      'From the server’s shell: frontdir revoke-links --all.'),
     h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: async () => {
       const typed = await prompt('Revoke every public link on this server?', 'This affects all users and cannot be undone. Type REVOKE ALL to confirm.');
       if (typed === null) return;
@@ -1308,7 +1308,7 @@ function emergencyTab(body) {
     } }, 'Revoke all public links')),
     h('h2', {}, 'Sign everyone out'),
     h('p', { class: 'note' }, 'Ends every browser session on the server, including yours. People sign in again through the identity provider, which applies its current rules. ' +
-      'App passwords keep working; revoke those per person under People. From the server’s shell: noddanas revoke-sessions --all.'),
+      'App passwords keep working; revoke those per person under People. From the server’s shell: frontdir revoke-sessions --all.'),
     h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: async () => {
       const typed = await prompt('Sign everyone out?', 'Everyone, including you, must sign in again. Type SIGN OUT EVERYONE to confirm.');
       if (typed === null) return;
@@ -1325,7 +1325,7 @@ function settingsForm(v, groups, save, done) {
   // Sections appear in the order the caller lists them.
   const sections = groups.map((id) => v.groups.find((g) => g.id === id)).filter(Boolean).map((g) => h('fieldset', {}, h('legend', {}, g.label),
     g.fromServer && h('p', { class: 'note' }, 'Configured on the server (environment variables). Change it there; it cannot be mixed with web settings.'),
-    g.id === 'oidc' && h('p', { class: 'note wrap-anywhere' }, 'At your identity provider, register NoddaNAS as a confidential client (authorization code flow with PKCE) with this redirect URI: ', h('code', {}, v.signIn.oidcRedirectUri)),
+    g.id === 'oidc' && h('p', { class: 'note wrap-anywhere' }, 'At your identity provider, register FrontDir as a confidential client (authorization code flow with PKCE) with this redirect URI: ', h('code', {}, v.signIn.oidcRedirectUri)),
     g.id === 'saml' && h('p', { class: 'note wrap-anywhere' }, 'Give your identity provider our metadata: ', h('code', {}, v.signIn.samlMetadataUrl), ' (assertion consumer service ', h('code', {}, v.signIn.samlAcsUrl), ').'),
     v.fields.filter((f) => f.group === g.id).map((f) => fieldEditor(f, editors, v))));
   return h('form', { class: 'settings', onsubmit: async (e) => {
@@ -1365,7 +1365,7 @@ function settingsForm(v, groups, save, done) {
         return;
       }
     }
-  } }, v.readOnly && h('p', { class: 'note' }, 'Settings are read-only on the web on this server (NODDANAS_WEB_SETTINGS=false).'),
+  } }, v.readOnly && h('p', { class: 'note' }, 'Settings are read-only on the web on this server (FRONTDIR_WEB_SETTINGS=false).'),
   sections, status, h('div', { class: 'toolbar' }, h('button', { class: 'primary', disabled: v.readOnly }, 'Save changes')));
 }
 
@@ -1446,7 +1446,7 @@ function fieldEditor(f, editors, v) {
 }
 
 // ---- first-time setup --------------------------------------------------------------------------------------------
-// The link from `noddanas setup-link` carries its token in the fragment
+// The link from `frontdir setup-link` carries its token in the fragment
 // (/setup#token), which browsers never send to the server. The page moves
 // it out of the address bar at once and keeps it in memory only.
 let setupToken = null;
@@ -1460,7 +1460,7 @@ async function setupView() {
   const panel = h('div', { class: 'panel narrow' }, h('h1', {}, `Set up ${branding.name}`));
   main.replaceChildren(panel);
   if (!setupToken) {
-    return panel.append(h('p', { class: 'error' }, 'Open the setup link exactly as noddanas setup-link printed it, including the part after #. ' +
+    return panel.append(h('p', { class: 'error' }, 'Open the setup link exactly as frontdir setup-link printed it, including the part after #. ' +
       'If you reloaded this page, open the link again: it keeps working until someone signs in through it.'));
   }
   let v;

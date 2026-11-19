@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 // The interfaces below are the service's "ports": what it needs from the

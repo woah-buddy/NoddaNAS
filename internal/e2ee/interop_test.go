@@ -16,10 +16,10 @@ import (
 
 // TestBrowserInterop checks that the browser implementation (web/static/e2ee.js)
 // and this package agree byte-for-byte on docs/E2EE.md, in both directions.
-// It needs Node.js with Playwright and Chromium; set NODDANAS_BROWSER_TEST=1.
+// It needs Node.js with Playwright and Chromium; set FRONTDIR_BROWSER_TEST=1.
 func TestBrowserInterop(t *testing.T) {
-	if os.Getenv("NODDANAS_BROWSER_TEST") == "" {
-		t.Skip("set NODDANAS_BROWSER_TEST=1 (needs node + playwright)")
+	if os.Getenv("FRONTDIR_BROWSER_TEST") == "" {
+		t.Skip("set FRONTDIR_BROWSER_TEST=1 (needs node + playwright)")
 	}
 	_, here, _, _ := runtime.Caller(0)
 	repo := filepath.Join(filepath.Dir(here), "..", "..")

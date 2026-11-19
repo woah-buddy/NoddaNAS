@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 const key = "0123456789abcdef0123456789abcdef"

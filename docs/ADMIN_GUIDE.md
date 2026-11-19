@@ -1,7 +1,7 @@
 # Administrator guide
 
-This guide covers installing, configuring and maintaining a NoddaNAS server. It is written for
-the person who runs the server. End users need only the web app and, optionally, `noddanas-cli`.
+This guide covers installing, configuring and maintaining a FrontDir server. It is written for
+the person who runs the server. End users need only the web app and, optionally, `frontdir-cli`.
 
 Two deployment paths are documented: **Docker Compose** on a single host (recommended for most
 installations) and **Kubernetes**. Both run the same container image.
@@ -26,7 +26,7 @@ installations) and **Kubernetes**. Both run the same container image.
 16. [Decommissioning](#16-decommissioning)
 
 Commands in this guide assume Compose and are run from `deploy/compose`. On Kubernetes, replace
-`docker compose exec noddanas /noddanas …` with `kubectl -n noddanas exec deploy/noddanas -- /noddanas …`.
+`docker compose exec frontdir /frontdir …` with `kubectl -n frontdir exec deploy/frontdir -- /frontdir …`.
 
 ---
 
@@ -34,7 +34,7 @@ Commands in this guide assume Compose and are run from `deploy/compose`. On Kube
 
 ### What you are responsible for (and what you are not)
 
-NoddaNAS encrypts files end to end, so the server's job is narrower than in a traditional file server:
+FrontDir encrypts files end to end, so the server's job is narrower than in a traditional file server:
 
 | As the administrator you can | You cannot (by design) |
 |---|---|
@@ -55,17 +55,17 @@ and who shares with whom. Protect the database and its backups accordingly. See
 
 | Component | Provided by | Notes |
 |---|---|---|
-| NoddaNAS server | This repository (one static binary in a distroless image) | Stateless except for the data volume; runs as UID 65532 with a read-only root filesystem |
+| FrontDir server | This repository (one static binary in a distroless image) | Stateless except for the data volume; runs as UID 65532 with a read-only root filesystem |
 | PostgreSQL 16 or newer | Compose file (`postgres:18-alpine`), a managed service, or an operator such as CloudNativePG | Holds users, the folder tree, encrypted names, wrapped keys and shares |
 | Storage for file containers | A local volume, or `ReadWriteMany` storage on Kubernetes for multiple replicas | Holds only ciphertext |
 | HTTPS reverse proxy | Compose file (Caddy, automatic certificates) or your own | TLS is required (plain HTTP is accepted only for `localhost`) |
-| Identity provider | Yours: any OIDC provider and/or SAML 2.0 IdP | NoddaNAS stores no passwords |
+| Identity provider | Yours: any OIDC provider and/or SAML 2.0 IdP | FrontDir stores no passwords |
 
 ### Sizing
 
 - **Storage:** plan for your users' quotas, not their current usage. Each stored version adds
   about 0.03% of encryption overhead plus a few kilobytes. Old versions (up to
-  `NODDANAS_MAX_VERSIONS` per file) and the trash (kept for `NODDANAS_TRASH_RETENTION`) count
+  `FRONTDIR_MAX_VERSIONS` per file) and the trash (kept for `FRONTDIR_TRASH_RETENTION`) count
   towards quotas and use disk.
 - **CPU and memory:** low, because encryption happens on users' devices. The reference Kubernetes
   manifest requests 100m CPU and 128 MiB of memory with a 512 MiB limit, which suits small teams.
@@ -78,10 +78,10 @@ Write these down before installing. Every one becomes a setting.
 
 1. **Hostname**, e.g. `files.example.com`, with a DNS record pointing at the server.
 2. **Sign-in method:** OIDC, SAML, or both.
-3. **Who may sign in:** an IdP group (e.g. `noddanas-users`), a verified email domain, or both.
+3. **Who may sign in:** an IdP group (e.g. `frontdir-users`), a verified email domain, or both.
    Leaving both empty lets *anyone your IdP authenticates* in. That is only acceptable for an IdP
    that contains nobody else.
-4. **Who administers NoddaNAS:** an IdP group (e.g. `noddanas-admins`).
+4. **Who administers FrontDir:** an IdP group (e.g. `frontdir-admins`).
 5. **Quotas:** default personal quota (10 GiB) and default team folder quota (50 GiB).
 6. **Whether every user may create team folders**, or only administrators.
 7. **Where server backups go,** and who can read them (they contain metadata).
@@ -90,11 +90,11 @@ Write these down before installing. Every one becomes a setting.
 
 ## 2. Prepare your identity provider
 
-NoddaNAS never sees passwords. It accepts a sign-in only when your IdP vouches for the user, and it
+FrontDir never sees passwords. It accepts a sign-in only when your IdP vouches for the user, and it
 reads three things from the IdP: a stable user identifier, a **verified** email address (optional
 but recommended), and **group names**. Groups are refreshed every time a user signs in.
 
-Require multi-factor authentication or passkeys for NoddaNAS at the IdP. The IdP is the front door.
+Require multi-factor authentication or passkeys for FrontDir at the IdP. The IdP is the front door.
 
 ### OIDC
 
@@ -104,32 +104,32 @@ Create a **confidential** client using the **authorization code** flow:
 |---|---|
 | Redirect (callback) URI | `https://<host>/auth/callback` |
 | Post-logout redirect URI | `https://<host>/` |
-| Scopes | `openid email profile` (change with `NODDANAS_OIDC_SCOPES`) |
-| Groups | Include group names in a `groups` claim of the ID token (rename with `NODDANAS_OIDC_GROUPS_CLAIM`) |
+| Scopes | `openid email profile` (change with `FRONTDIR_OIDC_SCOPES`) |
+| Groups | Include group names in a `groups` claim of the ID token (rename with `FRONTDIR_OIDC_GROUPS_CLAIM`) |
 
-NoddaNAS uses PKCE, `state` and `nonce` on every sign-in. Note the **issuer URL**, **client ID**
+FrontDir uses PKCE, `state` and `nonce` on every sign-in. Note the **issuer URL**, **client ID**
 and **client secret**.
 
 Provider notes:
 
 - **Keycloak:** Client authentication *on*, Standard flow *on*. Add a *Group Membership* mapper
-  with token claim name `groups` and *Full group path* off, so groups arrive as `noddanas-users`
-  rather than `/noddanas-users`. The issuer is `https://<keycloak>/realms/<realm>`.
+  with token claim name `groups` and *Full group path* off, so groups arrive as `frontdir-users`
+  rather than `/frontdir-users`. The issuer is `https://<keycloak>/realms/<realm>`.
 - **Authentik:** an OAuth2/OpenID provider, confidential client type. The default `profile`
   scope mapping already includes `groups`.
 - **Microsoft Entra ID:** the `groups` claim carries group **object IDs** (GUIDs) by default, so
-  put those IDs in `NODDANAS_ALLOWED_GROUPS` and `NODDANAS_ADMIN_GROUPS`. Entra ID does not send
+  put those IDs in `FRONTDIR_ALLOWED_GROUPS` and `FRONTDIR_ADMIN_GROUPS`. Entra ID does not send
   `email_verified` by default, so emails will not be recorded (see below).
 
-**Why "verified" matters:** NoddaNAS records an email only if the IdP says it is verified (OIDC
+**Why "verified" matters:** FrontDir records an email only if the IdP says it is verified (OIDC
 `email_verified`). Otherwise someone could claim another person's address and receive the shares
 meant for them. Without verified emails, people cannot share with a user by email,
-`NODDANAS_ALLOWED_EMAIL_DOMAINS` admits no one, and operator commands must identify users by ID
+`FRONTDIR_ALLOWED_EMAIL_DOMAINS` admits no one, and operator commands must identify users by ID
 instead of email (see [Managing users](#12-managing-users)).
 
 ### SAML 2.0
 
-NoddaNAS is a SAML service provider (SP). It accepts only **SP-initiated** sign-in (IdP-initiated
+FrontDir is a SAML service provider (SP). It accepts only **SP-initiated** sign-in (IdP-initiated
 responses are refused, which prevents login CSRF), requires signed assertions, and uses the
 HTTP-POST binding.
 
@@ -137,29 +137,29 @@ Create an application at your IdP with:
 
 | Setting | Value |
 |---|---|
-| SP entity ID (audience) | `https://<host>/auth/saml/metadata` (or your `NODDANAS_SAML_ENTITY_ID`) |
+| SP entity ID (audience) | `https://<host>/auth/saml/metadata` (or your `FRONTDIR_SAML_ENTITY_ID`) |
 | ACS URL (HTTP-POST) | `https://<host>/auth/saml/acs` |
 | NameID format | **Persistent.** An email NameID ties the account to an address that can change or be reassigned. |
 | Signing | Sign the assertion or response. |
 | Attributes | Email, display name and groups (common names are recognized automatically; see [§7](#saml)) |
 
 Then note the IdP's **metadata URL** (must be `https://`) or download its metadata XML file.
-Once NoddaNAS is running, its SP metadata is published at `https://<host>/auth/saml/metadata`.
+Once FrontDir is running, its SP metadata is published at `https://<host>/auth/saml/metadata`.
 Some IdPs prefer to import that file.
 
-If your IdP has a user dashboard (tiles), point the NoddaNAS tile at
+If your IdP has a user dashboard (tiles), point the FrontDir tile at
 `https://<host>/auth/saml/login`. That starts an SP-initiated sign-in, which works, whereas an
 IdP-initiated tile does not.
 
-SAML has no "email verified" attribute. Set `NODDANAS_SAML_TRUST_EMAIL=true` only if your IdP
+SAML has no "email verified" attribute. Set `FRONTDIR_SAML_TRUST_EMAIL=true` only if your IdP
 guarantees that the email it sends belongs to that user.
 
 ### Groups to create
 
 | Group | Purpose | Setting |
 |---|---|---|
-| `noddanas-users` | Everyone allowed to sign in | `NODDANAS_ALLOWED_GROUPS` |
-| `noddanas-admins` | Administrators (also add them to the users group) | `NODDANAS_ADMIN_GROUPS` |
+| `frontdir-users` | Everyone allowed to sign in | `FRONTDIR_ALLOWED_GROUPS` |
+| `frontdir-admins` | Administrators (also add them to the users group) | `FRONTDIR_ADMIN_GROUPS` |
 | Any others, e.g. `engineering` | Mapped to team folders by an administrator | Set in the web app |
 
 ---
@@ -175,8 +175,8 @@ Caddy obtains a certificate automatically. For a host reachable only on your LAN
 arbitrary branch head:
 
 ```sh
-git clone https://github.com/woah-buddy/NoddaNAS.git
-cd NoddaNAS
+git clone https://github.com/woah-buddy/FrontDir.git
+cd FrontDir
 git checkout <tag-or-commit>
 cd deploy/compose
 ```
@@ -188,7 +188,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Set at least `NODDANAS_HOST`. Then decide where the rest of the configuration lives
+Set at least `FRONTDIR_HOST`. Then decide where the rest of the configuration lives
 ([§7](#the-web-admin-area-and-the-server-who-owns-which-setting)):
 
 - **On the web (simplest).** Leave the sign-in section of `.env` commented out. After the stack
@@ -200,8 +200,8 @@ Set at least `NODDANAS_HOST`. Then decide where the rest of the configuration li
   and is shown locked in the admin area.
 
 You can mix the two per setting (each sign-in method is configured entirely in one place). Every
-setting in [§7](#7-configuration-reference) can go in `.env`, named without the `NODDANAS_` prefix
-(`NODDANAS_TEAM_CREATION` becomes `TEAM_CREATION`). `.env.example` lists them all, with defaults.
+setting in [§7](#7-configuration-reference) can go in `.env`, named without the `FRONTDIR_` prefix
+(`FRONTDIR_TEAM_CREATION` becomes `TEAM_CREATION`). `.env.example` lists them all, with defaults.
 If your IdP provides SAML metadata only as a file, or you use an SP key pair, put those files in
 `deploy/compose/saml/` (see the README there).
 
@@ -234,31 +234,31 @@ docker compose up -d --build
 **Step 6: verify.**
 
 ```sh
-docker compose ps                                   # all three services "running"; noddanas "healthy"
-docker compose logs noddanas | grep 'noddanas listening'
+docker compose ps                                   # all three services "running"; frontdir "healthy"
+docker compose logs frontdir | grep 'frontdir listening'
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/readyz   # expect 204
 ```
 
-If NoddaNAS exits immediately, `docker compose logs noddanas` lists **every** configuration
+If FrontDir exits immediately, `docker compose logs frontdir` lists **every** configuration
 problem at once. Fix them all and run `docker compose up -d` again.
 
-**Step 7: sign-in on the web (if you left it out of `.env`).** The log says NoddaNAS is not set
+**Step 7: sign-in on the web (if you left it out of `.env`).** The log says FrontDir is not set
 up yet. Create the one-time setup link:
 
 ```sh
-docker compose exec noddanas /noddanas setup-link
+docker compose exec frontdir /frontdir setup-link
 ```
 
 It prints a link (`https://<host>/setup#…`) to your terminal only; it is never written to a log.
 Treat it like a password. Open it, enter your identity provider's details (the page shows the
-redirect URI or SAML metadata URL to register there), and save: NoddaNAS tries them against the
+redirect URI or SAML metadata URL to register there), and save: FrontDir tries them against the
 identity provider before saving, so a typo is caught now. Then choose **Sign in to finish**. You
 sign in through your identity provider, become the first administrator, and the link stops
 working. Unused, it expires after 24 hours; running the command again replaces it.
 
 **Step 8: SAML only.** If your IdP needs the SP metadata file, download it now from
 `https://<host>/auth/saml/metadata` and import it. (With SAML configured on the web, the IdP's
-metadata must be saved first, so register NoddaNAS at the IdP with the metadata URL as soon as
+metadata must be saved first, so register FrontDir at the IdP with the metadata URL as soon as
 it is saved, then sign in to finish.)
 
 Continue with [§6 First sign-in](#6-first-sign-in-and-day-one-tasks).
@@ -266,7 +266,7 @@ Continue with [§6 First sign-in](#6-first-sign-in-and-day-one-tasks).
 ### What the Compose setup does for you
 
 - Every container drops all Linux capabilities (re-adding only the few PostgreSQL and Caddy
-  need), runs with `no-new-privileges`, and NoddaNAS runs as a non-root user on a read-only root
+  need), runs with `no-new-privileges`, and FrontDir runs as a non-root user on a read-only root
   filesystem.
 - PostgreSQL sits on an internal network with no route to the internet or the host. It is
   initialized with data checksums and SCRAM password authentication.
@@ -279,7 +279,7 @@ Continue with [§6 First sign-in](#6-first-sign-in-and-day-one-tasks).
 
 ## 4. Install on Kubernetes
 
-The reference manifest is `deploy/kubernetes/noddanas.yaml`. It creates a namespace with the
+The reference manifest is `deploy/kubernetes/frontdir.yaml`. It creates a namespace with the
 *restricted* Pod Security level, a service account without API access, a non-root pod with a
 read-only root filesystem, probes, and a default-deny NetworkPolicy.
 
@@ -287,12 +287,12 @@ read-only root filesystem, probes, and a default-deny NetworkPolicy.
 commit and push to a registry your cluster can pull from:
 
 ```sh
-docker build --build-arg VERSION=$(git describe --tags --always) -t registry.example.com/noddanas:<version> .
-docker push registry.example.com/noddanas:<version>
+docker build --build-arg VERSION=$(git describe --tags --always) -t registry.example.com/frontdir:<version> .
+docker push registry.example.com/frontdir:<version>
 ```
 
 Then set `image:` in the manifest to that image, preferably **by digest**
-(`registry.example.com/noddanas@sha256:…`).
+(`registry.example.com/frontdir@sha256:…`).
 
 **Step 2: PostgreSQL.** Use a managed service or an operator (for example CloudNativePG). Create
 a database and a user owning it. Off-host connections should use `sslmode=verify-full`.
@@ -305,17 +305,17 @@ background jobs coordinate through the database. Rate limits are counted per rep
 **Step 4: secrets.** Create them out of band; never commit them:
 
 ```sh
-kubectl create namespace noddanas      # or apply the manifest's Namespace first
-kubectl -n noddanas create secret generic noddanas-secrets \
-  --from-literal=database_url='postgres://noddanas:<password>@<db-host>:5432/noddanas?sslmode=verify-full' \
+kubectl create namespace frontdir      # or apply the manifest's Namespace first
+kubectl -n frontdir create secret generic frontdir-secrets \
+  --from-literal=database_url='postgres://frontdir:<password>@<db-host>:5432/frontdir?sslmode=verify-full' \
   --from-literal=oidc_client_secret='<secret>'
 ```
 
 For SAML with an SP key pair, add the key and certificate to the secret and set
-`NODDANAS_SAML_SP_KEY_FILE` and `NODDANAS_SAML_SP_CERT_FILE` to their mounted paths.
+`FRONTDIR_SAML_SP_KEY_FILE` and `FRONTDIR_SAML_SP_CERT_FILE` to their mounted paths.
 
-**Step 5: configure.** Edit the ConfigMap in the manifest: `NODDANAS_PUBLIC_URL`, the sign-in
-settings, `NODDANAS_ALLOWED_GROUPS`, `NODDANAS_ADMIN_GROUPS`, and `NODDANAS_TRUSTED_PROXIES` (the
+**Step 5: configure.** Edit the ConfigMap in the manifest: `FRONTDIR_PUBLIC_URL`, the sign-in
+settings, `FRONTDIR_ALLOWED_GROUPS`, `FRONTDIR_ADMIN_GROUPS`, and `FRONTDIR_TRUSTED_PROXIES` (the
 pod CIDR of your ingress controller, so that only the ingress can set `X-Forwarded-For`).
 
 **Step 6: ingress.** The manifest has no Ingress, because ingress controllers differ. Whatever
@@ -326,8 +326,8 @@ request bodies, avoid buffering, and allow long transfers. For ingress-nginx:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: noddanas
-  namespace: noddanas
+  name: frontdir
+  namespace: frontdir
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
@@ -338,14 +338,14 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts: [files.example.com]
-      secretName: noddanas-tls
+      secretName: frontdir-tls
   rules:
     - host: files.example.com
       http:
         paths:
           - path: /
             pathType: Prefix
-            backend: {service: {name: noddanas, port: {name: http}}}
+            backend: {service: {name: frontdir, port: {name: http}}}
 ```
 
 The NetworkPolicy allows ingress only from the namespace labelled
@@ -354,14 +354,14 @@ The NetworkPolicy allows ingress only from the namespace labelled
 **Step 7: apply and verify.**
 
 ```sh
-kubectl apply -f deploy/kubernetes/noddanas.yaml
-kubectl -n noddanas rollout status deploy/noddanas
-kubectl -n noddanas logs deploy/noddanas | grep 'noddanas listening'
+kubectl apply -f deploy/kubernetes/frontdir.yaml
+kubectl -n frontdir rollout status deploy/frontdir
+kubectl -n frontdir logs deploy/frontdir | grep 'frontdir listening'
 curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/readyz   # expect 204
 ```
 
 To run migrations as a separate step (for example a pre-upgrade Job), set
-`NODDANAS_AUTO_MIGRATE=false` and run `/noddanas migrate` with the same configuration.
+`FRONTDIR_AUTO_MIGRATE=false` and run `/frontdir migrate` with the same configuration.
 
 ---
 
@@ -369,10 +369,10 @@ To run migrations as a separate step (for example a pre-upgrade Job), set
 
 Any reverse proxy works if it:
 
-1. terminates TLS for the hostname in `NODDANAS_PUBLIC_URL`;
-2. forwards the **original `Host` header** (NoddaNAS answers `421 Misdirected Request` to any other host);
-3. sets `X-Forwarded-For`, and NoddaNAS lists the proxy's address in `NODDANAS_TRUSTED_PROXIES`;
-4. allows request bodies as large as `NODDANAS_MAX_FILE_SIZE` (or unlimited), streams without
+1. terminates TLS for the hostname in `FRONTDIR_PUBLIC_URL`;
+2. forwards the **original `Host` header** (FrontDir answers `421 Misdirected Request` to any other host);
+3. sets `X-Forwarded-For`, and FrontDir lists the proxy's address in `FRONTDIR_TRUSTED_PROXIES`;
+4. allows request bodies as large as `FRONTDIR_MAX_FILE_SIZE` (or unlimited), streams without
    buffering, and allows transfers that last longer than a minute;
 5. does **not** compress responses, and does not rewrite `Origin`, `Sec-Fetch-*` or cookies.
 
@@ -402,16 +402,16 @@ server {
 }
 ```
 
-**Without a proxy,** NoddaNAS can terminate TLS itself: set `NODDANAS_TLS_CERT_FILE` and
-`NODDANAS_TLS_KEY_FILE` (TLS 1.2 minimum) and usually `NODDANAS_LISTEN=:8443`. Certificates are
-read at startup, so restart NoddaNAS after renewing them.
+**Without a proxy,** FrontDir can terminate TLS itself: set `FRONTDIR_TLS_CERT_FILE` and
+`FRONTDIR_TLS_KEY_FILE` (TLS 1.2 minimum) and usually `FRONTDIR_LISTEN=:8443`. Certificates are
+read at startup, so restart FrontDir after renewing them.
 
 ---
 
 ## 6. First sign-in and day-one tasks
 
 1. Open `https://<host>` and sign in with an account in the admin group (or finish the setup link,
-   [§3](#3-install-with-docker-compose) step 7, which makes you an administrator). NoddaNAS creates
+   [§3](#3-install-with-docker-compose) step 7, which makes you an administrator). FrontDir creates
    accounts automatically on first sign-in. There is nothing to pre-provision.
 2. Choose an **encryption passphrase** (at least 12 characters). It is separate from your IdP
    password and never leaves the browser.
@@ -448,31 +448,31 @@ read at startup, so restart NoddaNAS after renewing them.
 ## 7. Configuration reference
 
 Settings are environment variables, and most can also be changed by administrators in the web
-admin area ([below](#the-web-admin-area-and-the-server-who-owns-which-setting)). NoddaNAS
+admin area ([below](#the-web-admin-area-and-the-server-who-owns-which-setting)). FrontDir
 validates the whole configuration at startup and **refuses to start** if anything is missing or
-unsafe, listing every problem. Environment changes take effect when NoddaNAS restarts; changes
+unsafe, listing every problem. Environment changes take effect when FrontDir restarts; changes
 in the admin area take effect immediately, on every replica within 15 seconds.
 
-**With Docker Compose,** put each setting in `deploy/compose/.env` without the `NODDANAS_`
-prefix: `NODDANAS_TEAM_CREATION=false` becomes `TEAM_CREATION=false`. `.env.example` lists
+**With Docker Compose,** put each setting in `deploy/compose/.env` without the `FRONTDIR_`
+prefix: `FRONTDIR_TEAM_CREATION=false` becomes `TEAM_CREATION=false`. `.env.example` lists
 every one, with its default. Then run `docker compose up -d` to apply the change. A few settings
 are fixed by the Compose setup on purpose, and setting them in `.env` has no effect:
 
 | Setting | Fixed to | Why |
 |---|---|---|
-| `NODDANAS_PUBLIC_URL` | `https://` + `NODDANAS_HOST` | One hostname drives NoddaNAS and Caddy |
-| `NODDANAS_DATABASE_URL_FILE`, `NODDANAS_OIDC_CLIENT_SECRET_FILE`, `NODDANAS_SETTINGS_KEY_FILE` | Docker secrets from `secrets/` | Keeps credentials out of the environment |
-| `NODDANAS_TRUSTED_PROXIES` | Caddy's network, `172.30.0.0/24` | Only the proxy may set `X-Forwarded-For` |
-| `NODDANAS_LISTEN`, `NODDANAS_TLS_CERT_FILE`, `NODDANAS_TLS_KEY_FILE` | Port 8080, no TLS | Caddy terminates TLS and proxies to NoddaNAS |
-| `NODDANAS_DATA_DIR` | `/data` | The `noddanas-data` volume is mounted there |
+| `FRONTDIR_PUBLIC_URL` | `https://` + `FRONTDIR_HOST` | One hostname drives FrontDir and Caddy |
+| `FRONTDIR_DATABASE_URL_FILE`, `FRONTDIR_OIDC_CLIENT_SECRET_FILE`, `FRONTDIR_SETTINGS_KEY_FILE` | Docker secrets from `secrets/` | Keeps credentials out of the environment |
+| `FRONTDIR_TRUSTED_PROXIES` | Caddy's network, `172.30.0.0/24` | Only the proxy may set `X-Forwarded-For` |
+| `FRONTDIR_LISTEN`, `FRONTDIR_TLS_CERT_FILE`, `FRONTDIR_TLS_KEY_FILE` | Port 8080, no TLS | Caddy terminates TLS and proxies to FrontDir |
+| `FRONTDIR_DATA_DIR` | `/data` | The `frontdir-data` volume is mounted there |
 
 Settings that name a file point inside the container. Put SAML files (IdP metadata, the SP key
-pair) in `deploy/compose/saml/`, which is mounted read-only at `/etc/noddanas/saml`, and branding
-files in `deploy/compose/branding/`, mounted at `/etc/noddanas/branding`. The repository's tests
-check that every setting NoddaNAS reads can be set this way and is documented here.
+pair) in `deploy/compose/saml/`, which is mounted read-only at `/etc/frontdir/saml`, and branding
+files in `deploy/compose/branding/`, mounted at `/etc/frontdir/branding`. The repository's tests
+check that every setting FrontDir reads can be set this way and is documented here.
 
-For values that are secrets, prefer the `_FILE` form: `NODDANAS_DATABASE_URL_FILE`,
-`NODDANAS_OIDC_CLIENT_SECRET_FILE` and `NODDANAS_SETTINGS_KEY_FILE` name a file whose contents are
+For values that are secrets, prefer the `_FILE` form: `FRONTDIR_DATABASE_URL_FILE`,
+`FRONTDIR_OIDC_CLIENT_SECRET_FILE` and `FRONTDIR_SETTINGS_KEY_FILE` name a file whose contents are
 the value. File-based secrets
 stay out of `docker inspect`, process listings and crash dumps. Setting both forms is an error.
 
@@ -498,12 +498,12 @@ changed under **Admin** in the web app:
 
 **Precedence.** A non-empty environment variable wins and is shown **locked** in the admin area,
 with the variable's name; otherwise the value saved in the admin area; otherwise the default.
-With Compose, a commented-out or empty line in `.env` is "not set". `NODDANAS_WEB_SETTINGS=false`
+With Compose, a commented-out or empty line in `.env` is "not set". `FRONTDIR_WEB_SETTINGS=false`
 locks every setting (configuration as code only).
 
 **Sign-in methods are either/or.** OIDC is configured entirely in the environment (when
-`NODDANAS_OIDC_ISSUER` is set) or entirely on the web, and the same for SAML (anchored by
-`NODDANAS_SAML_IDP_METADATA_URL` or `_FILE`). A stray OIDC or SAML variable without its anchor is a
+`FRONTDIR_OIDC_ISSUER` is set) or entirely on the web, and the same for SAML (anchored by
+`FRONTDIR_SAML_IDP_METADATA_URL` or `_FILE`). A stray OIDC or SAML variable without its anchor is a
 startup error, so a deployment never runs on a mix nobody reviewed as a whole.
 
 **One set of rules.** Values from the admin area are parsed and validated by exactly the same code
@@ -515,11 +515,11 @@ never what the remote server answered.
 
 Viewing the admin area needs administrator rights. **Changing** anything in it also needs a
 recent sign-in: your identity provider is asked to authenticate you again (OIDC `prompt=login`
-and `max_age=0`; SAML `ForceAuthn`), and NoddaNAS checks that it did (OIDC `auth_time`, SAML
+and `max_age=0`; SAML `ForceAuthn`), and FrontDir checks that it did (OIDC `auth_time`, SAML
 `AuthnInstant`). It lasts 15 minutes. It is the same idea as `sudo` asking for your password
 again: a session left open on an unattended computer can look but cannot change who may sign
 in, who administers, or where sign-in goes. App passwords never qualify. Some identity providers
-omit `auth_time`; NoddaNAS then relies on them honouring `prompt=login` and logs a warning.
+omit `auth_time`; FrontDir then relies on them honouring `prompt=login` and logs a warning.
 
 #### Guard rails
 
@@ -529,13 +529,13 @@ omit `auth_time`; NoddaNAS then relies on them honouring `prompt=login` and logs
 - **Sign-in cannot be switched off from the web.** At least one method must stay on.
 - **Replacing an identity provider asks for confirmation.** Accounts are tied to the issuer that
   created them. Switching or removing a provider leaves its accounts unable to sign in (their
-  files stay, encrypted), and people get new, empty accounts through the new provider. NoddaNAS
+  files stay, encrypted), and people get new, empty accounts through the new provider. FrontDir
   counts the affected accounts, including yours, and asks before saving. Nobody can take over an
-  existing account by pointing NoddaNAS at another provider.
+  existing account by pointing FrontDir at another provider.
 - **Two administrators at once.** Saves carry a revision; the second of two conflicting saves is
   refused rather than silently overwriting the first.
 - **Secrets** (the OIDC client secret) are stored encrypted with AES-256-GCM under
-  `NODDANAS_SETTINGS_KEY`, never shown again, and logged only as "set". Without a settings key,
+  `FRONTDIR_SETTINGS_KEY`, never shown again, and logged only as "set". Without a settings key,
   the admin area cannot store secrets and says so.
 - **Outbound requests** to identity providers never go to link-local or cloud metadata addresses
   (or loopback, except on a `localhost` deployment); responses are capped at 1 MiB. Private
@@ -547,9 +547,9 @@ omit `auth_time`; NoddaNAS then relies on them honouring `prompt=login` and logs
 
 | Command | Use |
 |---|---|
-| `docker compose exec noddanas /noddanas settings show` | Every setting, its source (`server`, `web`, `default`) and value; secrets hidden |
-| `docker compose exec noddanas /noddanas settings reset KEY…` | Clear settings saved on the web: a key (`OIDC_CLIENT_SECRET`), a group (`oidc`, `saml`, `access`, `branding`, `storage`, ...) or `all`. Running servers pick it up within 15 seconds. |
-| `docker compose exec noddanas /noddanas setup-link` | A one-time link to configure sign-in and become an administrator. Also the way back in when no administrator can sign in: reset the broken sign-in settings, then create a link. |
+| `docker compose exec frontdir /frontdir settings show` | Every setting, its source (`server`, `web`, `default`) and value; secrets hidden |
+| `docker compose exec frontdir /frontdir settings reset KEY…` | Clear settings saved on the web: a key (`OIDC_CLIENT_SECRET`), a group (`oidc`, `saml`, `access`, `branding`, `storage`, ...) or `all`. Running servers pick it up within 15 seconds. |
+| `docker compose exec frontdir /frontdir setup-link` | A one-time link to configure sign-in and become an administrator. Also the way back in when no administrator can sign in: reset the broken sign-in settings, then create a link. |
 
 Saved settings that no longer validate (for example after an upgrade tightened a rule) stop the
 server from starting with the list of problems and these commands as the fix. They are never
@@ -559,55 +559,55 @@ skipped: skipping a broken "allowed groups" would open sign-in to everyone.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_PUBLIC_URL` | *required* | The external origin, e.g. `https://files.example.com`. HTTPS is required except for `localhost`. Used for host checks, CSRF checks and IdP redirects. |
-| `NODDANAS_DATABASE_URL` or `NODDANAS_DATABASE_URL_FILE` | *required* | PostgreSQL connection URL. Use `sslmode=verify-full` when the database is on another host. |
-| `NODDANAS_DATA_DIR` | `/data` | Where encrypted file containers are stored |
-| `NODDANAS_LISTEN` | `:8080` | Listen address |
-| `NODDANAS_TLS_CERT_FILE` and `NODDANAS_TLS_KEY_FILE` | | Serve HTTPS directly (set both or neither) |
-| `NODDANAS_TRUSTED_PROXIES` | | IPs or CIDRs whose `X-Forwarded-For` header is believed. Set it to exactly your proxy's addresses. |
-| `NODDANAS_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
-| `NODDANAS_AUTO_MIGRATE` | `true` | Apply database migrations at startup |
-| `NODDANAS_WORKER` | `true` | Run background jobs (trash expiry, purging deleted data, cleaning up expired sessions) |
-| `NODDANAS_WEBDAV` | `true` | Serve the read-only, ciphertext-only WebDAV endpoint at `/dav/` for backups |
-| `NODDANAS_SETTINGS_KEY` or `NODDANAS_SETTINGS_KEY_FILE` | | 32 random bytes, base64 or hex (`scripts/init-secrets.sh` creates one). Encrypts secrets saved in the admin area. Without it the admin area cannot store secrets. Back it up separately from the database. |
-| `NODDANAS_WEB_SETTINGS` | `true` | `false` makes every setting read-only in the admin area |
+| `FRONTDIR_PUBLIC_URL` | *required* | The external origin, e.g. `https://files.example.com`. HTTPS is required except for `localhost`. Used for host checks, CSRF checks and IdP redirects. |
+| `FRONTDIR_DATABASE_URL` or `FRONTDIR_DATABASE_URL_FILE` | *required* | PostgreSQL connection URL. Use `sslmode=verify-full` when the database is on another host. |
+| `FRONTDIR_DATA_DIR` | `/data` | Where encrypted file containers are stored |
+| `FRONTDIR_LISTEN` | `:8080` | Listen address |
+| `FRONTDIR_TLS_CERT_FILE` and `FRONTDIR_TLS_KEY_FILE` | | Serve HTTPS directly (set both or neither) |
+| `FRONTDIR_TRUSTED_PROXIES` | | IPs or CIDRs whose `X-Forwarded-For` header is believed. Set it to exactly your proxy's addresses. |
+| `FRONTDIR_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `FRONTDIR_AUTO_MIGRATE` | `true` | Apply database migrations at startup |
+| `FRONTDIR_WORKER` | `true` | Run background jobs (trash expiry, purging deleted data, cleaning up expired sessions) |
+| `FRONTDIR_WEBDAV` | `true` | Serve the read-only, ciphertext-only WebDAV endpoint at `/dav/` for backups |
+| `FRONTDIR_SETTINGS_KEY` or `FRONTDIR_SETTINGS_KEY_FILE` | | 32 random bytes, base64 or hex (`scripts/init-secrets.sh` creates one). Encrypts secrets saved in the admin area. Without it the admin area cannot store secrets. Back it up separately from the database. |
+| `FRONTDIR_WEB_SETTINGS` | `true` | `false` makes every setting read-only in the admin area |
 
 ### OIDC
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_OIDC_ISSUER` | | Issuer URL. Setting it enables OIDC. |
-| `NODDANAS_OIDC_CLIENT_ID` | *required with OIDC* | |
-| `NODDANAS_OIDC_CLIENT_SECRET` or `NODDANAS_OIDC_CLIENT_SECRET_FILE` | | Client secret |
-| `NODDANAS_OIDC_SCOPES` | `openid,email,profile` | |
-| `NODDANAS_OIDC_GROUPS_CLAIM` | `groups` | ID-token claim holding group names |
+| `FRONTDIR_OIDC_ISSUER` | | Issuer URL. Setting it enables OIDC. |
+| `FRONTDIR_OIDC_CLIENT_ID` | *required with OIDC* | |
+| `FRONTDIR_OIDC_CLIENT_SECRET` or `FRONTDIR_OIDC_CLIENT_SECRET_FILE` | | Client secret |
+| `FRONTDIR_OIDC_SCOPES` | `openid,email,profile` | |
+| `FRONTDIR_OIDC_GROUPS_CLAIM` | `groups` | ID-token claim holding group names |
 
 ### SAML
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_SAML_IDP_METADATA_URL` or `NODDANAS_SAML_IDP_METADATA_FILE` | | IdP metadata (URL must be `https://`). Setting one enables SAML. |
-| `NODDANAS_SAML_ENTITY_ID` | `https://<host>/auth/saml/metadata` | SP entity ID |
-| `NODDANAS_SAML_SP_KEY_FILE` and `NODDANAS_SAML_SP_CERT_FILE` | | Optional SP key pair (PEM) used to sign requests and decrypt encrypted assertions (set both or neither) |
-| `NODDANAS_SAML_TRUST_EMAIL` | `false` | Treat asserted emails as verified |
-| `NODDANAS_SAML_EMAIL_ATTRIBUTES` | `email`, `mail`, and the standard OID and claim URIs | Attribute names to read the email from, in order |
-| `NODDANAS_SAML_NAME_ATTRIBUTES` | `displayName`, `name`, `cn`, and standard URIs | Display name attributes |
-| `NODDANAS_SAML_GROUP_ATTRIBUTES` | `groups`, `memberOf`, `eduPersonAffiliation`, and standard URIs | Group attributes |
+| `FRONTDIR_SAML_IDP_METADATA_URL` or `FRONTDIR_SAML_IDP_METADATA_FILE` | | IdP metadata (URL must be `https://`). Setting one enables SAML. |
+| `FRONTDIR_SAML_ENTITY_ID` | `https://<host>/auth/saml/metadata` | SP entity ID |
+| `FRONTDIR_SAML_SP_KEY_FILE` and `FRONTDIR_SAML_SP_CERT_FILE` | | Optional SP key pair (PEM) used to sign requests and decrypt encrypted assertions (set both or neither) |
+| `FRONTDIR_SAML_TRUST_EMAIL` | `false` | Treat asserted emails as verified |
+| `FRONTDIR_SAML_EMAIL_ATTRIBUTES` | `email`, `mail`, and the standard OID and claim URIs | Attribute names to read the email from, in order |
+| `FRONTDIR_SAML_NAME_ATTRIBUTES` | `displayName`, `name`, `cn`, and standard URIs | Display name attributes |
+| `FRONTDIR_SAML_GROUP_ATTRIBUTES` | `groups`, `memberOf`, `eduPersonAffiliation`, and standard URIs | Group attributes |
 
-With neither OIDC nor SAML configured (here or on the web), NoddaNAS starts in **setup mode**:
-the sign-in page explains that the server is not set up, and `noddanas setup-link` creates the
+With neither OIDC nor SAML configured (here or on the web), FrontDir starts in **setup mode**:
+the sign-in page explains that the server is not set up, and `frontdir setup-link` creates the
 link to set it up ([§3](#3-install-with-docker-compose) step 7).
 
 ### Access policy
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_ALLOWED_GROUPS` | | Sign-in requires membership in at least one of these groups |
-| `NODDANAS_ALLOWED_EMAIL_DOMAINS` | | Sign-in requires a **verified** email in one of these domains |
-| `NODDANAS_ADMIN_GROUPS` | | Members are NoddaNAS administrators (as are people appointed under Admin → People, and whoever completes a setup link) |
-| `NODDANAS_TEAM_CREATION` | `true` | Whether every user may create team folders (`false`: administrators only) |
+| `FRONTDIR_ALLOWED_GROUPS` | | Sign-in requires membership in at least one of these groups |
+| `FRONTDIR_ALLOWED_EMAIL_DOMAINS` | | Sign-in requires a **verified** email in one of these domains |
+| `FRONTDIR_ADMIN_GROUPS` | | Members are FrontDir administrators (as are people appointed under Admin → People, and whoever completes a setup link) |
+| `FRONTDIR_TEAM_CREATION` | `true` | Whether every user may create team folders (`false`: administrators only) |
 
-If both allow-lists are set, a user must satisfy **both**. If neither is set, NoddaNAS logs a
+If both allow-lists are set, a user must satisfy **both**. If neither is set, FrontDir logs a
 warning at startup and admits every account the IdP authenticates. Group memberships are
 refreshed at every sign-in; a change to the administrator groups applies to everyone at once,
 based on the groups each person had at their last sign-in.
@@ -616,28 +616,28 @@ based on the groups each person had at their last sign-in.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_DEFAULT_QUOTA` | `10GiB` | Quota of each new personal space |
-| `NODDANAS_DEFAULT_TEAM_QUOTA` | `50GiB` | Quota of each new team folder |
-| `NODDANAS_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file (at least `1MiB`) |
-| `NODDANAS_MAX_VERSIONS` | `10` | Versions kept per file (1-1000). All count towards quota. |
-| `NODDANAS_TRASH_RETENTION` | `30d` | Trashed items are purged after this (at least `1h`) |
+| `FRONTDIR_DEFAULT_QUOTA` | `10GiB` | Quota of each new personal space |
+| `FRONTDIR_DEFAULT_TEAM_QUOTA` | `50GiB` | Quota of each new team folder |
+| `FRONTDIR_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file (at least `1MiB`) |
+| `FRONTDIR_MAX_VERSIONS` | `10` | Versions kept per file (1-1000). All count towards quota. |
+| `FRONTDIR_TRASH_RETENTION` | `30d` | Trashed items are purged after this (at least `1h`) |
 
 ### Sharing and sessions
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_LINK_DEFAULT_TTL` | `30d` | Expiry of a public link when the user does not choose one (at least `1h`, at most the maximum). Every link expires. |
-| `NODDANAS_LINK_MAX_TTL` | `365d` | Longest expiry a user may choose |
-| `NODDANAS_SESSION_IDLE` | `12h` | Browser sessions end after this much inactivity (`5m` to `30d`, at most the maximum age) |
-| `NODDANAS_SESSION_MAX_AGE` | `7d` | Browser sessions end after this long regardless of activity (`15m` to `365d`). Shortening it applies to existing sessions too. |
+| `FRONTDIR_LINK_DEFAULT_TTL` | `30d` | Expiry of a public link when the user does not choose one (at least `1h`, at most the maximum). Every link expires. |
+| `FRONTDIR_LINK_MAX_TTL` | `365d` | Longest expiry a user may choose |
+| `FRONTDIR_SESSION_IDLE` | `12h` | Browser sessions end after this much inactivity (`5m` to `30d`, at most the maximum age) |
+| `FRONTDIR_SESSION_MAX_AGE` | `7d` | Browser sessions end after this long regardless of activity (`15m` to `365d`). Shortening it applies to existing sessions too. |
 
 ### Branding
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_BRAND_NAME` | `NoddaNAS` | Name in the header, page title and sign-in page |
-| `NODDANAS_BRAND_LOGO_FILE` | | PNG or JPEG logo (re-encoded, so only pixels are served) |
-| `NODDANAS_THEME_FILE` | | Theme JSON. See [THEMING.md](THEMING.md). |
+| `FRONTDIR_BRAND_NAME` | `FrontDir` | Name in the header, page title and sign-in page |
+| `FRONTDIR_BRAND_LOGO_FILE` | | PNG or JPEG logo (re-encoded, so only pixels are served) |
+| `FRONTDIR_THEME_FILE` | | Theme JSON. See [THEMING.md](THEMING.md). |
 
 In the admin area, the theme is edited as JSON and the logo uploaded; both are validated the same
 way (including contrast) before they are saved.
@@ -653,7 +653,7 @@ These are built in, not configurable:
 - Anonymous public-link requests: 120 per minute per client IP.
 - A password-protected link locks for 15 minutes after 10 wrong passwords.
 
-Client IPs are only accurate when `NODDANAS_TRUSTED_PROXIES` is set correctly. Otherwise every
+Client IPs are only accurate when `FRONTDIR_TRUSTED_PROXIES` is set correctly. Otherwise every
 user appears to come from the proxy and shares one rate-limit budget.
 
 ---
@@ -665,7 +665,7 @@ user appears to come from the proxy and shares one rate-limit budget.
 | Daily (automate) | Server backup: database, then data volume | [§9](#9-backups-and-restore) |
 | Daily (automate) | Alert on failed health checks, 5xx spikes, `login.failed` bursts | [§11](#11-monitoring-and-logs) |
 | Weekly | Review audit events: `link.password_failed`, `admin.links.revoke_all`, `operator.*`, `team.group_map` | [§11](#11-monitoring-and-logs) |
-| Monthly | Apply NoddaNAS and base-image updates | [§10](#10-upgrades) |
+| Monthly | Apply FrontDir and base-image updates | [§10](#10-upgrades) |
 | Monthly | Check disk usage against the sum of quotas | [§11](#11-monitoring-and-logs) |
 | Monthly | `restic check --read-data-subset=5%` (or your tool's equivalent) | [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#6-checking-backups-without-reading-them) |
 | Quarterly | Full restore drill on a scratch machine: `verify-storage --hash`, then open the canary file | [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#7-restoring-after-losing-the-server) |
@@ -690,7 +690,7 @@ the basic mechanics.
 | What | Why | Notes |
 |---|---|---|
 | PostgreSQL database | Users, folder tree, encrypted names, wrapped keys, shares, team memberships | Contains metadata in the clear. Encrypt and restrict the backups. |
-| Data volume (`NODDANAS_DATA_DIR`) | The encrypted file containers | Already ciphertext and does not compress, so skip compression. |
+| Data volume (`FRONTDIR_DATA_DIR`) | The encrypted file containers | Already ciphertext and does not compress, so skip compression. |
 | `deploy/compose/.env`, `secrets/`, `branding/` | Your configuration, including `secrets/settings_key` | Small; keep them separate from the data backups. Settings changed in the admin area are in the database; the OIDC client secret among them is encrypted under the settings key, so a database backup alone does not reveal it, and is not enough to restore it either. |
 
 Back up the **database first, then the data volume**. Every file the database dump refers to will
@@ -702,9 +702,9 @@ With Compose:
 ```sh
 cd deploy/compose
 stamp=$(date +%F)
-docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > noddanas-db-$stamp.dump
-docker run --rm -v noddanas_noddanas-data:/data:ro -v "$PWD":/backup alpine \
-  tar -C /data -cf /backup/noddanas-data-$stamp.tar .
+docker compose exec -T postgres pg_dump -U frontdir -d frontdir -Fc > frontdir-db-$stamp.dump
+docker run --rm -v frontdir_frontdir-data:/data:ro -v "$PWD":/backup alpine \
+  tar -C /data -cf /backup/frontdir-data-$stamp.tar .
 ```
 
 Then copy both files off the host (restic, borg, rclone or your backup system), encrypted at rest.
@@ -713,15 +713,15 @@ Then copy both files off the host (restic, borg, rclone or your backup system), 
 
 ```sh
 cd deploy/compose
-docker compose stop noddanas
-docker compose exec -T postgres dropdb -U noddanas noddanas
-docker compose exec -T postgres createdb -U noddanas noddanas
-docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner < noddanas-db-<date>.dump
-docker run --rm -v noddanas_noddanas-data:/data -v "$PWD":/backup:ro alpine \
-  sh -c 'find /data -mindepth 1 -delete && tar -C /data -xpf /backup/noddanas-data-<date>.tar'
-docker compose start noddanas
-docker compose exec noddanas /noddanas verify-storage --hash    # every file present and intact
-docker compose exec noddanas /noddanas revoke-sessions --all    # see "restores bring back the past"
+docker compose stop frontdir
+docker compose exec -T postgres dropdb -U frontdir frontdir
+docker compose exec -T postgres createdb -U frontdir frontdir
+docker compose exec -T postgres pg_restore -U frontdir -d frontdir --no-owner < frontdir-db-<date>.dump
+docker run --rm -v frontdir_frontdir-data:/data -v "$PWD":/backup:ro alpine \
+  sh -c 'find /data -mindepth 1 -delete && tar -C /data -xpf /backup/frontdir-data-<date>.tar'
+docker compose start frontdir
+docker compose exec frontdir /frontdir verify-storage --hash    # every file present and intact
+docker compose exec frontdir /frontdir revoke-sessions --all    # see "restores bring back the past"
 ```
 
 No keys are involved: the server never had any. Users sign in and unlock their files with their
@@ -741,11 +741,11 @@ Every stored file is a self-contained encrypted container that its owner can res
 with only their own keys, even if this server is gone. Encourage users to:
 
 1. keep their **recovery code** offline;
-2. download their **key backup** (Settings → Download key backup, or `noddanas-cli export-keys`);
-3. back up their files, still encrypted, with `noddanas-cli backup <dir>`, or by mirroring
+2. download their **key backup** (Settings → Download key backup, or `frontdir-cli export-keys`);
+3. back up their files, still encrypted, with `frontdir-cli backup <dir>`, or by mirroring
    `https://<host>/dav/` with rclone or restic using a read-only app password.
 
-`noddanas-cli decrypt-tree <backup-dir> <out-dir> --keys keys.json` turns such a backup back into
+`frontdir-cli decrypt-tree <backup-dir> <out-dir> --keys keys.json` turns such a backup back into
 plaintext files with their real names, with no server involved.
 
 ### Test your restores
@@ -755,7 +755,7 @@ A backup you have not restored is a hope, not a backup. Each quarter:
 1. restore the server backup into a scratch environment (a second Compose project on another
    host or a VM);
 2. sign in there as a test user and open a file;
-3. separately, decrypt one of your own `noddanas-cli backup` folders offline with `decrypt-tree`.
+3. separately, decrypt one of your own `frontdir-cli backup` folders offline with `decrypt-tree`.
 
 ---
 
@@ -767,23 +767,76 @@ A backup you have not restored is a hope, not a backup. Each quarter:
 3. Update and rebuild:
 
    ```sh
-   cd NoddaNAS && git fetch --tags && git checkout <new-tag-or-commit>
+   cd FrontDir && git fetch --tags && git checkout <new-tag-or-commit>
    cd deploy/compose
-   docker compose build --pull noddanas
+   docker compose build --pull frontdir
    docker compose pull postgres caddy
    docker compose up -d
    ```
 
-4. Watch the logs until you see `noddanas listening`, and check `https://<host>/readyz`.
+4. Watch the logs until you see `frontdir listening`, and check `https://<host>/readyz`.
    Migrations run automatically at startup. With several replicas, a database lock ensures only
    one applies them.
+
+### Upgrading from NoddaNAS
+
+FrontDir was called NoddaNAS. Encrypted files, key bundles, backups, public links and app
+passwords carry over unchanged: the cryptographic identifiers kept their old values
+([E2EE.md](E2EE.md#notation)), and old backup files (`.ndne`) and app passwords (`ndn_...`) are
+still accepted. What changed is every name you deploy with:
+
+| Before | Now |
+|---|---|
+| `NODDANAS_*` environment variables | `FRONTDIR_*` (FrontDir **refuses to start** while any `NODDANAS_*` variable is set, so an old setting is never silently ignored) |
+| `NODDANAS_HOST` in `deploy/compose/.env` | `FRONTDIR_HOST` (the other `.env` names have no prefix and are unchanged) |
+| Compose project, service and volumes `noddanas`, `noddanas_noddanas-data`, `noddanas_postgres-data` | `frontdir`, `frontdir_frontdir-data`, `frontdir_postgres-data` |
+| Database role and name `noddanas` (Compose) | `frontdir` |
+| Binaries and commands `noddanas`, `noddanas-cli` | `frontdir`, `frontdir-cli` (in the container: `/frontdir`) |
+| Kubernetes namespace and objects `noddanas` | `frontdir` |
+| Session cookie names | Renamed: everyone signs in once more |
+
+With Docker Compose, the new names mean new volumes, so move your data with the backup and restore
+commands from [§9](#9-backups-and-restore) (the same commands CI tests, with the names adjusted):
+
+```sh
+cd deploy/compose
+# 1. With the old version still checked out and running: back up.
+docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > ~/noddanas-db.dump
+docker run --rm -v noddanas_noddanas-data:/data:ro -v ~:/backup alpine tar -C /data -cf /backup/noddanas-data.tar .
+docker compose down                         # keeps the old volumes until you remove them
+
+# 2. Check out FrontDir. Keep secrets/settings_key and secrets/oidc_client_secret; let the
+#    script create a new database password and URL for the new database role.
+git checkout <frontdir-tag-or-commit>
+sudo mkdir -p ~/noddanas-secrets && sudo mv secrets/postgres_password secrets/database_url ~/noddanas-secrets/
+sed -i 's/^NODDANAS_HOST=/FRONTDIR_HOST=/' .env
+sudo ../../scripts/init-secrets.sh
+
+# 3. Restore into the new names and start.
+docker compose up -d --wait postgres
+docker compose exec -T postgres pg_restore -U frontdir -d frontdir --no-owner < ~/noddanas-db.dump
+docker run --rm -v frontdir_frontdir-data:/data -v ~:/backup:ro alpine tar -C /data -xpf /backup/noddanas-data.tar
+docker compose up -d --build
+docker compose exec frontdir /frontdir verify-storage --hash
+docker compose exec frontdir /frontdir revoke-sessions --all   # the restore brings back old sessions
+
+# 4. Once everything works, remove the old volumes and copies.
+docker volume rm noddanas_noddanas-data noddanas_postgres-data noddanas_caddy-data noddanas_caddy-config
+```
+
+Caddy obtains a new certificate for the new `caddy-data` volume on its own. If you set any
+`NODDANAS_*` variables outside `.env` (for example in an override file), rename them too. On
+Kubernetes, either keep your existing namespace and object names (edit `frontdir.yaml` before
+applying it) and rename the `NODDANAS_*` keys in your ConfigMap and Deployment, or restore a backup
+into the new `frontdir` namespace. Command-line users rename `NODDANAS_URL`, `NODDANAS_TOKEN` and
+the other client variables to `FRONTDIR_...`; their existing app passwords keep working.
 
 **PostgreSQL major versions** (for example 18 to 19) change the on-disk format. Upgrade with a
 dump and restore ([§9](#9-backups-and-restore)) into a fresh volume, or with `pg_upgrade`. Do not
 just change the image tag on an existing volume.
 
 **Kubernetes:** change the image (by digest) and apply. Optionally run migrations first as a Job
-with `/noddanas migrate`, and set `NODDANAS_AUTO_MIGRATE=false` on the Deployment.
+with `/frontdir migrate`, and set `FRONTDIR_AUTO_MIGRATE=false` on the Deployment.
 
 Pin base images by digest in production. Dependabot is configured in this repository to propose
 updates.
@@ -803,7 +856,7 @@ Both reveal nothing except the status code.
 
 ### Logs
 
-NoddaNAS writes one JSON object per line to standard output (`docker compose logs noddanas`,
+FrontDir writes one JSON object per line to standard output (`docker compose logs frontdir`,
 `kubectl logs`). Ship them to an append-only store.
 
 - **Request logs** (`"msg":"http"`) have `request_id`, `method`, `route`, `status`, `bytes`,
@@ -827,7 +880,7 @@ Audit events never contain file names, file contents or keys. The server does no
 Example: all audit events for one user in the last day:
 
 ```sh
-docker compose logs --since 24h noddanas | grep '"msg":"audit"' | grep '"user":"<user-id>"'
+docker compose logs --since 24h frontdir | grep '"msg":"audit"' | grep '"user":"<user-id>"'
 ```
 
 ### Suggested alerts
@@ -841,7 +894,7 @@ docker compose logs --since 24h noddanas | grep '"msg":"audit"' | grep '"user":"
 ### Capacity
 
 ```sh
-docker system df -v | grep noddanas_noddanas-data    # data volume size
+docker system df -v | grep frontdir_frontdir-data    # data volume size
 ```
 
 Compare it with the sum of quotas you have granted. Quotas cap what users can store, but trash
@@ -858,7 +911,7 @@ logs (`"user":…`), and Admin → **People** lists everyone with their sign-in 
 shell you can list users from the database:
 
 ```sh
-docker compose exec postgres psql -U noddanas -d noddanas -c \
+docker compose exec postgres psql -U frontdir -d frontdir -c \
   "SELECT id, display_name, email, is_admin, created_at FROM users ORDER BY display_name"
 ```
 
@@ -877,7 +930,7 @@ anyone's files: those stay end-to-end encrypted.
 Under Admin → People, choose **Storage…** next to the person. Or from the shell:
 
 ```sh
-docker compose exec noddanas /noddanas set-quota alice@example.com 100GiB   # personal space
+docker compose exec frontdir /frontdir set-quota alice@example.com 100GiB   # personal space
 ```
 
 Team folder quotas are set by an administrator through the API (`PUT /api/v1/spaces/{id}/quota`).
@@ -901,7 +954,7 @@ Do these in order:
    their app passwords), or from the shell, which also revokes their public links:
 
    ```sh
-   docker compose exec noddanas /noddanas revoke-access --user alice@example.com   # or --user <id>
+   docker compose exec frontdir /frontdir revoke-access --user alice@example.com   # or --user <id>
    ```
 
    This ends all of their browser sessions, deletes all of their app passwords (CLI and WebDAV
@@ -930,9 +983,9 @@ JavaScript to the web app. That is the main residual risk of browser-based end-t
 |---|---|---|
 | One link | The creator, or a manager of the folder | Shared → Shared by me → **Revoke**, or the item's Share dialog |
 | All of one user's links | That user | Shared → Shared by me → **Revoke all my public links** |
-| All of one user's links | Operator | `docker compose exec noddanas /noddanas revoke-links --user <email-or-id>` |
+| All of one user's links | Operator | `docker compose exec frontdir /frontdir revoke-links --user <email-or-id>` |
 | Every link on the server | Administrator | Admin → Emergency → **Revoke all public links**, then type `REVOKE ALL` |
-| Every link on the server | Operator | `docker compose exec noddanas /noddanas revoke-links --all` |
+| Every link on the server | Operator | `docker compose exec frontdir /frontdir revoke-links --all` |
 
 Revocation is immediate and permanent. The server deletes the link's token and its wrapped key,
 so the secret in already-shared URLs no longer unlocks anything. People who need access again get
@@ -950,7 +1003,7 @@ administrator account is compromised.
 3. List the shares they created, and revoke any that are unexpected:
 
    ```sh
-   docker compose exec postgres psql -U noddanas -d noddanas -c \
+   docker compose exec postgres psql -U frontdir -d frontdir -c \
      "SELECT id, kind, node_id, recipient_id, created_at FROM shares WHERE created_by = '<user-id>' ORDER BY created_at DESC"
    ```
 
@@ -963,8 +1016,8 @@ administrator account is compromised.
 As above, and also review `settings.changed`, `user.admin_granted`, `user.admin_removed`,
 `user.quota`, `user.access_revoked`, `sessions.revoke_everyone`, `team.group_map`,
 `team.group_unmap`, `space.quota`, `team.delete` and `admin.links.revoke_all` events, and undo
-unexpected changes (`noddanas settings show` lists where every setting now comes from;
-`noddanas settings reset` clears web settings). Check the admin group's membership at the IdP,
+unexpected changes (`frontdir settings show` lists where every setting now comes from;
+`frontdir settings reset` clears web settings). Check the admin group's membership at the IdP,
 and the appointed administrators under Admin → People. Because changes need a recent sign-in at
 the identity provider, look there too for the matching authentication.
 
@@ -977,13 +1030,13 @@ the identity provider, look there too for the matching authentication.
 4. End every session and app password:
 
    ```sh
-   docker compose exec noddanas /noddanas revoke-sessions --all
-   docker compose exec postgres psql -U noddanas -d noddanas -c "DELETE FROM app_passwords;"
+   docker compose exec frontdir /frontdir revoke-sessions --all
+   docker compose exec postgres psql -U frontdir -d frontdir -c "DELETE FROM app_passwords;"
    ```
 
 5. Tell users what happened. If the attacker could have changed the JavaScript the server
    delivered, anyone who unlocked their keys in the browser during that window should treat
-   their keys as exposed, and the files those keys open as potentially disclosed. NoddaNAS does
+   their keys as exposed, and the files those keys open as potentially disclosed. FrontDir does
    not yet support replacing a user's keys, so use the time window and the audit logs to judge
    the extent, and handle highly sensitive data accordingly.
 
@@ -993,11 +1046,11 @@ the identity provider, look there too for the matching authentication.
 
 | Secret | Steps |
 |---|---|
-| Database password | `docker compose exec postgres psql -U noddanas -d noddanas -c "ALTER USER noddanas PASSWORD '<new>'"`, write the new password into `secrets/postgres_password` and update it inside `secrets/database_url`, then `docker compose up -d --force-recreate noddanas`. |
-| OIDC client secret | Create a second secret at the IdP. Configured in `.env`: write it to `secrets/oidc_client_secret`, `docker compose up -d --force-recreate noddanas`. Configured on the web: enter it under Admin → Sign-in. Test a sign-in, then delete the old secret at the IdP. |
-| Settings key | Only secrets saved in the admin area depend on it. Write a new key to `secrets/settings_key` (`openssl rand -base64 32`), run `docker compose run --rm noddanas settings reset OIDC_CLIENT_SECRET`, `docker compose up -d --force-recreate noddanas`, then enter the client secret again under Admin → Sign-in (sign in first with another method, or through a setup link). |
-| SAML SP key pair | Generate a new key and certificate, give the IdP the new certificate (many IdPs accept two during a transition), switch NoddaNAS's `_KEY_FILE`/`_CERT_FILE` and restart, then remove the old certificate at the IdP. |
-| TLS certificates | Caddy renews automatically. With `NODDANAS_TLS_*`, replace the files and restart. |
+| Database password | `docker compose exec postgres psql -U frontdir -d frontdir -c "ALTER USER frontdir PASSWORD '<new>'"`, write the new password into `secrets/postgres_password` and update it inside `secrets/database_url`, then `docker compose up -d --force-recreate frontdir`. |
+| OIDC client secret | Create a second secret at the IdP. Configured in `.env`: write it to `secrets/oidc_client_secret`, `docker compose up -d --force-recreate frontdir`. Configured on the web: enter it under Admin → Sign-in. Test a sign-in, then delete the old secret at the IdP. |
+| Settings key | Only secrets saved in the admin area depend on it. Write a new key to `secrets/settings_key` (`openssl rand -base64 32`), run `docker compose run --rm frontdir settings reset OIDC_CLIENT_SECRET`, `docker compose up -d --force-recreate frontdir`, then enter the client secret again under Admin → Sign-in (sign in first with another method, or through a setup link). |
+| SAML SP key pair | Generate a new key and certificate, give the IdP the new certificate (many IdPs accept two during a transition), switch FrontDir's `_KEY_FILE`/`_CERT_FILE` and restart, then remove the old certificate at the IdP. |
+| TLS certificates | Caddy renews automatically. With `FRONTDIR_TLS_*`, replace the files and restart. |
 | Users' app passwords | Users revoke and recreate them under Settings → App passwords. Operators can remove all of a user's with `revoke-access`. |
 
 Secret files must stay readable only by the container that needs them. `init-secrets.sh` sets
@@ -1009,26 +1062,26 @@ mode `0400` and the right owner. Keep both if you replace a file by hand.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| NoddaNAS exits at startup with `configuration:` and a list | Missing or invalid settings | Fix every listed item. The list is complete. |
+| FrontDir exits at startup with `configuration:` and a list | Missing or invalid settings | Fix every listed item. The list is complete. |
 | Startup fails with `theme:` | The theme file fails validation (often contrast) | The message names each failing color pair. See [THEMING.md](THEMING.md). |
-| Startup fails with `settings saved in the web admin area are not valid` or `restore the settings key` | A saved web setting no longer validates, or the settings key changed | Fix it in the environment, or clear it: `docker compose run --rm noddanas settings reset KEY`. |
-| The sign-in page says the server is not set up | No sign-in method is configured | Run `docker compose exec noddanas /noddanas setup-link` ([§3](#3-install-with-docker-compose) step 7). |
-| Nobody can sign in after a sign-in change | The identity provider changed, or a client secret is wrong | `docker compose exec noddanas /noddanas settings reset oidc` (or `saml`), then `setup-link` to configure it again. |
+| Startup fails with `settings saved in the web admin area are not valid` or `restore the settings key` | A saved web setting no longer validates, or the settings key changed | Fix it in the environment, or clear it: `docker compose run --rm frontdir settings reset KEY`. |
+| The sign-in page says the server is not set up | No sign-in method is configured | Run `docker compose exec frontdir /frontdir setup-link` ([§3](#3-install-with-docker-compose) step 7). |
+| Nobody can sign in after a sign-in change | The identity provider changed, or a client secret is wrong | `docker compose exec frontdir /frontdir settings reset oidc` (or `saml`), then `setup-link` to configure it again. |
 | "Confirm it's you" sends you back with `?error=signin` | The identity provider reported an authentication older than the request | It did not ask for your password again. Check that it honours `prompt=login` (OIDC) or `ForceAuthn` (SAML). |
-| A setting is greyed out in the admin area | It is set in the environment (the field names the variable), or `NODDANAS_WEB_SETTINGS=false` | Change it there, or remove it from the environment to manage it on the web. |
-| Every request returns `421 Misdirected Request` | The `Host` reaching NoddaNAS differs from `NODDANAS_PUBLIC_URL` | Make the proxy forward the original `Host`; check the URL's hostname and port. |
-| Actions fail with `cross-origin request blocked` | `NODDANAS_PUBLIC_URL` differs from the address in the browser, or the proxy rewrites `Origin` | Use the exact public origin; stop the proxy from altering `Origin` and `Sec-Fetch-*`. |
-| Sign-in returns to the start page with "not permitted" (`?error=not_allowed`) | The user is not in `NODDANAS_ALLOWED_GROUPS`, or has no verified email in an allowed domain | Check the groups the IdP actually sends: the `login.failed` audit event shows the reason. With Entra ID, use group object IDs. |
-| Sign-in fails (`?error=signin`) with SAML | Wrong ACS URL or entity ID, unsigned assertion, clock skew, or an IdP-initiated sign-in | Compare the IdP settings with [§2](#saml-20); make sure the server's clock is synchronized (NTP); start sign-in at NoddaNAS, not at the IdP. |
+| A setting is greyed out in the admin area | It is set in the environment (the field names the variable), or `FRONTDIR_WEB_SETTINGS=false` | Change it there, or remove it from the environment to manage it on the web. |
+| Every request returns `421 Misdirected Request` | The `Host` reaching FrontDir differs from `FRONTDIR_PUBLIC_URL` | Make the proxy forward the original `Host`; check the URL's hostname and port. |
+| Actions fail with `cross-origin request blocked` | `FRONTDIR_PUBLIC_URL` differs from the address in the browser, or the proxy rewrites `Origin` | Use the exact public origin; stop the proxy from altering `Origin` and `Sec-Fetch-*`. |
+| Sign-in returns to the start page with "not permitted" (`?error=not_allowed`) | The user is not in `FRONTDIR_ALLOWED_GROUPS`, or has no verified email in an allowed domain | Check the groups the IdP actually sends: the `login.failed` audit event shows the reason. With Entra ID, use group object IDs. |
+| Sign-in fails (`?error=signin`) with SAML | Wrong ACS URL or entity ID, unsigned assertion, clock skew, or an IdP-initiated sign-in | Compare the IdP settings with [§2](#saml-20); make sure the server's clock is synchronized (NTP); start sign-in at FrontDir, not at the IdP. |
 | Sign-in fails with OIDC | Wrong redirect URI, issuer or secret | The redirect URI must be exactly `https://<host>/auth/callback`. |
 | Logged-in user has no "admin" | Their admin group is not in the token or assertion | Check the groups claim or attribute and the administrator groups, then sign out and in again. Or appoint them under Admin → People. |
 | Cannot share with someone by email | Their email is not verified, or they have not set up encryption yet | See [§2](#2-prepare-your-identity-provider) on verified emails. The recipient must sign in once and create keys. |
 | A team member sees "you have not been given this team folder's key yet" | No manager has approved them since they joined | A manager opens the folder's Members page and chooses **Give key** next to them under **Waiting for the team key**. |
 | Someone is shown with "⚠ Key changed" or "⚠ Possible impersonation" | The account's keys differ from the ones the user verified, or a different account imitates a verified person's name or email | Treat it as a security incident: published keys never change, so this means tampering or impersonation. Check the audit log and the `users` table, and see [§13](#13-incident-response). |
 | Large uploads fail or stall | The proxy limits body size, buffers, or times out | See [§5](#5-using-your-own-reverse-proxy-or-tls). |
-| Many users get "rate limited" | `NODDANAS_TRUSTED_PROXIES` is unset, so everyone shares the proxy's IP | Set it to the proxy's address or range. |
+| Many users get "rate limited" | `FRONTDIR_TRUSTED_PROXIES` is unset, so everyone shares the proxy's IP | Set it to the proxy's address or range. |
 | `/readyz` returns 503 | The database is unreachable, or the data directory is not writable | Check `docker compose ps`, the database logs, and the volume mount and its ownership (UID 65532). |
-| Disk filling faster than expected | Old versions and trash | Lower `NODDANAS_MAX_VERSIONS` or `NODDANAS_TRASH_RETENTION`; users can empty their trash. |
+| Disk filling faster than expected | Old versions and trash | Lower `FRONTDIR_MAX_VERSIONS` or `FRONTDIR_TRASH_RETENTION`; users can empty their trash. |
 
 When a user reports an error, ask for the time and what they were doing, and search the request
 logs for their user ID around that time. API and CLI users can give you the `requestId` from the
@@ -1039,7 +1092,7 @@ error response or the `X-Request-Id` header.
 ## 16. Decommissioning
 
 1. Announce a date well in advance. Ask every user to download their key backup and run
-   `noddanas-cli backup` (or copy what they need), and to check that `decrypt-tree` works on their
+   `frontdir-cli backup` (or copy what they need), and to check that `decrypt-tree` works on their
    backup.
 2. Run `revoke-links --all` so no public link outlives the service.
 3. Take a final server backup and keep it as long as your retention policy requires. It contains

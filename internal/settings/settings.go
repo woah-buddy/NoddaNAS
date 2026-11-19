@@ -9,7 +9,7 @@
 //   - Reading settings needs administrator rights; changing them also needs
 //     a recent sign-in (service.RequireFreshAdmin).
 //   - A setting set in the server environment is locked on the web, and
-//     NODDANAS_WEB_SETTINGS=false locks all of them.
+//     FRONTDIR_WEB_SETTINGS=false locks all of them.
 //   - Every change is validated as a whole, sign-in changes are tried
 //     against the identity provider before they are saved, and changes that
 //     would lock out the person making them are refused.
@@ -36,11 +36,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/config"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/theme"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/config"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/theme"
 )
 
 // Store persists web settings and the setup link.
@@ -134,7 +134,7 @@ func (m *Manager) loadLocked(ctx context.Context) error {
 			fmt.Fprintf(&b, "\n  %s: %s", fe.Key, fe.Msg)
 		}
 		return fmt.Errorf("settings saved in the web admin area are not valid:%s\n"+
-			"Set them in the server environment instead, or clear them with `noddanas settings reset KEY`", b.String())
+			"Set them in the server environment instead, or clear them with `frontdir settings reset KEY`", b.String())
 	}
 	m.rev, m.stored, m.web = rev, stored, web
 	m.applyLocked(ctx, rt, true)
@@ -151,13 +151,13 @@ func (m *Manager) decrypt(stored map[string]string) (config.Values, error) {
 		}
 		if s.Secret() {
 			if m.box == nil {
-				return nil, fmt.Errorf("the web settings hold an encrypted %s but NODDANAS_SETTINGS_KEY is not set: "+
-					"restore the settings key, or clear the value with `noddanas settings reset %s` and enter it again", k, k)
+				return nil, fmt.Errorf("the web settings hold an encrypted %s but FRONTDIR_SETTINGS_KEY is not set: "+
+					"restore the settings key, or clear the value with `frontdir settings reset %s` and enter it again", k, k)
 			}
 			pt, err := m.box.open(k, v)
 			if err != nil {
 				return nil, fmt.Errorf("saved setting %s: %v: restore the original settings key, "+
-					"or clear the value with `noddanas settings reset %s` and enter it again", k, err, k)
+					"or clear the value with `frontdir settings reset %s` and enter it again", k, err, k)
 			}
 			v = pt
 		}
@@ -338,7 +338,7 @@ func needConfirm(what, msg string) error {
 
 func (m *Manager) updateLocked(ctx context.Context, a *actor, req UpdateRequest, allowed func(config.Setting) bool) error {
 	if !m.fixed.WebSettings {
-		return domain.E(domain.CodeForbidden, "settings are read-only on the web (NODDANAS_WEB_SETTINGS=false); change them in the server environment")
+		return domain.E(domain.CodeForbidden, "settings are read-only on the web (FRONTDIR_WEB_SETTINGS=false); change them in the server environment")
 	}
 	if req.Revision != m.rev {
 		return domain.E(domain.CodePrecondition, "settings were changed by someone else; reload and try again")
@@ -377,7 +377,7 @@ func (m *Manager) updateLocked(ctx context.Context, a *actor, req UpdateRequest,
 			v = base64.StdEncoding.EncodeToString(img)
 		}
 		if s.Secret() && v != "" && m.box == nil {
-			fields[k] = "cannot be stored: the server has no settings key (NODDANAS_SETTINGS_KEY_FILE; scripts/init-secrets.sh creates one)"
+			fields[k] = "cannot be stored: the server has no settings key (FRONTDIR_SETTINGS_KEY_FILE; scripts/init-secrets.sh creates one)"
 			continue
 		}
 		if v == "" {
@@ -620,7 +620,7 @@ func Reset(ctx context.Context, store Store, names []string, now time.Time) ([]s
 }
 
 // Describe lists every setting with where its value comes from, for
-// `noddanas settings show`. Secrets are never printed.
+// `frontdir settings show`. Secrets are never printed.
 func Describe(ctx context.Context, fixed *config.Config, store Store) ([]string, error) {
 	_, doc, err := store.GetSettings(ctx)
 	if err != nil {

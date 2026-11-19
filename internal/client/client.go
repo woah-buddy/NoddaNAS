@@ -1,5 +1,5 @@
-// Package client is a Go client for the NoddaNAS HTTP API that performs all
-// end-to-end encryption locally (docs/E2EE.md). It backs the noddanas-cli
+// Package client is a Go client for the FrontDir HTTP API that performs all
+// end-to-end encryption locally (docs/E2EE.md). It backs the frontdir-cli
 // tool and the HTTP end-to-end tests. Nothing it sends to the server is
 // plaintext: names, keys and content are encrypted before they leave.
 package client
@@ -19,11 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/secure"
 )
 
-// Client talks to one NoddaNAS server as one user.
+// Client talks to one FrontDir server as one user.
 type Client struct {
 	base  string
 	http  *http.Client
@@ -38,7 +38,7 @@ type Client struct {
 	dir    map[string]*e2ee.PublicUser
 }
 
-// New returns a client. token is an app password (ndn_...); pass "" if hc
+// New returns a client. token is an app password (fd_...); pass "" if hc
 // already authenticates (e.g. a cookie jar holding a browser session).
 func New(baseURL string, hc *http.Client, token string) *Client {
 	if hc == nil {
@@ -710,7 +710,7 @@ func (c *Client) Upload(ctx context.Context, parentID, name string, r io.Reader,
 		return nil, err
 	}
 	var n Node
-	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", body, total, map[string]string{"X-NoddaNAS-Entry": string(hdr)}, &n); err != nil {
+	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", body, total, map[string]string{"X-FrontDir-Entry": string(hdr)}, &n); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()

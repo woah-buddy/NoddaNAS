@@ -22,7 +22,7 @@ func TestParseSize(t *testing.T) {
 
 func TestLoadRejectsInsecurePublicURL(t *testing.T) {
 	base := map[string]string{
-		"NODDANAS_DATABASE_URL": "postgres://x", "NODDANAS_OIDC_ISSUER": "https://idp", "NODDANAS_OIDC_CLIENT_ID": "c",
+		"FRONTDIR_DATABASE_URL": "postgres://x", "FRONTDIR_OIDC_ISSUER": "https://idp", "FRONTDIR_OIDC_CLIENT_ID": "c",
 	}
 	for url, ok := range map[string]bool{
 		"https://files.example.com": true, "http://localhost:8080": true, "http://files.example.com": false,
@@ -31,7 +31,7 @@ func TestLoadRejectsInsecurePublicURL(t *testing.T) {
 		for k, v := range base {
 			t.Setenv(k, v)
 		}
-		t.Setenv("NODDANAS_PUBLIC_URL", url)
+		t.Setenv("FRONTDIR_PUBLIC_URL", url)
 		_, err := Load()
 		if (err == nil) != ok {
 			t.Errorf("PUBLIC_URL %q: err = %v, want ok=%v", url, err, ok)
@@ -39,25 +39,40 @@ func TestLoadRejectsInsecurePublicURL(t *testing.T) {
 	}
 }
 
+// A setting under the old name must not be silently ignored: an ignored
+// NODDANAS_ALLOWED_GROUPS would open sign-in to everyone.
+func TestLoadRefusesPreRenameVariables(t *testing.T) {
+	t.Setenv("FRONTDIR_DATABASE_URL", "postgres://x")
+	t.Setenv("FRONTDIR_PUBLIC_URL", "https://files.example.com")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NODDANAS_ALLOWED_GROUPS", "staff-secret-value")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "NODDANAS_ALLOWED_GROUPS") || strings.Contains(err.Error(), "staff-secret-value") {
+		t.Fatalf("old variable: %v", err)
+	}
+}
+
 func TestLoadWithoutSignInIsSetupMode(t *testing.T) {
-	t.Setenv("NODDANAS_DATABASE_URL", "postgres://x")
-	t.Setenv("NODDANAS_PUBLIC_URL", "https://files.example.com")
-	// No sign-in method: the server starts in setup mode (noddanas setup-link).
+	t.Setenv("FRONTDIR_DATABASE_URL", "postgres://x")
+	t.Setenv("FRONTDIR_PUBLIC_URL", "https://files.example.com")
+	// No sign-in method: the server starts in setup mode (frontdir setup-link).
 	if c, err := Load(); err != nil || c.OIDC != nil || c.SAML != nil {
 		t.Fatalf("no sign-in method: %+v %v", c, err)
 	}
 	// A stray sign-in setting without the one that switches the method on
 	// is a mistake, not something to mix with web settings.
-	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "c")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "NODDANAS_OIDC_ISSUER") {
+	t.Setenv("FRONTDIR_OIDC_CLIENT_ID", "c")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "FRONTDIR_OIDC_ISSUER") {
 		t.Fatalf("stray OIDC setting accepted: %v", err)
 	}
-	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "")
-	t.Setenv("NODDANAS_SAML_IDP_METADATA_URL", "http://idp.example.com/metadata")
+	t.Setenv("FRONTDIR_OIDC_CLIENT_ID", "")
+	t.Setenv("FRONTDIR_SAML_IDP_METADATA_URL", "http://idp.example.com/metadata")
 	if _, err := Load(); err == nil {
 		t.Fatal("accepted SAML metadata over plain http")
 	}
-	t.Setenv("NODDANAS_SAML_IDP_METADATA_URL", "https://idp.example.com/metadata")
+	t.Setenv("FRONTDIR_SAML_IDP_METADATA_URL", "https://idp.example.com/metadata")
 	c, err := Load()
 	if err != nil || c.SAML == nil || c.OIDC != nil || c.SAML.ACSURL != "https://files.example.com/auth/saml/acs" {
 		t.Fatalf("SAML-only config: %+v %v", c, err)
@@ -65,10 +80,10 @@ func TestLoadWithoutSignInIsSetupMode(t *testing.T) {
 }
 
 func TestLoadTheme(t *testing.T) {
-	t.Setenv("NODDANAS_DATABASE_URL", "postgres://x")
-	t.Setenv("NODDANAS_PUBLIC_URL", "https://files.example.com")
-	t.Setenv("NODDANAS_OIDC_ISSUER", "https://idp")
-	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "c")
+	t.Setenv("FRONTDIR_DATABASE_URL", "postgres://x")
+	t.Setenv("FRONTDIR_PUBLIC_URL", "https://files.example.com")
+	t.Setenv("FRONTDIR_OIDC_ISSUER", "https://idp")
+	t.Setenv("FRONTDIR_OIDC_CLIENT_ID", "c")
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.json")
 	bad := filepath.Join(dir, "bad.json")
@@ -76,20 +91,20 @@ func TestLoadTheme(t *testing.T) {
 	os.WriteFile(bad, []byte(`{"light": {"text": "#fafafa"}}`), 0o600) // unreadable text
 
 	c, err := Load()
-	if err != nil || c.Theme == nil || c.Theme.Name != "NoddaNAS" {
+	if err != nil || c.Theme == nil || c.Theme.Name != "FrontDir" {
 		t.Fatalf("default theme: %v", err)
 	}
-	t.Setenv("NODDANAS_THEME_FILE", good)
-	t.Setenv("NODDANAS_BRAND_NAME", "Acme Cloud")
+	t.Setenv("FRONTDIR_THEME_FILE", good)
+	t.Setenv("FRONTDIR_BRAND_NAME", "Acme Cloud")
 	if c, err = Load(); err != nil || c.Theme.Name != "Acme Cloud" {
 		t.Fatalf("custom theme: %v", err)
 	}
-	t.Setenv("NODDANAS_THEME_FILE", bad)
+	t.Setenv("FRONTDIR_THEME_FILE", bad)
 	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "contrast") {
 		t.Fatalf("low-contrast theme accepted: %v", err)
 	}
-	t.Setenv("NODDANAS_THEME_FILE", good)
-	t.Setenv("NODDANAS_BRAND_LOGO_FILE", good) // not an image
+	t.Setenv("FRONTDIR_THEME_FILE", good)
+	t.Setenv("FRONTDIR_BRAND_LOGO_FILE", good) // not an image
 	if _, err = Load(); err == nil {
 		t.Fatal("non-image logo accepted")
 	}

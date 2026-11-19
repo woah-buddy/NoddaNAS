@@ -9,12 +9,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/store/postgres"
 )
 
 // Postgres returns a migrated store in a fresh, private schema. Tests are
-// skipped unless NODDANAS_TEST_DATABASE_URL points at a PostgreSQL server.
+// skipped unless FRONTDIR_TEST_DATABASE_URL points at a PostgreSQL server.
 func Postgres(t *testing.T) *postgres.Store {
 	st, _ := PostgresSchema(t)
 	return st
@@ -23,9 +23,9 @@ func Postgres(t *testing.T) *postgres.Store {
 // PostgresSchema is Postgres, also returning the name of the private schema.
 func PostgresSchema(t *testing.T) (*postgres.Store, string) {
 	t.Helper()
-	dsn := os.Getenv("NODDANAS_TEST_DATABASE_URL")
+	dsn := os.Getenv("FRONTDIR_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("NODDANAS_TEST_DATABASE_URL not set")
+		t.Skip("FRONTDIR_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
 	schema := "t_" + secure.NewID()[:16]
@@ -53,7 +53,7 @@ func PostgresSchema(t *testing.T) (*postgres.Store, string) {
 // information a database backup holds, so tests can inspect it.
 func RestoreCopy(t *testing.T, from string) (restored *postgres.Store, dump string) {
 	t.Helper()
-	dsn := os.Getenv("NODDANAS_TEST_DATABASE_URL")
+	dsn := os.Getenv("FRONTDIR_TEST_DATABASE_URL")
 	ctx := context.Background()
 	to, schema := PostgresSchema(t)
 	admin := adminConn(t, dsn)

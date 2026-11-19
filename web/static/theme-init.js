@@ -7,7 +7,15 @@
 (function () {
   'use strict';
   try {
-    var saved = JSON.parse(window.localStorage.getItem('noddanas.appearance') || 'null');
+    // Carry over the preference saved before the rename from NoddaNAS.
+    var old = window.localStorage.getItem('noddanas.appearance');
+    if (old !== null) {
+      if (window.localStorage.getItem('frontdir.appearance') === null) {
+        window.localStorage.setItem('frontdir.appearance', old);
+      }
+      window.localStorage.removeItem('noddanas.appearance');
+    }
+    var saved = JSON.parse(window.localStorage.getItem('frontdir.appearance') || 'null');
     if (!saved || typeof saved !== 'object') return;
     var root = document.documentElement;
     if (saved.mode === 'light' || saved.mode === 'dark' || saved.mode === 'contrast') {
