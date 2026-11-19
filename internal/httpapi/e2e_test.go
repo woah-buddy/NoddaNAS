@@ -2,104 +2,98 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/crewjam/saml"
 	jose "github.com/go-jose/go-jose/v4"
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
+	"github.com/woah-buddy/NoddaNAS/internal/client"
+	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
 	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
 	"github.com/woah-buddy/NoddaNAS/internal/testutil"
 	"github.com/woah-buddy/NoddaNAS/web"
 )
 
-// ---- a minimal fake OpenID Connect provider ---------------------------------
+const pass = "correct horse battery staple"
 
-type fakeIdP struct {
-	srv    *httptest.Server
-	key    *rsa.PrivateKey
-	mu     sync.Mutex
-	codes  map[string]codeGrant
-	next   idpUser // who "signs in" on the next authorize request
-	signer jose.Signer
-}
+// ---- a minimal fake OpenID Connect provider ---------------------------------
 
 type idpUser struct {
 	sub, email string
-	verified   bool
 	groups     []string
 }
 
-type codeGrant struct {
-	user      idpUser
-	nonce     string
-	challenge string
-	clientID  string
+type fakeOIDC struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	codes  map[string][4]string
+	users  map[string]idpUser
+	next   idpUser
+	signer jose.Signer
 }
 
-func newFakeIdP(t *testing.T) *fakeIdP {
+func newFakeOIDC(t *testing.T) *fakeOIDC {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
-	f := &fakeIdP{key: key, codes: map[string]codeGrant{}}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: key, KeyID: "k1"}},
+	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: key, KeyID: "k1"}},
 		(&jose.SignerOptions{}).WithType("JWT"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.signer = signer
+	f := &fakeOIDC{codes: map[string][4]string{}, users: map[string]idpUser{}, signer: signer}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"issuer": f.srv.URL, "authorization_endpoint": f.srv.URL + "/authorize", "token_endpoint": f.srv.URL + "/token",
-			"jwks_uri": f.srv.URL + "/jwks", "id_token_signing_alg_values_supported": []string{"RS256"},
-			"end_session_endpoint": f.srv.URL + "/logout",
-		})
+		json.NewEncoder(w).Encode(map[string]any{"issuer": f.srv.URL, "authorization_endpoint": f.srv.URL + "/authorize",
+			"token_endpoint": f.srv.URL + "/token", "jwks_uri": f.srv.URL + "/jwks", "id_token_signing_alg_values_supported": []string{"RS256"}})
 	})
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
 	})
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
-			http.Error(w, "PKCE required", 400)
-			return
-		}
-		code := base64.RawURLEncoding.EncodeToString(randBytes(16))
+		code := e2ee.B64(randBytes(16))
 		f.mu.Lock()
-		f.codes[code] = codeGrant{user: f.next, nonce: q.Get("nonce"), challenge: q.Get("code_challenge"), clientID: q.Get("client_id")}
+		f.users[code] = f.next
+		f.codes[code] = [4]string{q.Get("nonce"), q.Get("code_challenge"), q.Get("client_id")}
 		f.mu.Unlock()
 		http.Redirect(w, r, q.Get("redirect_uri")+"?code="+code+"&state="+url.QueryEscape(q.Get("state")), http.StatusFound)
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()
+		code := r.PostForm.Get("code")
 		f.mu.Lock()
-		g, ok := f.codes[r.PostForm.Get("code")]
-		delete(f.codes, r.PostForm.Get("code"))
+		g, ok := f.codes[code]
+		u := f.users[code]
+		delete(f.codes, code)
 		f.mu.Unlock()
 		sum := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-		if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g.challenge {
+		if !ok || base64.RawURLEncoding.EncodeToString(sum[:]) != g[1] {
 			http.Error(w, `{"error":"invalid_grant"}`, 400)
 			return
 		}
-		claims, _ := json.Marshal(map[string]any{
-			"iss": f.srv.URL, "sub": g.user.sub, "aud": g.clientID, "exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(), "nonce": g.nonce, "email": g.user.email, "email_verified": g.user.verified,
-			"name": g.user.sub, "groups": g.user.groups,
-		})
+		claims, _ := json.Marshal(map[string]any{"iss": f.srv.URL, "sub": u.sub, "aud": g[2], "exp": time.Now().Add(time.Hour).Unix(),
+			"iat": time.Now().Unix(), "nonce": g[0], "email": u.email, "email_verified": true, "name": u.sub, "groups": u.groups})
 		jws, _ := f.signer.Sign(claims)
 		idt, _ := jws.CompactSerialize()
 		w.Header().Set("Content-Type", "application/json")
@@ -116,12 +110,57 @@ func randBytes(n int) []byte {
 	return b
 }
 
-// ---- harness ----------------------------------------------------------------------
+// ---- a real SAML IdP (crewjam/saml) that signs genuine assertions --------------
+
+type samlIdP struct {
+	srv  *httptest.Server
+	idp  *saml.IdentityProvider
+	mu   sync.Mutex
+	next *saml.Session
+	spMD *saml.EntityDescriptor
+}
+
+func (s *samlIdP) GetSession(w http.ResponseWriter, r *http.Request, req *saml.IdpAuthnRequest) *saml.Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess := *s.next
+	sess.ID, sess.CreateTime, sess.ExpireTime = e2ee.B64(randBytes(8)), time.Now(), time.Now().Add(time.Hour)
+	return &sess
+}
+
+func (s *samlIdP) GetServiceProvider(r *http.Request, id string) (*saml.EntityDescriptor, error) {
+	if s.spMD == nil || s.spMD.EntityID != id {
+		return nil, os.ErrNotExist
+	}
+	return s.spMD, nil
+}
+
+func newSAMLIdP(t *testing.T) *samlIdP {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-idp"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour)}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	cert, _ := x509.ParseCertificate(der)
+	s := &samlIdP{}
+	mux := http.NewServeMux()
+	s.srv = httptest.NewServer(mux)
+	t.Cleanup(s.srv.Close)
+	base, _ := url.Parse(s.srv.URL)
+	s.idp = &saml.IdentityProvider{Key: key, Signer: key, Certificate: cert,
+		MetadataURL: *base.JoinPath("/metadata"), SSOURL: *base.JoinPath("/sso"),
+		ServiceProviderProvider: s, SessionProvider: s}
+	mux.HandleFunc("/sso", s.idp.ServeSSO)
+	return s
+}
+
+// ---- harness --------------------------------------------------------------------
 
 type harness struct {
 	t    *testing.T
 	srv  *httptest.Server
-	idp  *fakeIdP
+	svc  *service.Service
+	oidc *fakeOIDC
+	saml *samlIdP
 	base string
 }
 
@@ -133,98 +172,115 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := service.New(store, blobs, testutil.Keyring(t), service.DefaultConfig(), log)
-	idp := newFakeIdP(t)
-
-	h := &harness{t: t, idp: idp}
-	// The handler is built after the TLS server starts, because the public
-	// URL (with its random port) must be known first.
+	cfg := service.DefaultConfig()
+	cfg.AdminGroups = []string{"nas-admins"}
+	svc := service.New(store, blobs, cfg, log)
+	h := &harness{t: t, svc: svc, oidc: newFakeOIDC(t), saml: newSAMLIdP(t)}
 	var handler http.Handler
 	h.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
 	t.Cleanup(h.srv.Close)
 	h.base = h.srv.URL
 	pub, _ := url.Parse(h.base)
-	oidc := auth.NewOIDC(auth.OIDCConfig{
-		Issuer: idp.srv.URL, ClientID: "noddanas", ClientSecret: "s3cret", RedirectURL: h.base + "/auth/callback",
-		AllowedGroups: []string{"nas-users"},
-	})
-	am := auth.NewManager(store, svc, auth.Config{SessionIdle: time.Hour, SessionAbsolute: 24 * time.Hour}, oidc)
-	api := httpapi.New(svc, am, httpapi.Config{PublicURL: pub, EnableWebDAV: true}, log, web.Static(), store, blobs)
-	handler = api.Handler()
+	policy := auth.Policy{AllowedGroups: []string{"nas-users"}}
+	oidc := auth.NewOIDC(auth.OIDCConfig{Issuer: h.oidc.srv.URL, ClientID: "noddanas", ClientSecret: "s3cret",
+		RedirectURL: h.base + "/auth/callback", Policy: policy})
+	idpMD, _ := xml.Marshal(h.saml.idp.Metadata())
+	samlSP := auth.NewSAML(auth.SAMLConfig{MetadataURL: h.base + "/auth/saml/metadata", ACSURL: h.base + "/auth/saml/acs",
+		IDPMetadata: idpMD, TrustEmail: true, Policy: policy})
+	am := auth.NewManager(store, svc, auth.Config{SessionIdle: time.Hour, SessionAbsolute: 24 * time.Hour}, oidc, samlSP)
+	handler = httpapi.New(svc, am, httpapi.Config{PublicURL: pub, EnableWebDAV: true,
+		RateLimits: httpapi.RateLimits{Login: 6000, Public: 6000, AuthFailures: 6000}}, log, web.Static(), store, blobs).Handler()
+
+	// The IdP learns our SP metadata the way an administrator would: from our metadata URL.
+	resp, err := h.srv.Client().Get(h.base + "/auth/saml/metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var md saml.EntityDescriptor
+	if err := xml.NewDecoder(resp.Body).Decode(&md); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	h.saml.spMD = &md
 	return h
 }
 
-// browser is a cookie-carrying client that behaves like a same-origin web page.
-type browser struct {
-	h *harness
-	c *http.Client
-}
-
-func (h *harness) browser() *browser {
+func (h *harness) browser() *http.Client {
 	jar, _ := cookiejar.New(nil)
-	c := *h.srv.Client() // copy: Client() returns a shared instance
+	c := *h.srv.Client()
 	c.Jar = jar
-	return &browser{h: h, c: &c}
+	return &c
 }
 
-func (h *harness) login(u idpUser) *browser {
+func (h *harness) loginOIDC(u idpUser) *http.Client {
 	h.t.Helper()
 	b := h.browser()
-	h.idp.next = u
-	resp, err := b.c.Get(h.base + "/auth/login?return_to=/files")
+	h.oidc.next = u
+	resp, err := b.Get(h.base + "/auth/login?return_to=/files")
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.Request.URL.Path != "/files" || resp.Request.URL.Query().Get("error") != "" {
-		h.t.Fatalf("login for %s ended at %s", u.sub, resp.Request.URL)
+	if resp.Request.URL.Path != "/files" {
+		h.t.Fatalf("OIDC login for %s ended at %s", u.sub, resp.Request.URL)
 	}
 	return b
 }
 
-func (b *browser) do(method, path string, body io.Reader, hdr map[string]string) *http.Response {
-	b.h.t.Helper()
-	req, _ := http.NewRequest(method, b.h.base+path, body)
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	if body != nil && hdr["Content-Type"] == "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	for k, v := range hdr {
-		req.Header.Set(k, v)
-	}
-	resp, err := b.c.Do(req)
+var samlRespRE = regexp.MustCompile(`name="SAMLResponse" value="([^"]+)"`)
+
+// startSAML begins a SAML sign-in and returns the IdP's signed response.
+func (h *harness) startSAML(b *http.Client, nameID, email string, groups []string) string {
+	h.t.Helper()
+	h.saml.mu.Lock()
+	h.saml.next = &saml.Session{NameID: nameID, NameIDFormat: string(saml.PersistentNameIDFormat), UserEmail: email,
+		UserName: nameID, UserCommonName: nameID, Groups: groups}
+	h.saml.mu.Unlock()
+	resp, err := b.Get(h.base + "/auth/saml/login?return_to=/files")
 	if err != nil {
-		b.h.t.Fatal(err)
+		h.t.Fatal(err)
 	}
+	page, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	m := samlRespRE.FindSubmatch(page)
+	if m == nil {
+		h.t.Fatalf("IdP did not return a SAML response form: %.300s", page)
+	}
+	return strings.ReplaceAll(string(m[1]), "&#43;", "+")
+}
+
+func (h *harness) postACS(b *http.Client, samlResponse string) *http.Response {
+	h.t.Helper()
+	req, _ := http.NewRequest("POST", h.base+"/auth/saml/acs", strings.NewReader(url.Values{"SAMLResponse": {samlResponse}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Sec-Fetch-Site", "cross-site") // a real IdP form post is cross-site
+	resp, err := b.Do(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	resp.Body.Close()
 	return resp
 }
 
-func (b *browser) json(method, path string, in any, wantStatus int, out any) {
-	b.h.t.Helper()
-	var body io.Reader
-	if in != nil {
-		raw, _ := json.Marshal(in)
-		body = bytes.NewReader(raw)
-	}
-	resp := b.do(method, path, body, nil)
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != wantStatus {
-		b.h.t.Fatalf("%s %s: status %d, want %d: %s", method, path, resp.StatusCode, wantStatus, raw)
-	}
-	if out != nil {
-		if err := json.Unmarshal(raw, out); err != nil {
-			b.h.t.Fatalf("decode %s: %v", raw, err)
-		}
-	}
-}
-
-func status(t *testing.T, resp *http.Response, want int) {
+func status(t *testing.T, resp *http.Response, err error, want int) {
 	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != want {
 		raw, _ := io.ReadAll(resp.Body)
-		t.Fatalf("%s %s: status %d, want %d: %s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want, raw)
+		t.Fatalf("%s %s: status %d, want %d: %.300s", resp.Request.Method, resp.Request.URL.Path, resp.StatusCode, want, raw)
+	}
+}
+
+func must[T any](t *testing.T) func(T, error) T {
+	return func(v T, err error) T {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
 	}
 }
 
@@ -232,215 +288,327 @@ func status(t *testing.T, resp *http.Response, want int) {
 
 func TestEndToEnd(t *testing.T) {
 	h := newHarness(t)
-	alice := h.login(idpUser{sub: "alice", email: "alice@example.test", verified: true, groups: []string{"nas-users"}})
-	bob := h.login(idpUser{sub: "bob", email: "bob@example.test", verified: true, groups: []string{"nas-users"}})
+	ctx := context.Background()
 
-	var me struct {
-		User struct {
-			RootID string `json:"rootId"`
-		} `json:"user"`
-	}
-	alice.json("GET", "/api/v1/me", nil, 200, &me)
-	root := me.User.RootID
+	aliceB := h.loginOIDC(idpUser{sub: "alice", email: "alice@example.test", groups: []string{"nas-users", "nas-admins"}})
+	alice := client.New(h.base, aliceB, "")
+	code := must[string](t)(alice.SetupKeys(ctx, pass))
 
-	t.Run("security headers", func(t *testing.T) {
-		resp := alice.do("GET", "/api/v1/me", nil, nil)
-		resp.Body.Close()
-		for k, want := range map[string]string{
-			"X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-			"Cache-Control": "no-store", "Cross-Origin-Opener-Policy": "same-origin",
-		} {
-			if got := resp.Header.Get(k); got != want {
-				t.Errorf("%s = %q, want %q", k, got, want)
+	t.Run("SAML sign-in, tampering, replay and unsolicited responses", func(t *testing.T) {
+		b := h.browser()
+		good := h.startSAML(b, "saml-bob", "bob@example.test", []string{"nas-users"})
+
+		// Tampered: change the NameID inside the signed assertion.
+		raw, _ := base64.StdEncoding.DecodeString(good)
+		forged := base64.StdEncoding.EncodeToString(bytes.ReplaceAll(raw, []byte("saml-bob"), []byte("saml-eve")))
+		resp := h.postACS(b, forged)
+		if resp.Request.URL.Query().Get("error") != "signin" {
+			t.Fatalf("tampered assertion accepted: %s", resp.Request.URL)
+		}
+		// The failed attempt consumed the login request: even the genuine
+		// response is now refused (single use).
+		if resp := h.postACS(b, good); resp.Request.URL.Query().Get("error") != "signin" {
+			t.Fatal("response accepted after its request was consumed")
+		}
+		// Unsolicited: a browser that never started a sign-in.
+		if resp := h.postACS(h.browser(), good); resp.Request.URL.Query().Get("error") != "signin" {
+			t.Fatal("unsolicited (IdP-initiated) response accepted")
+		}
+		// A fresh, genuine sign-in works, and its response cannot be replayed.
+		good2 := h.startSAML(b, "saml-bob", "bob@example.test", []string{"nas-users"})
+		if resp := h.postACS(b, good2); resp.Request.URL.Path != "/files" || resp.Request.URL.Query().Get("error") != "" {
+			t.Fatalf("SAML login failed: %s", resp.Request.URL)
+		}
+		h.startSAML(b, "saml-bob", "bob@example.test", []string{"nas-users"}) // new request ID, new cookie
+		if resp := h.postACS(b, good2); resp.Request.URL.Query().Get("error") != "signin" {
+			t.Fatal("replayed SAML response accepted")
+		}
+		// The policy applies to SAML too.
+		mb := h.browser()
+		r := h.startSAML(mb, "saml-mallory", "m@example.test", nil)
+		if resp := h.postACS(mb, r); resp.Request.URL.Query().Get("error") != "not_allowed" {
+			t.Fatal("SAML user outside the allowed groups signed in")
+		}
+	})
+
+	bobB := h.browser()
+	h.postACS(bobB, h.startSAML(bobB, "saml-bob", "bob@example.test", []string{"nas-users"}))
+	bob := client.New(h.base, bobB, "")
+	must[string](t)(bob.SetupKeys(ctx, pass))
+
+	me := must[*client.Me](t)(alice.Me(ctx))
+	root := me.PersonalSpace.RootID
+	docs := must[string](t)(alice.Mkdir(ctx, root, "Docs"))
+	secret := "the plaintext the server must never see"
+	f := must[*client.Node](t)(alice.Upload(ctx, docs, "report.txt", strings.NewReader(secret), int64(len(secret)), time.Now()))
+
+	t.Run("round trip through the API; server holds only ciphertext", func(t *testing.T) {
+		kids := must[[]*client.Node](t)(alice.List(ctx, docs))
+		if len(kids) != 1 || kids[0].Name != "report.txt" || strings.Contains(kids[0].NameEnc, "report") {
+			t.Fatalf("listing = %+v", kids)
+		}
+		var out bytes.Buffer
+		must[*e2ee.Meta](t)(alice.Download(ctx, f.ID, &out))
+		if out.String() != secret {
+			t.Fatal("content mismatch")
+		}
+		var raw bytes.Buffer
+		if err := alice.DownloadContainer(ctx, f.ID, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw.Bytes(), []byte("plaintext")) || bytes.Contains(raw.Bytes(), []byte("report")) {
+			t.Fatal("container leaks plaintext")
+		}
+		// Duplicate names are caught by keyed hashes, case-insensitively.
+		_, err := alice.Upload(ctx, docs, "REPORT.TXT", strings.NewReader("x"), 1, time.Now())
+		if _, ok := err.(*client.ErrExists); !ok {
+			t.Fatalf("duplicate upload: %v", err)
+		}
+	})
+
+	t.Run("independent backup and restore of a single file", func(t *testing.T) {
+		var backup bytes.Buffer
+		if err := alice.DownloadContainer(ctx, f.ID, &backup); err != nil {
+			t.Fatal(err)
+		}
+		f.Name = "report.txt"
+		if err := alice.Trash(ctx, f); err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest("DELETE", h.base+"/api/v1/trash/"+f.ID, nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err := aliceB.Do(req)
+		status(t, resp, err, http.StatusAccepted)
+		if _, err := h.svc.RunMaintenance(ctx, 10); err != nil {
+			t.Fatal(err)
+		}
+		// The file is gone from the server. Restore it from the backup alone.
+		n := must[*client.Node](t)(alice.RestoreContainer(ctx, docs, backup.Bytes()))
+		var out bytes.Buffer
+		must[*e2ee.Meta](t)(alice.Download(ctx, n.ID, &out))
+		if out.String() != secret || n.Name != "report.txt" {
+			t.Fatalf("restored %q as %q", out.String(), n.Name)
+		}
+		// Bob cannot restore Alice's backup into his space.
+		bme := must[*client.Me](t)(bob.Me(ctx))
+		if _, err := bob.RestoreContainer(ctx, bme.PersonalSpace.RootID, backup.Bytes()); err == nil {
+			t.Fatal("restored someone else's backup")
+		}
+		f = n
+	})
+
+	t.Run("user share with end-to-end keys", func(t *testing.T) {
+		d := &client.Node{ID: docs, Name: "Docs", Kind: "folder"}
+		if err := alice.ShareWithUser(ctx, d, "bob@example.test", "read"); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		must[*e2ee.Meta](t)(bob.Download(ctx, f.ID, &out))
+		if out.String() != secret {
+			t.Fatal("bob cannot read the shared file")
+		}
+		_, err := bob.Upload(ctx, docs, "x.txt", strings.NewReader("x"), 1, time.Now())
+		if ae, ok := err.(*client.APIError); !ok || ae.Status != http.StatusForbidden {
+			t.Fatalf("read share allowed a write: %v", err)
+		}
+	})
+
+	t.Run("team folder with direct and group members", func(t *testing.T) {
+		team := must[*client.Space](t)(alice.CreateTeam(ctx, "Operations"))
+		bobUser := must[*e2ee.PublicUser](t)(alice.LookupUser(ctx, "bob@example.test"))
+		if err := alice.AddMember(ctx, team.ID, bobUser.ID, "write"); err != nil {
+			t.Fatal(err)
+		}
+		spaces := must[[]*client.Space](t)(bob.Spaces(ctx))
+		var got *client.Space
+		for _, s := range spaces {
+			if s.ID == team.ID {
+				got = s
 			}
 		}
-		if !strings.Contains(resp.Header.Get("Strict-Transport-Security"), "max-age=") {
-			t.Error("missing HSTS")
+		if got == nil || got.Name != "Operations" {
+			t.Fatalf("bob's view of the team: %+v", got)
 		}
-		ui := alice.do("GET", "/", nil, nil)
-		ui.Body.Close()
-		if csp := ui.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") ||
-			!strings.Contains(csp, "require-trusted-types-for 'script'") {
-			t.Errorf("UI CSP = %q", csp)
+		up := must[*client.Node](t)(bob.Upload(ctx, team.RootID, "runbook.md", strings.NewReader("step 1"), 6, time.Now()))
+		var out bytes.Buffer
+		must[*e2ee.Meta](t)(alice.Download(ctx, up.ID, &out))
+
+		// Item 3: an admin maps an IdP group; a group member gets access at
+		// once and the key as soon as a manager's client grants it.
+		req, _ := http.NewRequest("PUT", h.base+"/api/v1/spaces/"+team.ID+"/groups/eng", strings.NewReader(`{"role":"read"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err := aliceB.Do(req)
+		status(t, resp, err, http.StatusNoContent)
+		carolB := h.loginOIDC(idpUser{sub: "carol", email: "carol@example.test", groups: []string{"nas-users", "eng"}})
+		carol := client.New(h.base, carolB, "")
+		must[string](t)(carol.SetupKeys(ctx, pass))
+		if _, _, err := carol.NodeKey(ctx, up.ID); err == nil {
+			t.Fatal("carol decrypted before being granted the key")
 		}
+		if n := must[int](t)(alice.GrantPending(ctx, team.ID)); n != 1 {
+			t.Fatalf("granted %d", n)
+		}
+		out.Reset()
+		must[*e2ee.Meta](t)(carol.Download(ctx, up.ID, &out))
+		if out.String() != "step 1" {
+			t.Fatal("carol cannot read after the grant")
+		}
+		// Bob (not an admin) cannot map groups.
+		req, _ = http.NewRequest("PUT", h.base+"/api/v1/spaces/"+team.ID+"/groups/all", strings.NewReader(`{"role":"manage"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err = bobB.Do(req)
+		status(t, resp, err, http.StatusForbidden)
 	})
 
-	t.Run("CSRF and host checks", func(t *testing.T) {
-		body := `{"name":"csrf"}`
-		status(t, alice.do("POST", "/api/v1/nodes/"+root+"/folders", strings.NewReader(body),
-			map[string]string{"Sec-Fetch-Site": "cross-site"}), 403)
-		req, _ := http.NewRequest("POST", h.base+"/api/v1/nodes/"+root+"/folders", strings.NewReader(body))
-		req.Header.Set("Origin", "https://evil.example")
-		resp, _ := alice.c.Do(req)
-		status(t, resp, 403)
-		req, _ = http.NewRequest("GET", h.base+"/api/v1/me", nil)
-		req.Host = "evil.example"
-		resp, _ = alice.c.Do(req)
-		status(t, resp, http.StatusMisdirectedRequest)
-		// Anonymous and bad-credential requests are refused.
-		resp, _ = h.srv.Client().Get(h.base + "/api/v1/me")
-		status(t, resp, 401)
-		req, _ = http.NewRequest("GET", h.base+"/api/v1/me", nil)
-		req.Header.Set("Authorization", "Bearer ndn_forged")
-		resp, _ = h.srv.Client().Do(req)
-		status(t, resp, 401)
-	})
-
-	t.Run("open redirect is refused", func(t *testing.T) {
-		b := h.browser()
-		h.idp.next = idpUser{sub: "alice", email: "alice@example.test", verified: true, groups: []string{"nas-users"}}
-		resp, err := b.c.Get(h.base + "/auth/login?return_to=//evil.example/x")
+	t.Run("public link decrypts only with the fragment secret", func(t *testing.T) {
+		link := must[string](t)(alice.CreateLink(ctx, f, "", 0, 0))
+		frag := link[strings.Index(link, "#")+1:]
+		token, secretB64, _ := strings.Cut(frag, ".")
+		anon := h.srv.Client()
+		body, _ := json.Marshal(map[string]string{"token": token})
+		req, _ := http.NewRequest("POST", h.base+"/api/v1/public/node", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := anon.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("public node: %v %v", err, resp.Status)
+		}
+		var view struct {
+			Link struct{ ID, NodeID, LinkKey string }
+		}
+		json.NewDecoder(resp.Body).Decode(&view)
+		resp.Body.Close()
+		ls, _ := e2ee.UnB64(secretB64)
+		nk, name, err := e2ee.OpenLinkKey(ls, view.Link.ID, view.Link.NodeID, view.Link.LinkKey)
+		if err != nil || name != "report.txt" {
+			t.Fatalf("link key: %v", err)
+		}
+		req, _ = http.NewRequest("POST", h.base+"/api/v1/public/download", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err = anon.Do(req)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatal("public download failed")
+		}
+		ct, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		p, _ := e2ee.ParsePrefix(bytes.NewReader(ct))
+		k, err := p.Keys(nk)
 		if err != nil {
 			t.Fatal(err)
 		}
-		resp.Body.Close()
-		if resp.Request.URL.Host != strings.TrimPrefix(h.base, "https://") || resp.Request.URL.Path != "/" {
-			t.Fatalf("redirected to %s", resp.Request.URL)
+		var out bytes.Buffer
+		if err := e2ee.DecryptVerify(bytes.NewReader(ct[p.BodyOffset():]), &out, p, k, alice.Account().Public()); err != nil || out.String() != secret {
+			t.Fatalf("visitor decrypt: %v", err)
+		}
+		// A wrong secret cannot decrypt, even with the right token.
+		if _, _, err := e2ee.OpenLinkKey(e2ee.NewLinkSecret(), view.Link.ID, view.Link.NodeID, view.Link.LinkKey); err == nil {
+			t.Fatal("link key opened with the wrong secret")
 		}
 	})
 
-	t.Run("access policy and forged callbacks", func(t *testing.T) {
-		b := h.browser()
-		h.idp.next = idpUser{sub: "mallory", email: "m@example.test", verified: true}
-		resp, _ := b.c.Get(h.base + "/auth/login")
-		resp.Body.Close()
-		if resp.Request.URL.Query().Get("error") != "not_allowed" {
-			t.Fatalf("user outside allowed groups signed in: %s", resp.Request.URL)
-		}
-		resp, _ = h.browser().c.Get(h.base + "/auth/callback?code=x&state=y")
-		resp.Body.Close()
-		if resp.Request.URL.Query().Get("error") != "signin" {
-			t.Fatalf("forged callback not rejected: %s", resp.Request.URL)
-		}
-	})
-
-	var fileID string
-	t.Run("upload and safe download", func(t *testing.T) {
-		payload := "<html><script>alert(document.cookie)</script></html>"
-		var n struct{ ID string }
-		resp := alice.do("POST", "/api/v1/nodes/"+root+"/upload?name=evil.html", strings.NewReader(payload),
-			map[string]string{"Content-Type": "text/html"})
-		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 201 {
-			t.Fatalf("upload: %d %s", resp.StatusCode, raw)
-		}
-		json.Unmarshal(raw, &n)
-		fileID = n.ID
-		for _, q := range []string{"", "?inline=1"} {
-			resp = alice.do("GET", "/api/v1/nodes/"+fileID+"/content"+q, nil, nil)
-			got, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if string(got) != payload {
-				t.Fatalf("content mismatch")
-			}
-			if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
-				t.Errorf("HTML served as %q", ct)
-			}
-			if cd := resp.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
-				t.Errorf("Content-Disposition = %q", cd)
-			}
-			if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
-				t.Error("download not sandboxed")
-			}
-		}
-		resp = alice.do("GET", "/api/v1/nodes/"+fileID+"/content", nil, map[string]string{"Range": "bytes=6-13"})
-		got, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 206 || string(got) != "<script>" {
-			t.Fatalf("range: %d %q", resp.StatusCode, got)
-		}
-		// Bob cannot see Alice's file at all.
-		status(t, bob.do("GET", "/api/v1/nodes/"+fileID+"/content", nil, nil), 404)
-	})
-
-	t.Run("app passwords are scoped", func(t *testing.T) {
+	t.Run("WebDAV mirror decrypts offline into a full tree", func(t *testing.T) {
 		var created struct{ Token string }
-		alice.json("POST", "/api/v1/app-passwords", map[string]any{"name": "laptop", "readOnly": true}, 201, &created)
-		api := func(method, path string, body io.Reader) *http.Response {
-			req, _ := http.NewRequest(method, h.base+path, body)
-			req.Header.Set("Authorization", "Bearer "+created.Token)
-			resp, _ := h.srv.Client().Do(req)
-			return resp
+		req, _ := http.NewRequest("POST", h.base+"/api/v1/app-passwords", strings.NewReader(`{"name":"backup","readOnly":true}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := aliceB.Do(req)
+		if err != nil || resp.StatusCode != 201 {
+			t.Fatalf("app password: %v", err)
 		}
-		status(t, api("GET", "/api/v1/me", nil), 200)
-		status(t, api("POST", "/api/v1/nodes/"+root+"/upload?name=x", strings.NewReader("x")), 403)
-		// Credentials cannot mint more credentials.
-		status(t, api("POST", "/api/v1/app-passwords", strings.NewReader(`{"name":"pivot"}`)), 403)
-	})
-
-	t.Run("webdav", func(t *testing.T) {
-		var created struct{ Token string }
-		alice.json("POST", "/api/v1/app-passwords", map[string]any{"name": "dav"}, 201, &created)
-		dav := func(method, path string, body io.Reader, hdr map[string]string) *http.Response {
-			req, _ := http.NewRequest(method, h.base+path, body)
-			req.SetBasicAuth("alice", created.Token)
-			for k, v := range hdr {
-				req.Header.Set(k, v)
-			}
+		json.NewDecoder(resp.Body).Decode(&created)
+		resp.Body.Close()
+		dav := func(method, path string) *http.Response {
+			req, _ := http.NewRequest(method, h.base+path, nil)
+			req.SetBasicAuth("backup", created.Token)
 			resp, err := h.srv.Client().Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
 			return resp
 		}
-		status(t, dav("MKCOL", "/dav/Notes", nil, nil), 201)
-		status(t, dav("PUT", "/dav/Notes/todo.txt", strings.NewReader("buy milk"), nil), 201)
-		status(t, dav("PUT", "/dav/Notes/x.html", strings.NewReader("<script>alert(1)</script>"), nil), 201)
-		for _, name := range []string{"todo.txt", "x.html"} {
-			resp := dav("GET", "/dav/Notes/"+name, nil, nil)
-			resp.Body.Close()
-			if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "application/octet-stream" ||
-				!strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
-				t.Fatalf("dav get %s: %d %q", name, resp.StatusCode, resp.Header.Get("Content-Type"))
+		status(t, dav("PROPFIND", "/dav/"), nil, 207)
+		status(t, dav("PUT", "/dav/"+me.PersonalSpace.ID+"/x.ndne"), nil, http.StatusMethodNotAllowed)
+
+		// Mirror the space the way a sync tool would.
+		mirror := t.TempDir()
+		var fetch func(davPath, local string)
+		fetch = func(davPath, local string) {
+			os.MkdirAll(local, 0o700)
+			get := func(name string) []byte {
+				r := dav("GET", davPath+"/"+name)
+				defer r.Body.Close()
+				if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/octet-stream" {
+					t.Fatalf("GET %s/%s: %d %s", davPath, name, r.StatusCode, r.Header.Get("Content-Type"))
+				}
+				b, _ := io.ReadAll(r.Body)
+				os.WriteFile(filepath.Join(local, name), b, 0o600)
+				return b
+			}
+			var fr client.FolderRecord
+			json.Unmarshal(get("_noddanas-folder.json"), &fr)
+			for _, ch := range fr.Children {
+				if ch.Kind == "folder" {
+					fetch(davPath+"/"+ch.ID, filepath.Join(local, ch.ID))
+				} else {
+					get(ch.ID + ".ndne")
+				}
 			}
 		}
-		resp := dav("GET", "/dav/Notes/todo.txt", nil, nil)
-		got, _ := io.ReadAll(resp.Body)
+		fetch("/dav/"+me.PersonalSpace.ID, mirror)
+		r := dav("GET", "/dav/"+me.PersonalSpace.ID+"/_noddanas-space.json")
+		sb, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		os.WriteFile(filepath.Join(mirror, "_noddanas-space.json"), sb, 0o600)
+
+		// Offline: key backup + recovery code, no server.
+		kb := must[*client.KeyBackup](t)(alice.ExportKeys(ctx))
+		kbJSON, _ := json.Marshal(kb)
+		keys := must[*client.OfflineKeys](t)(client.UnlockBackup(kbJSON, code, true))
+		out := t.TempDir()
+		n, skipped, err := keys.DecryptTree(mirror, out, nil)
+		if err != nil || n != 1 || len(skipped) != 0 {
+			t.Fatalf("decrypt tree: %d files, skipped %v, %v", n, skipped, err)
+		}
+		got, err := os.ReadFile(filepath.Join(out, "Docs", "report.txt"))
+		if err != nil || string(got) != secret {
+			t.Fatalf("offline tree: %q %v", got, err)
+		}
+	})
+
+	t.Run("credential scoping and HTTP hardening", func(t *testing.T) {
+		resp, err := h.srv.Client().Get(h.base + "/api/v1/me")
+		status(t, resp, err, 401)
+		// Keys can only be set up from an interactive session.
+		var created struct{ Token string }
+		req, _ := http.NewRequest("POST", h.base+"/api/v1/app-passwords", strings.NewReader(`{"name":"cli"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ = bobB.Do(req)
+		json.NewDecoder(resp.Body).Decode(&created)
 		resp.Body.Close()
-		if string(got) != "buy milk" {
-			t.Fatalf("dav get: %q", got)
+		req, _ = http.NewRequest("POST", h.base+"/api/v1/keys", strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+created.Token)
+		resp, err = h.srv.Client().Do(req)
+		status(t, resp, err, 403)
+		// CSRF and host checks.
+		req, _ = http.NewRequest("POST", h.base+"/api/v1/nodes/"+root+"/folders", strings.NewReader(`{}`))
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		resp, err = aliceB.Do(req)
+		status(t, resp, err, 403)
+		req, _ = http.NewRequest("GET", h.base+"/api/v1/me", nil)
+		req.Host = "evil.example"
+		resp, err = aliceB.Do(req)
+		status(t, resp, err, http.StatusMisdirectedRequest)
+		// Downloads are always opaque, sandboxed attachments.
+		req, _ = http.NewRequest("GET", h.base+"/api/v1/nodes/"+f.ID+"/content", nil)
+		resp, _ = aliceB.Do(req)
+		resp.Body.Close()
+		if resp.Header.Get("Content-Type") != "application/octet-stream" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
+			t.Fatalf("download headers: %v", resp.Header)
 		}
-		status(t, dav("PROPFIND", "/dav/Notes/", nil, map[string]string{"Depth": "1"}), 207)
-		status(t, dav("MOVE", "/dav/Notes/todo.txt", nil, map[string]string{"Destination": h.base + "/dav/Notes/done.txt"}), 201)
-		status(t, dav("DELETE", "/dav/Notes/done.txt", nil, nil), 204)
-		var trash struct{ Items []struct{ Name string } }
-		alice.json("GET", "/api/v1/trash", nil, 200, &trash)
-		if len(trash.Items) != 1 || trash.Items[0].Name != "done.txt" {
-			t.Fatalf("WebDAV delete should go to trash: %+v", trash)
+		ui, _ := aliceB.Get(h.base + "/")
+		ui.Body.Close()
+		if !strings.Contains(ui.Header.Get("Content-Security-Policy"), "require-trusted-types-for 'script'") {
+			t.Fatal("UI CSP missing Trusted Types")
 		}
-		// Session cookies are not accepted for WebDAV.
-		status(t, alice.do("PROPFIND", "/dav/", nil, nil), 401)
-	})
-
-	t.Run("public link", func(t *testing.T) {
-		var link struct {
-			Token string
-			URL   string
-		}
-		alice.json("POST", "/api/v1/nodes/"+fileID+"/shares", map[string]any{"type": "link"}, 201, &link)
-		if !strings.Contains(link.URL, "/s#") {
-			t.Fatalf("link token must travel in the URL fragment: %s", link.URL)
-		}
-		anon := h.browser()
-		var info struct{ Node struct{ Name string } }
-		anon.json("POST", "/api/v1/public/node", map[string]string{"token": link.Token}, 200, &info)
-		if info.Node.Name != "evil.html" {
-			t.Fatalf("public node = %+v", info)
-		}
-		form := url.Values{"token": {link.Token}}
-		resp := anon.do("POST", "/api/v1/public/download", strings.NewReader(form.Encode()),
-			map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
-		status(t, resp, 200)
-		anon.json("POST", "/api/v1/public/node", map[string]string{"token": link.Token, "nodeId": root}, 404, nil)
-	})
-
-	t.Run("logout ends the session", func(t *testing.T) {
-		var out struct{ LogoutURL string }
-		bob.json("POST", "/auth/logout", nil, 200, &out)
-		if !strings.HasPrefix(out.LogoutURL, h.idp.srv.URL+"/logout") {
-			t.Errorf("logout URL = %q", out.LogoutURL)
-		}
-		status(t, bob.do("GET", "/api/v1/me", nil, nil), 401)
 	})
 }

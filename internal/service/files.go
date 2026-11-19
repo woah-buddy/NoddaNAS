@@ -5,18 +5,14 @@ import (
 	"errors"
 
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/validate"
 )
 
-// NodeInfo is a node plus the caller's effective permission on it, so
-// clients can show only the actions that will succeed.
+// NodeInfo is a node plus the caller's effective permission on it.
 type NodeInfo struct {
-	Node       *domain.Node
-	Permission domain.Permission
-	// CanModifyEntry reports whether the caller may rename, move or delete
-	// this item (which needs write permission on its parent).
-	CanModifyEntry bool
+	Node           *domain.Node
+	Permission     domain.Permission
+	CanModifyEntry bool // may rename, move or delete it (write on parent)
 }
 
 func infoOf(a *access) *NodeInfo {
@@ -32,6 +28,47 @@ func (s *Service) GetNode(ctx context.Context, p Principal, id string) (*NodeInf
 	return infoOf(a), nil
 }
 
+// Path tells a client how to derive a node's key: an entry point it holds
+// a key for (its space, or a share made with it) plus every node from that
+// entry point down to the target, each with its wrapped key.
+type Path struct {
+	Space *SpaceInfo    // the space; Role is RoleNone if access is via a share
+	Share *domain.Share // the entry share, if access is via a user share
+	Nodes []*domain.Node
+	Info  *NodeInfo
+}
+
+// NodePath returns the key-derivation path to a node.
+func (s *Service) NodePath(ctx context.Context, p Principal, id string) (*Path, error) {
+	a, err := s.authorize(ctx, p, id, domain.PermRead)
+	if err != nil {
+		return nil, err
+	}
+	role, m, err := s.spaceRole(ctx, p, a.space)
+	if err != nil {
+		return nil, err
+	}
+	out := &Path{Space: &SpaceInfo{Space: a.space, Role: role, Membership: m}, Info: infoOf(a)}
+	entry := len(a.chain) - 1 // the root
+	if role == domain.RoleNone {
+		// Access is through a share: start at the highest shared ancestor.
+		entry = -1
+		for i := len(a.chain) - 1; i >= 0; i-- {
+			if g, ok := a.grants[a.chain[i].ID]; ok {
+				entry, out.Share = i, g
+				break
+			}
+		}
+		if entry < 0 {
+			return nil, domain.ErrNotFound
+		}
+	}
+	for i := entry; i >= 0; i-- {
+		out.Nodes = append(out.Nodes, a.chain[i])
+	}
+	return out, nil
+}
+
 // ListChildren lists a folder the caller can read.
 func (s *Service) ListChildren(ctx context.Context, p Principal, id, cursor string, limit int) (*NodeInfo, []*domain.Node, string, error) {
 	a, err := s.authorize(ctx, p, id, domain.PermRead)
@@ -41,6 +78,9 @@ func (s *Service) ListChildren(ctx context.Context, p Principal, id, cursor stri
 	if a.node.Kind != domain.KindFolder {
 		return nil, nil, "", domain.E(domain.CodeInvalid, "not a folder")
 	}
+	if cursor != "" && validate.ID(cursor) != nil {
+		return nil, nil, "", domain.E(domain.CodeInvalid, "invalid cursor")
+	}
 	children, next, err := s.store.ListChildren(ctx, id, cursor, s.pageSize(limit))
 	if err != nil {
 		return nil, nil, "", err
@@ -48,10 +88,32 @@ func (s *Service) ListChildren(ctx context.Context, p Principal, id, cursor stri
 	return infoOf(a), children, next, nil
 }
 
-// CreateFolder creates a folder inside parentID.
-func (s *Service) CreateFolder(ctx context.Context, p Principal, parentID, rawName string) (*domain.Node, error) {
-	name, err := validate.Name(rawName)
-	if err != nil {
+// EntryFields are the client-encrypted fields that place a node in a folder.
+type EntryFields struct {
+	NameEnc    string // name encrypted under the parent's name key
+	NameHash   string // keyed name hash under the parent's hash key
+	WrappedKey string // node key wrapped under the parent's wrap key
+}
+
+func (e EntryFields) validate(needKey bool) error {
+	if err := validate.Opaque("nameEnc", e.NameEnc, validate.EncNameMin, validate.EncNameMax); err != nil {
+		return err
+	}
+	if err := validate.SHA256Hex(e.NameHash); err != nil {
+		return domain.E(domain.CodeInvalid, "nameHash must be 64 lowercase hex characters")
+	}
+	if needKey {
+		return validate.Opaque("wrappedKey", e.WrappedKey, validate.WrappedKeyLen, validate.WrappedKeyLen)
+	}
+	return nil
+}
+
+// CreateFolder creates folder `id` (chosen by the client) inside parentID.
+func (s *Service) CreateFolder(ctx context.Context, p Principal, parentID, id string, e EntryFields) (*domain.Node, error) {
+	if err := validate.ID(id); err != nil {
+		return nil, err
+	}
+	if err := e.validate(true); err != nil {
 		return nil, err
 	}
 	a, err := s.authorize(ctx, p, parentID, domain.PermWrite)
@@ -66,28 +128,36 @@ func (s *Service) CreateFolder(ctx context.Context, p Principal, parentID, rawNa
 	}
 	now := s.now()
 	n := &domain.Node{
-		ID: secure.NewID(), OwnerID: a.node.OwnerID, ParentID: a.node.ID, Name: name, Kind: domain.KindFolder,
-		CreatedAt: now, ModifiedAt: now, ModifiedBy: p.UserID, Revision: 1,
+		ID: id, SpaceID: a.space.ID, ParentID: a.node.ID, Kind: domain.KindFolder,
+		NameEnc: e.NameEnc, NameHash: e.NameHash, WrappedKey: e.WrappedKey,
+		CreatedAt: now, CreatedBy: p.UserID, ModifiedAt: now, ModifiedBy: p.UserID, Revision: 1,
 	}
-	if err := s.store.CreateFolder(ctx, n, validate.NameKey(name)); err != nil {
-		return nil, nameConflict(err)
+	if err := s.store.CreateFolder(ctx, n); err != nil {
+		return nil, s.nameConflict(ctx, err, a.node.ID, e.NameHash)
 	}
 	s.audit(ctx, "folder.create", p, "node", n.ID, "parent", a.node.ID)
 	return n, nil
 }
 
-func nameConflict(err error) error {
-	if errors.Is(err, domain.ErrConflict) {
-		return domain.E(domain.CodeConflict, "an item with that name already exists in this folder")
+// nameConflict turns a unique violation into a helpful 409 that tells the
+// client which existing node holds the name (it can see the folder anyway).
+func (s *Service) nameConflict(ctx context.Context, err error, parentID, hash string) error {
+	if !errors.Is(err, domain.ErrConflict) {
+		return err
 	}
-	return err
+	e := &domain.Error{Code: domain.CodeConflict, Message: "an item with that name already exists in this folder"}
+	if existing, gerr := s.store.GetChildByHash(ctx, parentID, hash); gerr == nil {
+		e.Detail = map[string]string{"existingId": existing.ID, "existingKind": string(existing.Kind)}
+	}
+	return e
 }
 
-// UpdateRequest renames and/or moves a node. Nil fields are unchanged.
-// Revision, if non-zero, must match the node's current revision.
+// UpdateRequest renames and/or moves a node. A rename supplies a new
+// encrypted name and hash; a move also supplies the node key re-wrapped
+// under the new parent. Revision, if non-zero, must match.
 type UpdateRequest struct {
-	Name     *string
 	ParentID *string
+	Entry    EntryFields
 	Revision int64
 }
 
@@ -100,18 +170,13 @@ func (s *Service) Update(ctx context.Context, p Principal, id string, req Update
 	if err := requireParentWrite(a); err != nil {
 		return nil, err
 	}
-	n := *a.node
-	changed := false
-
-	if req.Name != nil {
-		name, err := validate.Name(*req.Name)
-		if err != nil {
-			return nil, err
-		}
-		changed = changed || name != n.Name
-		n.Name = name
+	moving := req.ParentID != nil && *req.ParentID != a.node.ParentID
+	if err := req.Entry.validate(moving); err != nil {
+		return nil, err
 	}
-	if req.ParentID != nil && *req.ParentID != n.ParentID {
+	n := *a.node
+	n.NameEnc, n.NameHash = req.Entry.NameEnc, req.Entry.NameHash
+	if moving {
 		dest, err := s.authorize(ctx, p, *req.ParentID, domain.PermWrite)
 		if err != nil {
 			return nil, err
@@ -119,35 +184,44 @@ func (s *Service) Update(ctx context.Context, p Principal, id string, req Update
 		switch {
 		case dest.node.Kind != domain.KindFolder:
 			return nil, domain.E(domain.CodeInvalid, "destination is not a folder")
-		case dest.node.OwnerID != n.OwnerID:
-			// Content and quota belong to the owner; moving across owners
-			// would silently transfer both. Copy instead (not yet supported).
-			return nil, domain.E(domain.CodeInvalid, "items cannot be moved between different users' storage")
+		case dest.space.ID != a.space.ID:
+			// Content and quota belong to a space. Moving between spaces
+			// means re-encrypting for the new owner, which clients do as
+			// download-and-upload.
+			return nil, domain.E(domain.CodeInvalid, "items cannot be moved between spaces; copy them instead")
 		case dest.contains(n.ID):
 			return nil, domain.E(domain.CodeInvalid, "a folder cannot be moved into itself")
 		case len(dest.chain) >= s.cfg.MaxDepth:
 			return nil, errTooDeep
 		}
-		n.ParentID = dest.node.ID
-		changed = true
-	}
-	if !changed {
-		return a.node, nil
+		n.ParentID, n.WrappedKey = dest.node.ID, req.Entry.WrappedKey
 	}
 	rev := req.Revision
 	if rev == 0 {
 		rev = a.node.Revision
 	}
 	n.ModifiedAt, n.ModifiedBy = s.now(), p.UserID
-	if err := s.store.UpdateNodeLocation(ctx, &n, validate.NameKey(n.Name), rev); err != nil {
-		return nil, nameConflict(err)
+	if err := s.store.UpdateNodeLocation(ctx, &n, rev); err != nil {
+		return nil, s.nameConflict(ctx, err, n.ParentID, n.NameHash)
 	}
-	s.audit(ctx, "node.update", p, "node", n.ID, "parent", n.ParentID)
+	s.audit(ctx, "node.update", p, "node", n.ID, "parent", n.ParentID, "moved", moving)
 	return &n, nil
 }
 
-// Trash moves a node (and everything under it) to its owner's trash.
-func (s *Service) Trash(ctx context.Context, p Principal, id string, revision int64) error {
+// TrashRequest carries the sealed key that lets the space owner restore the
+// item later (docs/E2EE.md §7).
+type TrashRequest struct {
+	RestoreKey string
+	RestoreSig string
+	Revision   int64
+}
+
+// Trash moves a node (and everything under it) to its space's trash.
+func (s *Service) Trash(ctx context.Context, p Principal, id string, req TrashRequest) error {
+	if err := firstErr(validate.Opaque("restoreKey", req.RestoreKey, 32+12+16, validate.SealedMax),
+		validate.Opaque("restoreSig", req.RestoreSig, validate.SignatureLen, validate.SignatureLen)); err != nil {
+		return err
+	}
 	a, err := s.authorize(ctx, p, id, domain.PermRead)
 	if err != nil {
 		return err
@@ -155,37 +229,43 @@ func (s *Service) Trash(ctx context.Context, p Principal, id string, revision in
 	if err := requireParentWrite(a); err != nil {
 		return err
 	}
-	if revision == 0 {
-		revision = a.node.Revision
+	rev := req.Revision
+	if rev == 0 {
+		rev = a.node.Revision
 	}
-	if err := s.store.TrashNode(ctx, a.node, s.now(), revision); err != nil {
+	n := *a.node
+	now := s.now()
+	n.TrashedAt, n.TrashedBy, n.RestoreKey, n.RestoreSig = &now, p.UserID, req.RestoreKey, req.RestoreSig
+	if err := s.store.TrashNode(ctx, &n, rev); err != nil {
 		return err
 	}
-	s.audit(ctx, "node.trash", p, "node", id, "owner", a.node.OwnerID)
+	s.audit(ctx, "node.trash", p, "node", id, "space", a.space.ID)
 	return nil
 }
 
-// ListTrash lists the caller's own trash.
-func (s *Service) ListTrash(ctx context.Context, p Principal) ([]domain.TrashEntry, error) {
-	if p.UserID == "" {
-		return nil, domain.ErrUnauthorized
+// TrashEntry is a trashed node and when it will be purged automatically.
+type TrashEntry struct {
+	Node      *domain.Node
+	ExpiresAt int64 // Unix seconds
+}
+
+// ListTrash lists a space's trash: its owner, or team members with write.
+func (s *Service) ListTrash(ctx context.Context, p Principal, spaceID string) ([]TrashEntry, error) {
+	if _, _, _, err := s.spaceAccess(ctx, p, spaceID, domain.RoleWrite); err != nil {
+		return nil, err
 	}
-	nodes, err := s.store.ListTrash(ctx, p.UserID)
+	nodes, err := s.store.ListTrash(ctx, spaceID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]domain.TrashEntry, len(nodes))
+	out := make([]TrashEntry, len(nodes))
 	for i, n := range nodes {
-		out[i] = domain.TrashEntry{Node: n, ExpiresAt: n.TrashedAt.Add(s.cfg.TrashRetention)}
+		out[i] = TrashEntry{Node: n, ExpiresAt: n.TrashedAt.Add(s.cfg.TrashRetention).Unix()}
 	}
 	return out, nil
 }
 
-// ownTrashed returns a trashed node owned by p, for trash operations.
-func (s *Service) ownTrashed(ctx context.Context, p Principal, id string) (*domain.Node, error) {
-	if p.UserID == "" {
-		return nil, domain.ErrUnauthorized
-	}
+func (s *Service) trashed(ctx context.Context, p Principal, id string, want domain.Role) (*domain.Node, error) {
 	if err := validate.ID(id); err != nil {
 		return nil, domain.ErrNotFound
 	}
@@ -193,49 +273,52 @@ func (s *Service) ownTrashed(ctx context.Context, p Principal, id string) (*doma
 	if err != nil {
 		return nil, err
 	}
-	if n.OwnerID != p.UserID || n.TrashedAt == nil {
+	if n.TrashedAt == nil {
 		return nil, domain.ErrNotFound
 	}
-	if p.ReadOnly {
-		return nil, domain.E(domain.CodeForbidden, "this credential is read-only")
+	if _, _, _, err := s.spaceAccess(ctx, p, n.SpaceID, want); err != nil {
+		if errors.Is(err, domain.ErrForbidden) {
+			return nil, err
+		}
+		return nil, domain.ErrNotFound
 	}
 	return n, nil
 }
 
-// Restore takes a node out of the trash, back into its original folder (or
-// the root, if that folder is gone). newName optionally resolves a clash.
-func (s *Service) Restore(ctx context.Context, p Principal, id string, newName *string) (*domain.Node, error) {
-	n, err := s.ownTrashed(ctx, p, id)
+// RestoreRequest places a trashed node back: the client re-wrapped its key
+// and re-encrypted its name for the destination folder.
+type RestoreRequest struct {
+	ParentID string
+	Entry    EntryFields
+}
+
+// Restore takes a node out of the trash into ParentID (same space).
+func (s *Service) Restore(ctx context.Context, p Principal, id string, req RestoreRequest) (*domain.Node, error) {
+	n, err := s.trashed(ctx, p, id, domain.RoleWrite)
 	if err != nil {
 		return nil, err
 	}
-	if newName != nil {
-		name, err := validate.Name(*newName)
-		if err != nil {
-			return nil, err
-		}
-		n.Name = name
-	}
-	if _, err := s.authorize(ctx, p, n.ParentID, domain.PermWrite); err != nil {
-		u, uerr := s.store.GetUser(ctx, p.UserID)
-		if uerr != nil {
-			return nil, uerr
-		}
-		n.ParentID = u.RootID
-	}
-	if err := s.store.RestoreNode(ctx, n, validate.NameKey(n.Name)); err != nil {
-		if errors.Is(err, domain.ErrConflict) {
-			return nil, domain.E(domain.CodeConflict, "an item with that name already exists there; restore it under a new name")
-		}
+	if err := req.Entry.validate(true); err != nil {
 		return nil, err
+	}
+	dest, err := s.authorize(ctx, p, req.ParentID, domain.PermWrite)
+	if err != nil {
+		return nil, err
+	}
+	if dest.node.Kind != domain.KindFolder || dest.space.ID != n.SpaceID || dest.contains(n.ID) {
+		return nil, domain.E(domain.CodeInvalid, "restore into a folder of the same space")
+	}
+	n.ParentID, n.NameEnc, n.NameHash, n.WrappedKey = dest.node.ID, req.Entry.NameEnc, req.Entry.NameHash, req.Entry.WrappedKey
+	if err := s.store.RestoreNode(ctx, n); err != nil {
+		return nil, s.nameConflict(ctx, err, n.ParentID, n.NameHash)
 	}
 	s.audit(ctx, "node.restore", p, "node", n.ID)
 	return n, nil
 }
 
-// DeletePermanently schedules a trashed node for purging.
+// DeletePermanently schedules a trashed node for purging (space managers).
 func (s *Service) DeletePermanently(ctx context.Context, p Principal, id string) error {
-	if _, err := s.ownTrashed(ctx, p, id); err != nil {
+	if _, err := s.trashed(ctx, p, id, domain.RoleManage); err != nil {
 		return err
 	}
 	if err := s.store.MarkPurging(ctx, id); err != nil {
@@ -245,48 +328,23 @@ func (s *Service) DeletePermanently(ctx context.Context, p Principal, id string)
 	return nil
 }
 
-// EmptyTrash schedules everything in the caller's trash for purging.
-func (s *Service) EmptyTrash(ctx context.Context, p Principal) (int, error) {
-	if p.ReadOnly {
-		return 0, domain.E(domain.CodeForbidden, "this credential is read-only")
+// EmptyTrash schedules everything in a space's trash for purging.
+func (s *Service) EmptyTrash(ctx context.Context, p Principal, spaceID string) (int, error) {
+	if _, _, _, err := s.spaceAccess(ctx, p, spaceID, domain.RoleManage); err != nil {
+		return 0, err
 	}
-	entries, err := s.ListTrash(ctx, p)
+	nodes, err := s.store.ListTrash(ctx, spaceID)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, e := range entries {
-		if err := s.store.MarkPurging(ctx, e.Node.ID); err == nil {
+	for _, node := range nodes {
+		if err := s.store.MarkPurging(ctx, node.ID); err == nil {
 			n++
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return n, err
 		}
 	}
-	s.audit(ctx, "trash.empty", p, "count", n)
+	s.audit(ctx, "trash.empty", p, "space", spaceID, "count", n)
 	return n, nil
-}
-
-// Lookup resolves a path of names, starting at the caller's root folder,
-// to a node the caller can read. It serves path-based clients like WebDAV.
-func (s *Service) Lookup(ctx context.Context, p Principal, segments []string) (*NodeInfo, error) {
-	u, err := s.Me(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	if len(segments) >= s.cfg.MaxDepth {
-		return nil, errTooDeep
-	}
-	id := u.RootID
-	for _, seg := range segments {
-		name, err := validate.Name(seg)
-		if err != nil {
-			return nil, domain.ErrNotFound
-		}
-		child, err := s.store.GetChildByName(ctx, id, validate.NameKey(name))
-		if err != nil {
-			return nil, err
-		}
-		id = child.ID
-	}
-	return s.GetNode(ctx, p, id)
 }

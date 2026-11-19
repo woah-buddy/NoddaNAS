@@ -7,6 +7,9 @@
 package config
 
 import (
+	"crypto"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -26,7 +29,6 @@ type Config struct {
 	Listen         string
 	DatabaseURL    string
 	DataDir        string
-	KeyringFile    string
 	TrustedProxies []netip.Prefix
 	WebDAV         bool
 	Worker         bool
@@ -34,7 +36,9 @@ type Config struct {
 	LogLevel       string
 	TLSCertFile    string
 	TLSKeyFile     string
-	OIDC           auth.OIDCConfig
+	OIDC           *auth.OIDCConfig // nil if OIDC sign-in is not configured
+	SAML           *auth.SAMLConfig // nil if SAML sign-in is not configured
+	Policy         auth.Policy
 	Auth           auth.Config
 	Service        service.Config
 }
@@ -55,7 +59,6 @@ func Load() (*Config, error) {
 	c := &Config{
 		Listen:      env("NODDANAS_LISTEN", ":8080"),
 		DataDir:     env("NODDANAS_DATA_DIR", "/data"),
-		KeyringFile: env("NODDANAS_KEYRING_FILE", "/run/secrets/noddanas_keyring"),
 		WebDAV:      envBool("NODDANAS_WEBDAV", true),
 		Worker:      envBool("NODDANAS_WORKER", true),
 		AutoMigrate: envBool("NODDANAS_AUTO_MIGRATE", true),
@@ -92,24 +95,41 @@ func Load() (*Config, error) {
 		c.TrustedProxies = append(c.TrustedProxies, p.Masked())
 	}
 
-	c.OIDC = auth.OIDCConfig{
-		Issuer:              req("NODDANAS_OIDC_ISSUER"),
-		ClientID:            req("NODDANAS_OIDC_CLIENT_ID"),
-		AllowedGroups:       list("NODDANAS_OIDC_ALLOWED_GROUPS"),
-		GroupsClaim:         os.Getenv("NODDANAS_OIDC_GROUPS_CLAIM"),
-		AllowedEmailDomains: lower(list("NODDANAS_OIDC_ALLOWED_EMAIL_DOMAINS")),
+	c.Policy = auth.Policy{
+		AllowedGroups:       list("NODDANAS_ALLOWED_GROUPS"),
+		AllowedEmailDomains: lower(list("NODDANAS_ALLOWED_EMAIL_DOMAINS")),
 	}
-	if s, err := secret("NODDANAS_OIDC_CLIENT_SECRET"); err != nil {
-		errs = append(errs, err)
-	} else {
-		c.OIDC.ClientSecret = s
+
+	// OIDC sign-in (optional if SAML is configured).
+	if issuer := os.Getenv("NODDANAS_OIDC_ISSUER"); issuer != "" {
+		o := &auth.OIDCConfig{Issuer: issuer, ClientID: req("NODDANAS_OIDC_CLIENT_ID"),
+			GroupsClaim: os.Getenv("NODDANAS_OIDC_GROUPS_CLAIM"), Policy: c.Policy}
+		if s, err := secret("NODDANAS_OIDC_CLIENT_SECRET"); err != nil {
+			errs = append(errs, err)
+		} else {
+			o.ClientSecret = s
+		}
+		if scopes := list("NODDANAS_OIDC_SCOPES"); len(scopes) > 0 {
+			o.Scopes = scopes
+		}
+		if c.PublicURL != nil {
+			o.RedirectURL = c.PublicURL.String() + "/auth/callback"
+			o.PostLogoutRedirectURL = c.PublicURL.String() + "/"
+		}
+		c.OIDC = o
 	}
-	if scopes := list("NODDANAS_OIDC_SCOPES"); len(scopes) > 0 {
-		c.OIDC.Scopes = scopes
+
+	// SAML sign-in (optional if OIDC is configured).
+	mdURL, mdFile := os.Getenv("NODDANAS_SAML_IDP_METADATA_URL"), os.Getenv("NODDANAS_SAML_IDP_METADATA_FILE")
+	if mdURL != "" || mdFile != "" {
+		sc, err := loadSAML(c, mdURL, mdFile)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		c.SAML = sc
 	}
-	if c.PublicURL != nil {
-		c.OIDC.RedirectURL = c.PublicURL.String() + "/auth/callback"
-		c.OIDC.PostLogoutRedirectURL = c.PublicURL.String() + "/"
+	if c.OIDC == nil && c.SAML == nil {
+		errs = append(errs, errors.New("configure a sign-in method: NODDANAS_OIDC_ISSUER and/or NODDANAS_SAML_IDP_METADATA_URL (or _FILE)"))
 	}
 
 	c.Auth = auth.Config{
@@ -119,6 +139,9 @@ func Load() (*Config, error) {
 
 	sc := service.DefaultConfig()
 	sc.DefaultQuota = envSize(&errs, "NODDANAS_DEFAULT_QUOTA", sc.DefaultQuota)
+	sc.DefaultTeamQuota = envSize(&errs, "NODDANAS_DEFAULT_TEAM_QUOTA", sc.DefaultTeamQuota)
+	sc.TeamCreation = envBool("NODDANAS_TEAM_CREATION", sc.TeamCreation)
+	sc.AdminGroups = list("NODDANAS_ADMIN_GROUPS")
 	sc.MaxFileSize = envSize(&errs, "NODDANAS_MAX_FILE_SIZE", sc.MaxFileSize)
 	sc.MaxVersions = int(envInt(&errs, "NODDANAS_MAX_VERSIONS", int64(sc.MaxVersions), 1, 1000))
 	sc.TrashRetention = envDuration(&errs, "NODDANAS_TRASH_RETENTION", sc.TrashRetention)
@@ -130,6 +153,57 @@ func Load() (*Config, error) {
 		errs = append(errs, errors.New("set both NODDANAS_TLS_CERT_FILE and NODDANAS_TLS_KEY_FILE, or neither"))
 	}
 	return c, errors.Join(errs...)
+}
+
+func loadSAML(c *Config, mdURL, mdFile string) (*auth.SAMLConfig, error) {
+	if mdURL != "" && mdFile != "" {
+		return nil, errors.New("set only one of NODDANAS_SAML_IDP_METADATA_URL and _FILE")
+	}
+	sc := &auth.SAMLConfig{
+		EntityID:        os.Getenv("NODDANAS_SAML_ENTITY_ID"),
+		IDPMetadataURL:  mdURL,
+		TrustEmail:      envBool("NODDANAS_SAML_TRUST_EMAIL", false),
+		EmailAttributes: list("NODDANAS_SAML_EMAIL_ATTRIBUTES"),
+		NameAttributes:  list("NODDANAS_SAML_NAME_ATTRIBUTES"),
+		GroupAttributes: list("NODDANAS_SAML_GROUP_ATTRIBUTES"),
+		Policy:          c.Policy,
+	}
+	if mdURL != "" {
+		if u, err := url.Parse(mdURL); err != nil || u.Scheme != "https" {
+			return nil, errors.New("NODDANAS_SAML_IDP_METADATA_URL must be an https URL (metadata carries the IdP's signing key)")
+		}
+	}
+	if mdFile != "" {
+		b, err := os.ReadFile(mdFile)
+		if err != nil {
+			return nil, fmt.Errorf("NODDANAS_SAML_IDP_METADATA_FILE: %w", err)
+		}
+		sc.IDPMetadata = b
+	}
+	if c.PublicURL != nil {
+		sc.MetadataURL = c.PublicURL.String() + "/auth/saml/metadata"
+		sc.ACSURL = c.PublicURL.String() + "/auth/saml/acs"
+	}
+	keyFile, certFile := os.Getenv("NODDANAS_SAML_SP_KEY_FILE"), os.Getenv("NODDANAS_SAML_SP_CERT_FILE")
+	if (keyFile == "") != (certFile == "") {
+		return nil, errors.New("set both NODDANAS_SAML_SP_KEY_FILE and NODDANAS_SAML_SP_CERT_FILE, or neither")
+	}
+	if keyFile != "" {
+		pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("SAML SP key pair: %w", err)
+		}
+		signer, ok := pair.PrivateKey.(crypto.Signer)
+		if !ok {
+			return nil, errors.New("SAML SP key cannot sign")
+		}
+		cert, err := x509.ParseCertificate(pair.Certificate[0])
+		if err != nil {
+			return nil, err
+		}
+		sc.Key, sc.Certificate = signer, cert
+	}
+	return sc, nil
 }
 
 func isLoopback(host string) bool {

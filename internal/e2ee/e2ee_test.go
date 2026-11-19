@@ -1,0 +1,389 @@
+package e2ee
+
+import (
+	"bytes"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"testing"
+)
+
+const uid = "0123456789abcdef0123456789abcdef"
+
+func mustAccount(t *testing.T, id string) (*Account, *Bundle, string) {
+	t.Helper()
+	a, b, code, err := NewAccount(id, "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, b, code
+}
+
+func TestAccountUnlock(t *testing.T) {
+	a, b, code := mustAccount(t, uid)
+	if len(strings.ReplaceAll(code, "-", "")) != 32 {
+		t.Fatalf("recovery code %q", code)
+	}
+	// The bundle survives a JSON round trip (it is stored by the server).
+	raw, _ := json.Marshal(b)
+	var b2 Bundle
+	if err := json.Unmarshal(raw, &b2); err != nil {
+		t.Fatal(err)
+	}
+	for name, unlock := range map[string]func() (*Account, error){
+		"passphrase": func() (*Account, error) { return Unlock(&b2, "correct horse battery staple") },
+		"recovery":   func() (*Account, error) { return UnlockWithRecoveryCode(&b2, strings.ToLower(code)) },
+	} {
+		got, err := unlock()
+		if err != nil || !bytes.Equal(got.MK, a.MK) || got.Fingerprint() != a.Fingerprint() {
+			t.Fatalf("%s unlock: %v", name, err)
+		}
+	}
+	if _, err := Unlock(&b2, "wrong passphrase!!"); !errors.Is(err, ErrWrongSecret) {
+		t.Fatalf("wrong passphrase: %v", err)
+	}
+	if _, _, _, err := NewAccount(uid, "short"); err == nil {
+		t.Fatal("short passphrase accepted")
+	}
+	// Changing the passphrase keeps the same keys and the recovery code.
+	if err := a.ChangePassphrase(&b2, "a whole new passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unlock(&b2, "correct horse battery staple"); err == nil {
+		t.Fatal("old passphrase still works")
+	}
+	if got, err := Unlock(&b2, "a whole new passphrase"); err != nil || got.Fingerprint() != a.Fingerprint() {
+		t.Fatal("new passphrase does not unlock the same keys")
+	}
+	if _, err := UnlockWithRecoveryCode(&b2, code); err != nil {
+		t.Fatal("recovery code lost by passphrase change")
+	}
+}
+
+func TestBundleTamperingDetected(t *testing.T) {
+	_, b, _ := mustAccount(t, uid)
+	_, other, _ := mustAccount(t, uid)
+	// A server swapping in someone else's public keys is caught on unlock.
+	swapped := *b
+	swapped.Pub = other.Pub
+	if _, err := Unlock(&swapped, "correct horse battery staple"); err == nil {
+		t.Fatal("unlock accepted mismatched public keys")
+	}
+	// A bundle moved to another user ID does not open (IDs are bound in AADs).
+	moved := *b
+	moved.UserID = strings.Repeat("f", 32)
+	if _, err := Unlock(&moved, "correct horse battery staple"); err == nil {
+		t.Fatal("bundle opened under a different user ID")
+	}
+	// Self-signatures bind keys to the user.
+	if _, err := VerifyPublicKeys(uid, b.Pub, b.SelfSig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyPublicKeys(uid, other.Pub, b.SelfSig); err == nil {
+		t.Fatal("self-signature verified for different keys")
+	}
+}
+
+func TestRecoveryCodes(t *testing.T) {
+	for range 50 {
+		b := random(20)
+		s := FormatRecoveryCode(b)
+		got, err := ParseRecoveryCode(strings.ToLower(strings.ReplaceAll(s, "0", "o")))
+		if err != nil || !bytes.Equal(got, b) {
+			t.Fatalf("round trip %q: %v", s, err)
+		}
+	}
+	for _, bad := range []string{"", "ABC", strings.Repeat("U", 32), strings.Repeat("A", 33)} {
+		if _, err := ParseRecoveryCode(bad); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+func TestSpacesAndGrants(t *testing.T) {
+	alice, _, _ := mustAccount(t, uid)
+	bob, _, _ := mustAccount(t, strings.Repeat("b", 32))
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	spaceID := strings.Repeat("1", 32)
+	team := OpenSpace(spaceID, NewTeamSecret())
+
+	grant, sig, err := team.Grant(alice, bob.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := OpenGrant(bob, alice.Public(), spaceID, grant, sig)
+	if err != nil || !bytes.Equal(got.Secret, team.Secret) {
+		t.Fatalf("open grant: %v", err)
+	}
+	// Anyone can seal to Bob's key; only a signature makes a grant trustworthy.
+	forged, _, _ := OpenSpace(spaceID, NewTeamSecret()).Grant(mallory, bob.Public())
+	if _, err := OpenGrant(bob, alice.Public(), spaceID, forged, sig); err == nil {
+		t.Fatal("forged grant accepted")
+	}
+	// A grant for another space or member does not open.
+	if _, err := OpenGrant(bob, alice.Public(), strings.Repeat("2", 32), grant, sig); err == nil {
+		t.Fatal("grant opened for the wrong space")
+	}
+
+	root := NewNodeKey()
+	rootID := strings.Repeat("3", 32)
+	w := team.WrapRoot(rootID, root)
+	if k, err := got.UnwrapRoot(rootID, w); err != nil || !bytes.Equal(k.Raw(), root.Raw()) {
+		t.Fatal("root key round trip")
+	}
+	name := team.EncryptName("Family Photos")
+	if n, err := got.DecryptName(name); err != nil || n != "Family Photos" {
+		t.Fatalf("team name: %q %v", n, err)
+	}
+	pubSig := SignSpaceKey(alice, spaceID, team.PublicKey())
+	if _, err := VerifySpaceKey(alice.Public(), spaceID, B64(team.PublicKey()), pubSig); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySpaceKey(mallory.Public(), spaceID, B64(team.PublicKey()), pubSig); err == nil {
+		t.Fatal("space key verified against the wrong creator")
+	}
+}
+
+func TestNodeHierarchy(t *testing.T) {
+	parent, child := NewNodeKey(), NewNodeKey()
+	a, b := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	w := parent.WrapChild(a, child)
+	if k, err := parent.UnwrapChild(a, w); err != nil || !bytes.Equal(k.Raw(), child.Raw()) {
+		t.Fatal("unwrap")
+	}
+	if _, err := parent.UnwrapChild(b, w); err == nil {
+		t.Fatal("wrapped key accepted for a different node")
+	}
+	enc := parent.EncryptName(a, "Résumé.pdf")
+	if n, err := parent.DecryptName(a, enc); err != nil || n != "Résumé.pdf" {
+		t.Fatalf("name: %q %v", n, err)
+	}
+	if _, err := parent.DecryptName(b, enc); err == nil {
+		t.Fatal("name accepted for a different node")
+	}
+	if len(enc) != len(parent.EncryptName(a, "x")) {
+		t.Error("short names should pad to the same length")
+	}
+	if parent.NameHash("Report.PDF") != parent.NameHash("report.pdf") ||
+		parent.NameHash("é") != parent.NameHash("é") ||
+		parent.NameHash("a") == NewNodeKey().NameHash("a") {
+		t.Fatal("name hashes must be case-insensitive, normalized and keyed per folder")
+	}
+}
+
+type fixture struct {
+	alice  *Account
+	space  *Space
+	nk     *NodeKey
+	plain  []byte
+	ct     []byte
+	prefix *Prefix
+}
+
+func newFixture(t *testing.T, size int) *fixture {
+	t.Helper()
+	alice, _, _ := mustAccount(t, uid)
+	space := alice.PersonalSpace(strings.Repeat("5", 32))
+	nk := NewNodeKey()
+	plain := make([]byte, size)
+	rand.Read(plain)
+	r, total, err := NewWriter(bytes.NewReader(plain), WriteParams{
+		Size: int64(size), NodeKey: nk, SpaceID: space.ID, SpacePub: space.Priv.PublicKey(),
+		Meta: Meta{Name: "holiday.mp4", Type: "video/mp4", MTime: 1700000000000}, Signer: alice,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(ct)) != total {
+		t.Fatalf("container is %d bytes, writer promised %d", len(ct), total)
+	}
+	p, err := ParsePrefix(bytes.NewReader(ct))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TotalSize() != total {
+		t.Fatalf("TotalSize %d != %d", p.TotalSize(), total)
+	}
+	return &fixture{alice, space, nk, plain, ct, p}
+}
+
+func (f *fixture) decrypt(ct []byte, nk *NodeKey) ([]byte, error) {
+	p, err := ParsePrefix(bytes.NewReader(ct))
+	if err != nil {
+		return nil, err
+	}
+	k, err := p.Keys(nk)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	src := bytes.NewReader(ct[p.BodyOffset():])
+	err = DecryptVerify(src, &out, p, k, f.alice.Public())
+	return out.Bytes(), err
+}
+
+func TestContainerRoundTrip(t *testing.T) {
+	for _, size := range []int{0, 1, ChunkSize - 1, ChunkSize, ChunkSize + 1, 3*ChunkSize + 7} {
+		f := newFixture(t, size)
+		got, err := f.decrypt(f.ct, f.nk)
+		if err != nil || !bytes.Equal(got, f.plain) {
+			t.Fatalf("size %d: %v", size, err)
+		}
+		// Random access.
+		k, _ := f.prefix.Keys(f.nk)
+		r := NewReader(bytes.NewReader(f.ct), f.prefix, k)
+		if size > 10 {
+			r.Seek(int64(size-10), io.SeekStart)
+			tail, err := io.ReadAll(r)
+			if err != nil || !bytes.Equal(tail, f.plain[size-10:]) {
+				t.Fatalf("seek: %v", err)
+			}
+		}
+		m, err := f.prefix.DecryptMeta(k)
+		if err != nil || m.Name != "holiday.mp4" {
+			t.Fatalf("meta: %v", err)
+		}
+	}
+}
+
+// The core promise: one container plus the owner's key material, and
+// nothing else, gives back the file.
+func TestIndependentRestore(t *testing.T) {
+	f := newFixture(t, 2*ChunkSize+5)
+	_, bundle, code := mustAccount(t, uid)
+	_ = bundle
+	// Re-derive everything from scratch, as an offline tool would.
+	again, err := UnlockWithRecoveryCode(mustReBundle(t, f.alice, code), code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	space := again.PersonalSpace(f.space.ID)
+	p, _ := ParsePrefix(bytes.NewReader(f.ct))
+	nk, err := p.OwnerNodeKey(space)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.decrypt(f.ct, nk)
+	if err != nil || !bytes.Equal(got, f.plain) {
+		t.Fatalf("restore: %v", err)
+	}
+	// Another space's keys cannot open it.
+	if _, err := p.OwnerNodeKey(OpenSpace(f.space.ID, NewTeamSecret())); err == nil {
+		t.Fatal("owner seal opened with the wrong space secret")
+	}
+}
+
+// mustReBundle builds a bundle for an existing account with a known recovery code.
+func mustReBundle(t *testing.T, a *Account, code string) *Bundle {
+	t.Helper()
+	raw, err := ParseRecoveryCode(code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv, _ := json.Marshal(map[string]string{"enc": B64(a.Enc.Bytes()), "sig": B64(a.Sig.Seed())})
+	pub := a.Public()
+	return &Bundle{V: 1, UserID: a.UserID,
+		Pub:     PublicKeys{Enc: B64(pub.Enc.Bytes()), Sig: B64(pub.Sig)},
+		Private: B64(gcmSeal(kdf(a.MK, nil, "mk/private-keys"), priv, join("private-keys", a.UserID))),
+		Unlock:  []Unlocker{recoveryUnlocker(a.UserID, raw, a.MK)},
+	}
+}
+
+func TestContainerTampering(t *testing.T) {
+	f := newFixture(t, 3*ChunkSize)
+	body := int(f.prefix.BodyOffset())
+	chunk := ChunkSize + tagSize
+	flip := func(i int) []byte { c := bytes.Clone(f.ct); c[i] ^= 1; return c }
+	swapped := bytes.Clone(f.ct)
+	copy(swapped[body:body+chunk], f.ct[body+chunk:body+2*chunk])
+	copy(swapped[body+chunk:body+2*chunk], f.ct[body:body+chunk])
+
+	cases := map[string][]byte{
+		"body bit flip":   flip(body + 100),
+		"swapped chunks":  swapped,
+		"truncated":       f.ct[:len(f.ct)-TrailerSize-chunk],
+		"signature flip":  flip(len(f.ct) - 1),
+		"trailing data":   append(bytes.Clone(f.ct), 0),
+		"missing trailer": f.ct[:len(f.ct)-TrailerSize],
+	}
+	for name, ct := range cases {
+		if _, err := f.decrypt(ct, f.nk); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// A different node key fails the key commitment before any decryption.
+	if _, err := f.prefix.Keys(NewNodeKey()); !errors.Is(err, ErrAuth) {
+		t.Errorf("wrong node key: %v", err)
+	}
+	// Re-signing by someone else does not pass as the original signer.
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	k, _ := f.prefix.Keys(f.nk)
+	err := DecryptVerify(bytes.NewReader(f.ct[body:]), io.Discard, f.prefix, k, mallory.Public())
+	if err == nil {
+		t.Error("verified against the wrong signer")
+	}
+	// Header changes (e.g. altered size) break parsing, commitment or signature.
+	for _, bad := range [][]byte{[]byte("NOTMAGIC"), f.ct[:11]} {
+		if _, err := ParsePrefix(bytes.NewReader(bad)); err == nil {
+			t.Error("malformed prefix accepted")
+		}
+	}
+}
+
+func TestSharesLinksTrash(t *testing.T) {
+	alice, _, _ := mustAccount(t, uid)
+	bob, _, _ := mustAccount(t, strings.Repeat("b", 32))
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	nk := NewNodeKey()
+	shareID, nodeID := strings.Repeat("d", 32), strings.Repeat("e", 32)
+
+	sealed, sig, _ := ShareNode(alice, bob.Public(), shareID, nodeID, "write", "Projects", nk)
+	k, name, err := OpenShare(bob, alice.Public(), shareID, nodeID, "write", sealed, sig)
+	if err != nil || name != "Projects" || !bytes.Equal(k.Raw(), nk.Raw()) {
+		t.Fatalf("share: %v", err)
+	}
+	if _, _, err := OpenShare(bob, alice.Public(), shareID, nodeID, "read", sealed, sig); err == nil {
+		t.Fatal("permission is bound into the signature")
+	}
+	if _, _, err := OpenShare(bob, mallory.Public(), shareID, nodeID, "write", sealed, sig); err == nil {
+		t.Fatal("share accepted from the wrong sharer")
+	}
+
+	secret := NewLinkSecret()
+	lk := LinkKey(secret, shareID, nodeID, "Projects", nk)
+	if k, n, err := OpenLinkKey(secret, shareID, nodeID, lk); err != nil || n != "Projects" || !bytes.Equal(k.Raw(), nk.Raw()) {
+		t.Fatalf("link: %v", err)
+	}
+	if _, _, err := OpenLinkKey(NewLinkSecret(), shareID, nodeID, lk); err == nil {
+		t.Fatal("link opened with the wrong secret")
+	}
+
+	space := alice.PersonalSpace(strings.Repeat("5", 32))
+	tk, tsig, _ := TrashKey(bob, space.Priv.PublicKey(), nodeID, "old.txt", "file", nk)
+	k, kn, err := OpenTrashKey(space, bob.Public(), nodeID, tk, tsig)
+	if err != nil || kn.Name != "old.txt" || kn.Kind != "file" || !bytes.Equal(k.Raw(), nk.Raw()) {
+		t.Fatalf("trash: %v", err)
+	}
+	if _, _, err := OpenTrashKey(space, mallory.Public(), nodeID, tk, tsig); err == nil {
+		t.Fatal("trash key accepted from the wrong trasher")
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	for _, ok := range []string{"a", "Résumé.pdf", ".bashrc"} {
+		if ValidateName(ok) != nil {
+			t.Errorf("rejected %q", ok)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "a/b", "a\\b", " x", "x ", "a\x00b", "evil‮fdp.exe", strings.Repeat("a", 256)} {
+		if ValidateName(bad) == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

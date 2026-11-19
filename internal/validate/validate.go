@@ -4,6 +4,7 @@
 package validate
 
 import (
+	"encoding/base64"
 	"mime"
 	"net/mail"
 	"strings"
@@ -137,4 +138,43 @@ func Email(s string) (string, error) {
 		return "", domain.E(domain.CodeInvalid, "invalid email")
 	}
 	return strings.ToLower(addr.Address), nil
+}
+
+// Opaque checks a client-produced base64url (unpadded) value, such as an
+// encrypted name, wrapped key or signature, whose decoded length must be
+// within [min, max]. The server cannot interpret these values; bounding and
+// shape-checking them keeps garbage and oversized payloads out of storage.
+func Opaque(field, s string, min, max int) error {
+	if s == "" || len(s) > base64.RawURLEncoding.EncodedLen(max) {
+		return domain.E(domain.CodeInvalid, "%s is missing or too long", field)
+	}
+	b, err := base64.RawURLEncoding.Strict().DecodeString(s)
+	if err != nil || len(b) < min || len(b) > max {
+		return domain.E(domain.CodeInvalid, "%s is malformed", field)
+	}
+	return nil
+}
+
+// Sizes of E2EE fields (docs/E2EE.md).
+const (
+	EncNameMin    = 12 + 16 + 32  // nonce + tag + one padded block
+	EncNameMax    = 12 + 16 + 256 // names are at most 255 bytes, padded to 256
+	WrappedKeyLen = 12 + 32 + 16
+	PublicKeyLen  = 32
+	SignatureLen  = 64
+	GrantLen      = 32 + 12 + 32 + 16 // sealed 32-byte secret
+	SealedMax     = 4096              // sealed or wrapped {key, name} JSON
+)
+
+// Group validates an identity-provider group name.
+func Group(g string) error {
+	if g == "" || len(g) > 256 || !utf8.ValidString(g) {
+		return domain.E(domain.CodeInvalid, "invalid group name")
+	}
+	for _, r := range g {
+		if unicode.IsControl(r) {
+			return domain.E(domain.CodeInvalid, "invalid group name")
+		}
+	}
+	return nil
 }

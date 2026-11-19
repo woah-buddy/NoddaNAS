@@ -197,8 +197,8 @@ type limEntry struct {
 }
 
 func newLimiter(perMinute, burst int) *limiter {
-	l := &limiter{r: rate.Limit(float64(perMinute) / 60), burst: burst, clients: map[netip.Addr]*limEntry{}}
-	return l
+	burst = max(burst, perMinute/4)
+	return &limiter{r: rate.Limit(float64(perMinute) / 60), burst: burst, clients: map[netip.Addr]*limEntry{}}
 }
 
 func (l *limiter) allow(ip netip.Addr) bool {

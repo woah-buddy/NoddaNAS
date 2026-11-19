@@ -9,7 +9,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/woah-buddy/NoddaNAS/internal/blobcrypt"
 	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
 )
@@ -48,18 +47,4 @@ func Postgres(t *testing.T) *postgres.Store {
 		t.Fatal(err)
 	}
 	return st
-}
-
-// Keyring returns a fresh single-key keyring.
-func Keyring(t *testing.T) *blobcrypt.Keyring {
-	t.Helper()
-	line, err := blobcrypt.GenerateKeyLine("test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	k, err := blobcrypt.ParseKeyring([]byte(line))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return k
 }

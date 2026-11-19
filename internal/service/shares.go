@@ -11,35 +11,48 @@ import (
 	"github.com/woah-buddy/NoddaNAS/internal/validate"
 )
 
-// ShareWithUser grants another user read or write access to a node the
-// caller owns. Only owners can share; recipients cannot re-share.
-func (s *Service) ShareWithUser(ctx context.Context, p Principal, nodeID, email string, perm domain.Permission) (*domain.Share, error) {
-	if perm != domain.PermRead && perm != domain.PermWrite {
+// NewUserShare is a share created by a client: it sealed the node key and
+// name to the recipient and signed the grant (docs/E2EE.md §6).
+type NewUserShare struct {
+	ShareID     string
+	RecipientID string
+	Permission  domain.Permission
+	SealedKey   string
+	Sig         string
+}
+
+// ShareWithUser grants another user access to a node. Only callers with
+// full control (personal-space owner, team manager) can share.
+func (s *Service) ShareWithUser(ctx context.Context, p Principal, nodeID string, req NewUserShare) (*domain.Share, error) {
+	if req.Permission != domain.PermRead && req.Permission != domain.PermWrite {
 		return nil, domain.E(domain.CodeInvalid, "permission must be read or write")
+	}
+	if err := firstErr(validate.ID(req.ShareID), validate.ID(req.RecipientID),
+		validate.Opaque("sealedKey", req.SealedKey, 32+12+16, validate.SealedMax),
+		validate.Opaque("sig", req.Sig, validate.SignatureLen, validate.SignatureLen)); err != nil {
+		return nil, err
 	}
 	a, err := s.authorize(ctx, p, nodeID, domain.PermOwner)
 	if err != nil {
 		return nil, err
 	}
 	if a.node.IsRoot() {
-		return nil, domain.E(domain.CodeInvalid, "your root folder cannot be shared; share a folder inside it")
+		return nil, domain.E(domain.CodeInvalid, "share a folder inside the space, or add members to a team folder")
 	}
-	addr, err := validate.Email(email)
+	if req.RecipientID == p.UserID {
+		return nil, domain.E(domain.CodeInvalid, "you cannot share with yourself")
+	}
+	recipient, err := s.store.GetUser(ctx, req.RecipientID)
 	if err != nil {
 		return nil, err
 	}
-	recipient, err := s.store.GetUserIDByEmail(ctx, addr)
-	if errors.Is(err, domain.ErrNotFound) {
-		return nil, domain.E(domain.CodeNotFound, "no user with that email address has signed in yet")
-	} else if err != nil {
-		return nil, err
-	}
-	if recipient == p.UserID {
-		return nil, domain.E(domain.CodeInvalid, "you cannot share with yourself")
+	if recipient.Keys == nil {
+		return nil, domain.E(domain.CodePrecondition, "that user has not set up encryption yet")
 	}
 	sh := &domain.Share{
-		ID: secure.NewID(), Kind: domain.ShareUser, NodeID: nodeID, OwnerID: a.node.OwnerID, CreatedBy: p.UserID,
-		Permission: perm, CreatedAt: s.now(), RecipientID: recipient,
+		ID: req.ShareID, Kind: domain.ShareUser, NodeID: nodeID, SpaceID: a.space.ID, CreatedBy: p.UserID,
+		Permission: req.Permission, CreatedAt: s.now(), RecipientID: req.RecipientID,
+		SealedKey: req.SealedKey, ShareSig: req.Sig,
 	}
 	if err := s.store.CreateShare(ctx, sh); err != nil {
 		if errors.Is(err, domain.ErrConflict) {
@@ -47,30 +60,36 @@ func (s *Service) ShareWithUser(ctx context.Context, p Principal, nodeID, email 
 		}
 		return nil, err
 	}
-	s.audit(ctx, "share.user.create", p, "share", sh.ID, "node", nodeID, "recipient", recipient, "permission", string(perm))
+	s.audit(ctx, "share.user.create", p, "share", sh.ID, "node", nodeID, "recipient", req.RecipientID, "permission", string(req.Permission))
 	return sh, nil
 }
 
 // LinkOptions configures a public link.
 type LinkOptions struct {
+	ShareID      string
+	LinkKey      string // node key + name encrypted under the link secret
 	Password     string
-	ExpiresAt    *time.Time // nil = the default lifetime
-	MaxDownloads int64      // 0 = unlimited
+	ExpiresAt    *time.Time
+	MaxDownloads int64
 }
 
-// CreateLink creates a read-only public link and returns the share together
-// with its token. The token is shown exactly once: only its hash is stored.
+// CreateLink creates a read-only public link and returns it with its access
+// token. The token is shown once (only its hash is stored); the link secret
+// that decrypts never reaches the server at all.
 func (s *Service) CreateLink(ctx context.Context, p Principal, nodeID string, opts LinkOptions) (*domain.Share, string, error) {
+	if err := firstErr(validate.ID(opts.ShareID),
+		validate.Opaque("linkKey", opts.LinkKey, 12+16+1, validate.SealedMax)); err != nil {
+		return nil, "", err
+	}
 	a, err := s.authorize(ctx, p, nodeID, domain.PermOwner)
 	if err != nil {
 		return nil, "", err
 	}
 	if a.node.IsRoot() {
-		return nil, "", domain.E(domain.CodeInvalid, "your root folder cannot be shared; share a folder inside it")
+		return nil, "", domain.E(domain.CodeInvalid, "a space's root folder cannot be shared by link")
 	}
 	now := s.now()
-	// Secure by default: every link expires, even if the caller did not ask.
-	expires := now.Add(s.cfg.LinkDefaultTTL)
+	expires := now.Add(s.cfg.LinkDefaultTTL) // every link expires, even if not asked
 	if opts.ExpiresAt != nil {
 		expires = opts.ExpiresAt.UTC()
 	}
@@ -82,16 +101,16 @@ func (s *Service) CreateLink(ctx context.Context, p Principal, nodeID string, op
 	}
 	pwHash := ""
 	if opts.Password != "" {
-		if n := utf8.RuneCountInString(opts.Password); n < 10 || len(opts.Password) > 256 {
+		if utf8.RuneCountInString(opts.Password) < 10 || len(opts.Password) > 256 {
 			return nil, "", domain.E(domain.CodeInvalid, "link passwords must be at least 10 characters")
 		}
 		pwHash = secure.HashPassword(opts.Password)
 	}
 	token := secure.NewToken()
 	sh := &domain.Share{
-		ID: secure.NewID(), Kind: domain.ShareLink, NodeID: nodeID, OwnerID: a.node.OwnerID, CreatedBy: p.UserID,
+		ID: opts.ShareID, Kind: domain.ShareLink, NodeID: nodeID, SpaceID: a.space.ID, CreatedBy: p.UserID,
 		Permission: domain.PermRead, CreatedAt: now, TokenHash: secure.HashToken(secure.PurposeLinkToken, token),
-		PasswordHash: pwHash, ExpiresAt: &expires, MaxDownloads: opts.MaxDownloads,
+		LinkKey: opts.LinkKey, PasswordHash: pwHash, ExpiresAt: &expires, MaxDownloads: opts.MaxDownloads,
 	}
 	if err := s.store.CreateShare(ctx, sh); err != nil {
 		return nil, "", err
@@ -101,7 +120,7 @@ func (s *Service) CreateLink(ctx context.Context, p Principal, nodeID string, op
 	return sh, token, nil
 }
 
-// ListShares lists the shares on a node the caller owns.
+// ListShares lists the shares on a node the caller fully controls.
 func (s *Service) ListShares(ctx context.Context, p Principal, nodeID string) ([]*domain.Share, error) {
 	if _, err := s.authorize(ctx, p, nodeID, domain.PermOwner); err != nil {
 		return nil, err
@@ -109,8 +128,8 @@ func (s *Service) ListShares(ctx context.Context, p Principal, nodeID string) ([
 	return s.store.ListSharesByNode(ctx, nodeID)
 }
 
-// DeleteShare revokes a share. The owner can revoke any of their shares; a
-// recipient can remove a share made with them ("leave" it).
+// DeleteShare revokes a share. Allowed for whoever fully controls the node,
+// the share's creator, and (to leave it) its recipient.
 func (s *Service) DeleteShare(ctx context.Context, p Principal, shareID string) error {
 	if p.UserID == "" {
 		return domain.ErrUnauthorized
@@ -122,8 +141,10 @@ func (s *Service) DeleteShare(ctx context.Context, p Principal, shareID string) 
 	if err != nil {
 		return err
 	}
-	if sh.OwnerID != p.UserID && sh.RecipientID != p.UserID {
-		return domain.ErrNotFound
+	if sh.CreatedBy != p.UserID && sh.RecipientID != p.UserID {
+		if _, err := s.authorize(ctx, p, sh.NodeID, domain.PermOwner); err != nil {
+			return domain.ErrNotFound
+		}
 	}
 	if p.ReadOnly {
 		return domain.E(domain.CodeForbidden, "this credential is read-only")
@@ -141,8 +162,7 @@ type SharedItem struct {
 	Node  *NodeInfo
 }
 
-// SharedWithMe lists what other users have shared with the caller. Shares
-// whose node is currently trashed or gone are omitted.
+// SharedWithMe lists what others have shared with the caller.
 func (s *Service) SharedWithMe(ctx context.Context, p Principal) ([]SharedItem, error) {
 	if p.UserID == "" {
 		return nil, domain.ErrUnauthorized
@@ -153,58 +173,84 @@ func (s *Service) SharedWithMe(ctx context.Context, p Principal) ([]SharedItem, 
 	}
 	var out []SharedItem
 	for _, sh := range shares {
-		info, err := s.GetNode(ctx, p, sh.NodeID)
-		if err != nil {
-			continue
+		if info, err := s.GetNode(ctx, p, sh.NodeID); err == nil {
+			out = append(out, SharedItem{Share: sh, Node: info})
 		}
-		out = append(out, SharedItem{Share: sh, Node: info})
 	}
 	return out, nil
 }
 
-// ---- anonymous access via public links --------------------------------------
+// ---- anonymous access via public links ---------------------------------------------
 
-// LinkNode returns the link's node (or a node inside it).
-func (s *Service) LinkNode(ctx context.Context, cred LinkCredential, nodeID string) (*domain.Share, *domain.Node, error) {
+// LinkView is what a link visitor receives: the link (with its encrypted
+// key), the path from the link's node down to the target, and the target.
+type LinkView struct {
+	Share *domain.Share
+	Path  []*domain.Node // link node first, target last
+}
+
+// LinkNode resolves a node within a public link.
+func (s *Service) LinkNode(ctx context.Context, cred LinkCredential, nodeID string) (*LinkView, error) {
 	sh, chain, err := s.authorizeLink(ctx, cred, nodeID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return sh, chain[0], nil
+	path := make([]*domain.Node, len(chain))
+	for i, n := range chain {
+		path[len(chain)-1-i] = n
+	}
+	return &LinkView{Share: sh, Path: path}, nil
 }
 
 // LinkChildren lists a folder inside a public link.
-func (s *Service) LinkChildren(ctx context.Context, cred LinkCredential, nodeID, cursor string, limit int) (*domain.Node, []*domain.Node, string, error) {
+func (s *Service) LinkChildren(ctx context.Context, cred LinkCredential, nodeID, cursor string, limit int) ([]*domain.Node, string, error) {
 	_, chain, err := s.authorizeLink(ctx, cred, nodeID)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
-	n := chain[0]
-	if n.Kind != domain.KindFolder {
-		return nil, nil, "", domain.E(domain.CodeInvalid, "not a folder")
+	if chain[0].Kind != domain.KindFolder {
+		return nil, "", domain.E(domain.CodeInvalid, "not a folder")
 	}
-	children, next, err := s.store.ListChildren(ctx, n.ID, cursor, s.pageSize(limit))
-	return n, children, next, err
+	if cursor != "" && validate.ID(cursor) != nil {
+		return nil, "", domain.E(domain.CodeInvalid, "invalid cursor")
+	}
+	return s.store.ListChildren(ctx, chain[0].ID, cursor, s.pageSize(limit))
 }
 
-// LinkOpen opens a file inside a public link for download. Every request
-// counts against a download limit, including HTTP range requests: exempting
-// ranges would let a client fetch "bytes=1-" forever without being counted.
+// LinkOpen opens a file inside a public link. Every request counts against
+// a download limit, including range requests (otherwise "bytes=1-" would
+// bypass it).
 func (s *Service) LinkOpen(ctx context.Context, cred LinkCredential, nodeID string) (*Content, error) {
 	sh, chain, err := s.authorizeLink(ctx, cred, nodeID)
 	if err != nil {
 		return nil, err
 	}
-	n := chain[0]
-	if n.Kind != domain.KindFile {
+	if chain[0].Kind != domain.KindFile {
 		return nil, domain.E(domain.CodeInvalid, "not a file")
 	}
 	if err := s.store.RecordLinkDownload(ctx, sh.ID); err != nil {
 		return nil, err
 	}
-	c, err := s.openVersion(ctx, n, "")
+	c, err := s.openVersion(ctx, chain[0], "")
 	if err == nil {
-		s.log.InfoContext(ctx, "audit", "event", "link.download", "share", sh.ID, "node", n.ID)
+		s.log.InfoContext(ctx, "audit", "event", "link.download", "share", sh.ID, "node", chain[0].ID)
 	}
 	return c, err
+}
+
+// LinkSigner returns a user's public keys to a link visitor so they can
+// verify container signatures. It requires a valid link and reveals
+// nothing beyond the keys (no name or email).
+func (s *Service) LinkSigner(ctx context.Context, cred LinkCredential, userID string) (*PublicUser, error) {
+	if _, _, err := s.authorizeLink(ctx, cred, ""); err != nil {
+		return nil, err
+	}
+	if err := validate.ID(userID); err != nil {
+		return nil, domain.ErrNotFound
+	}
+	u, err := s.store.GetUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return &PublicUser{ID: u.ID, Keys: u.Keys}, nil
 }

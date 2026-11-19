@@ -31,6 +31,7 @@ import (
 // LoginRequest is the server-side state of an in-progress OIDC login.
 type LoginRequest struct {
 	TokenHash string
+	Kind      string // "oidc" or "saml"
 	State     string
 	Nonce     string
 	Verifier  string // PKCE code verifier
@@ -95,12 +96,25 @@ type Manager struct {
 	svc   *service.Service
 	cfg   Config
 	oidc  *OIDC
+	saml  *SAML
 	now   func() time.Time
 }
 
-// NewManager wires a Manager. oidc may be nil (e.g. in tests).
-func NewManager(store Store, svc *service.Service, cfg Config, oidc *OIDC) *Manager {
-	return &Manager{store: store, svc: svc, cfg: cfg, oidc: oidc, now: func() time.Time { return time.Now().UTC() }}
+// NewManager wires a Manager. Either sign-in method may be nil, but a
+// deployment needs at least one.
+func NewManager(store Store, svc *service.Service, cfg Config, oidc *OIDC, saml *SAML) *Manager {
+	return &Manager{store: store, svc: svc, cfg: cfg, oidc: oidc, saml: saml, now: func() time.Time { return time.Now().UTC() }}
+}
+
+// Methods reports which sign-in methods are configured.
+func (m *Manager) Methods() (oidc, saml bool) { return m.oidc != nil, m.saml != nil }
+
+// SAMLMetadata returns the SP metadata (nil, nil if SAML is not configured).
+func (m *Manager) SAMLMetadata(ctx context.Context) (any, error) {
+	if m.saml == nil {
+		return nil, nil
+	}
+	return m.saml.Metadata(ctx)
 }
 
 // ErrBadCredentials is returned when presented credentials are invalid.

@@ -3,8 +3,8 @@ package service_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/ecdh"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,21 +18,26 @@ import (
 	"time"
 
 	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/blobcrypt"
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
 	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
 	"github.com/woah-buddy/NoddaNAS/internal/testutil"
 )
 
-// These tests run against a real PostgreSQL so the SQL that enforces
-// quotas, uniqueness and concurrency is exercised, not mocked. Set
-// NODDANAS_TEST_DATABASE_URL to run them; each test gets its own schema.
+// These tests drive the service exactly as an E2EE client would: every
+// name, key and file they send is encrypted with internal/e2ee, and every
+// read is decrypted and verified. The server only ever sees ciphertext.
+// They run against a real PostgreSQL (NODDANAS_TEST_DATABASE_URL).
+
+const pass = "correct horse battery staple"
 
 type env struct {
+	t        *testing.T
 	svc      *service.Service
 	blobRoot string
 	ctx      context.Context
+	users    map[string]*e2ee.PublicUser // directory, as clients would fetch it
 }
 
 func newEnv(t *testing.T, mutate ...func(*service.Config)) *env {
@@ -45,68 +50,164 @@ func newEnv(t *testing.T, mutate ...func(*service.Config)) *env {
 	}
 	cfg := service.DefaultConfig()
 	cfg.DefaultQuota = 1 << 20
+	cfg.AdminGroups = []string{"nas-admins"}
 	for _, m := range mutate {
 		m(&cfg)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &env{svc: service.New(st, blobs, testutil.Keyring(t), cfg, log), blobRoot: root, ctx: context.Background()}
+	return &env{t: t, svc: service.New(st, blobs, cfg, log), blobRoot: root, ctx: context.Background(),
+		users: map[string]*e2ee.PublicUser{}}
 }
 
-type user struct {
-	p    service.Principal
-	root string
+// client is a test E2EE client for one user.
+type client struct {
+	e       *env
+	t       *testing.T
+	p       service.Principal
+	acct    *e2ee.Account
+	u       *domain.User
+	home    string // personal space ID
+	root    string // personal root folder ID
+	keys    map[string]*e2ee.NodeKey
+	spaces  map[string]*e2ee.Space
+	pubs    map[string][]byte // space ID -> space public key
+	spaceOf map[string]string
 }
 
-func (e *env) user(t *testing.T, name string) user {
-	t.Helper()
-	u, err := e.svc.LoginUser(e.ctx, service.Identity{
-		Issuer: "https://idp.test", Subject: "sub-" + name, Email: name + "@example.test", EmailVerified: true, Name: name,
-	})
+func ecdhPub(raw []byte) (*ecdh.PublicKey, error) { return ecdh.X25519().NewPublicKey(raw) }
+
+func (e *env) login(name string, groups ...string) *client {
+	e.t.Helper()
+	u, err := e.svc.LoginUser(e.ctx, service.Identity{Issuer: "https://idp.test", Subject: "sub-" + name,
+		Email: name + "@example.test", EmailVerified: true, Name: name, Groups: groups})
 	if err != nil {
-		t.Fatal(err)
+		e.t.Fatal(err)
 	}
-	return user{p: service.Principal{UserID: u.ID}, root: u.RootID}
+	return &client{e: e, t: e.t, p: service.Principal{UserID: u.ID}, u: u, home: u.PersonalSpaceID,
+		keys: map[string]*e2ee.NodeKey{}, spaces: map[string]*e2ee.Space{}, pubs: map[string][]byte{},
+		spaceOf: map[string]string{}}
 }
 
-func (e *env) mkdir(t *testing.T, u user, parent, name string) string {
-	t.Helper()
-	n, err := e.svc.CreateFolder(e.ctx, u.p, parent, name)
+// user signs in and sets up encryption.
+func (e *env) user(name string, groups ...string) *client {
+	e.t.Helper()
+	c := e.login(name, groups...)
+	acct, bundle, _, err := e2ee.NewAccount(c.u.ID, pass)
 	if err != nil {
-		t.Fatal(err)
+		c.t.Fatal(err)
 	}
-	return n.ID
+	c.acct = acct
+	_, sp, _ := e.svc.Me(e.ctx, c.p)
+	c.root = sp.RootID
+	space := acct.PersonalSpace(c.home)
+	rootKey := e2ee.NewNodeKey()
+	raw, _ := json.Marshal(bundle)
+	if err := e.svc.SetupKeys(e.ctx, c.p, string(raw), service.SpaceKeys{
+		PublicKey: e2ee.B64(space.PublicKey()), KeySig: e2ee.SignSpaceKey(acct, c.home, space.PublicKey()),
+		RootKey: space.WrapRoot(c.root, rootKey)}); err != nil {
+		c.t.Fatal(err)
+	}
+	c.keys[c.root], c.spaces[c.home], c.pubs[c.home], c.spaceOf[c.root] = rootKey, space, space.PublicKey(), c.home
+	e.users[c.u.ID] = acct.Public()
+	return c
 }
 
-func (e *env) put(t *testing.T, p service.Principal, parent, name, body string) (*domain.Node, error) {
-	t.Helper()
-	return e.svc.Upload(e.ctx, p, service.UploadRequest{
-		ParentID: parent, Name: name, Size: int64(len(body)), SHA256: sum(body),
-	}, strings.NewReader(body))
+func (c *client) entry(parentID, id, name string, nk *e2ee.NodeKey) service.EntryFields {
+	pk := c.keys[parentID]
+	if pk == nil {
+		c.t.Fatalf("client has no key for %s", parentID)
+	}
+	return service.EntryFields{NameEnc: pk.EncryptName(id, name), NameHash: pk.NameHash(name), WrappedKey: pk.WrapChild(id, nk)}
 }
 
-func (e *env) read(t *testing.T, p service.Principal, id string) string {
-	t.Helper()
-	c, err := e.svc.OpenContent(e.ctx, p, id, "")
+func (c *client) mkdir(parentID, name string) string {
+	c.t.Helper()
+	id, nk := secure.NewID(), e2ee.NewNodeKey()
+	if _, err := c.e.svc.CreateFolder(c.e.ctx, c.p, parentID, id, c.entry(parentID, id, name, nk)); err != nil {
+		c.t.Fatal(err)
+	}
+	c.keys[id], c.spaceOf[id] = nk, c.spaceOf[parentID]
+	return id
+}
+
+func (c *client) container(spaceID string, nk *e2ee.NodeKey, name, body string) []byte {
+	c.t.Helper()
+	pub, err := ecdhPub(c.pubs[spaceID])
 	if err != nil {
-		t.Fatalf("open %s: %v", id, err)
+		c.t.Fatal(err)
 	}
-	defer c.Close()
-	b, err := io.ReadAll(c)
+	r, _, err := e2ee.NewWriter(strings.NewReader(body), e2ee.WriteParams{Size: int64(len(body)), NodeKey: nk,
+		SpaceID: spaceID, SpacePub: pub, Meta: e2ee.Meta{Name: name, Type: "text/plain", MTime: 1}, Signer: c.acct})
 	if err != nil {
-		t.Fatal(err)
+		c.t.Fatal(err)
 	}
-	return string(b)
+	b, err := io.ReadAll(r)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return b
 }
 
-func sum(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
+func (c *client) put(parentID, name, body string) (*domain.Node, error) {
+	id, nk := secure.NewID(), e2ee.NewNodeKey()
+	ct := c.container(c.spaceOf[parentID], nk, name, body)
+	n, err := c.e.svc.Upload(c.e.ctx, c.p, service.UploadRequest{ParentID: parentID, NewID: id,
+		Entry: c.entry(parentID, id, name, nk), Size: int64(len(ct))}, bytes.NewReader(ct))
+	if err == nil {
+		c.keys[id], c.spaceOf[id] = nk, c.spaceOf[parentID]
+	}
+	return n, err
+}
+
+func (c *client) putVersion(id, name, body string) (*domain.Node, error) {
+	ct := c.container(c.spaceOf[id], c.keys[id], name, body)
+	return c.e.svc.Upload(c.e.ctx, c.p, service.UploadRequest{NodeID: id, Size: int64(len(ct))}, bytes.NewReader(ct))
+}
+
+// read downloads, decrypts and verifies a file's current content.
+func (c *client) read(id string) (string, error) {
+	content, err := c.e.svc.OpenContent(c.e.ctx, c.p, id, "")
+	if err != nil {
+		return "", err
+	}
+	defer content.Close()
+	p, err := e2ee.ParsePrefix(content)
+	if err != nil {
+		return "", err
+	}
+	k, err := p.Keys(c.keys[id])
+	if err != nil {
+		return "", err
+	}
+	var out bytes.Buffer
+	if err := e2ee.DecryptVerify(content, &out, p, k, c.e.users[p.Signer.User]); err != nil {
+		return "", err
+	}
+	return out.String(), nil
+}
+
+func (c *client) mustRead(id, want string) {
+	c.t.Helper()
+	got, err := c.read(id)
+	if err != nil || got != want {
+		c.t.Fatalf("read %s = %q, %v; want %q", id, got, err, want)
+	}
+}
+
+func (c *client) trash(id, name, kind string) error {
+	n, err := c.e.svc.GetNode(c.e.ctx, c.p, id)
+	if err != nil {
+		return err
+	}
+	pub, _ := ecdhPub(c.pubs[n.Node.SpaceID])
+	rk, sig, _ := e2ee.TrashKey(c.acct, pub, id, name, kind, c.keys[id])
+	return c.e.svc.Trash(c.e.ctx, c.p, id, service.TrashRequest{RestoreKey: rk, RestoreSig: sig})
 }
 
 func wantCode(t *testing.T, err error, code domain.Code) {
 	t.Helper()
 	if got := domain.CodeOf(err); got != code {
-		t.Fatalf("got error %v (code %q), want code %q", err, got, code)
+		t.Fatalf("got error %v (code %q), want %q", err, got, code)
 	}
 }
 
@@ -120,8 +221,7 @@ func must[T any](t *testing.T) func(T, error) T {
 	}
 }
 
-func (e *env) blobFiles(t *testing.T) []string {
-	t.Helper()
+func (e *env) blobFiles() []string {
 	var files []string
 	filepath.WalkDir(filepath.Join(e.blobRoot, "blobs"), func(p string, d fs.DirEntry, err error) error {
 		if err == nil && !d.IsDir() {
@@ -134,279 +234,403 @@ func (e *env) blobFiles(t *testing.T) []string {
 
 // ---------------------------------------------------------------------------
 
-func TestProvisioning(t *testing.T) {
+func TestProvisioningAndKeys(t *testing.T) {
 	e := newEnv(t)
-	a := e.user(t, "alice")
-	again := e.user(t, "alice")
-	if a.p.UserID != again.p.UserID || a.root != again.root {
-		t.Fatal("same identity must map to the same account")
+	a := e.user("alice", "nas-admins")
+	if !a.u.Admin {
+		t.Fatal("admin group did not make alice an administrator")
 	}
-	// An unverified email is never recorded, so it cannot attract shares.
 	u, err := e.svc.LoginUser(e.ctx, service.Identity{Issuer: "https://idp.test", Subject: "mallory",
 		Email: "bob@example.test", EmailVerified: false})
 	if err != nil || u.Email != "" {
 		t.Fatalf("unverified email recorded: %q %v", u.Email, err)
 	}
-	// A verified email already held by another account is not duplicated.
-	u2, err := e.svc.LoginUser(e.ctx, service.Identity{Issuer: "https://other-idp.test", Subject: "alice",
-		Email: "alice@example.test", EmailVerified: true})
-	if err != nil || u2.Email != "" {
-		t.Fatalf("second account captured an existing email: %q %v", u2.Email, err)
+	// Keys can be set up once; a second attempt (e.g. a hijacked session
+	// trying to swap keys) is refused.
+	acct2, bundle2, _, _ := e2ee.NewAccount(a.u.ID, pass)
+	raw, _ := json.Marshal(bundle2)
+	sp := acct2.PersonalSpace(a.home)
+	err = e.svc.SetupKeys(e.ctx, a.p, string(raw), service.SpaceKeys{PublicKey: e2ee.B64(sp.PublicKey()),
+		KeySig: e2ee.SignSpaceKey(acct2, a.home, sp.PublicKey()), RootKey: sp.WrapRoot(a.root, e2ee.NewNodeKey())})
+	wantCode(t, err, domain.CodeConflict)
+	// Bundle updates may change unlockers but never the public keys.
+	wantCode(t, e.svc.UpdateKeyBundle(e.ctx, a.p, string(raw)), domain.CodeInvalid)
+	stored := must[string](t)(e.svc.KeyBundle(e.ctx, a.p))
+	var b e2ee.Bundle
+	json.Unmarshal([]byte(stored), &b)
+	if err := a.acct.ChangePassphrase(&b, "a different passphrase"); err != nil {
+		t.Fatal(err)
 	}
+	nb, _ := json.Marshal(b)
+	if err := e.svc.UpdateKeyBundle(e.ctx, a.p, string(nb)); err != nil {
+		t.Fatal(err)
+	}
+	// A bundle made for another user is refused.
+	other := e.login("carol")
+	wantCode(t, e.svc.SetupKeys(e.ctx, other.p, string(raw), service.SpaceKeys{}), domain.CodeInvalid)
 }
 
-func TestOwnerFileLifecycle(t *testing.T) {
+func TestE2EEFileLifecycle(t *testing.T) {
 	e := newEnv(t)
-	a := e.user(t, "alice")
-	docs := e.mkdir(t, a, a.root, "Docs")
+	a := e.user("alice")
+	docs := a.mkdir(a.root, "Docs")
+	f := must[*domain.Node](t)(a.put(docs, "notes.txt", "hello v1"))
+	a.mustRead(f.ID, "hello v1")
 
-	f := must[*domain.Node](t)(e.put(t, a.p, docs, "notes.txt", "hello v1"))
-	if got := e.read(t, a.p, f.ID); got != "hello v1" {
-		t.Fatalf("read %q", got)
+	// The server never sees plaintext: not the name, not the content.
+	for _, p := range e.blobFiles() {
+		raw, _ := os.ReadFile(p)
+		if bytes.Contains(raw, []byte("hello")) || bytes.Contains(raw, []byte("notes.txt")) {
+			t.Fatal("plaintext found in blob storage")
+		}
 	}
-	// A second upload with the same name conflicts unless overwrite is set.
-	_, err := e.put(t, a.p, docs, "NOTES.TXT", "x")
+
+	// Case-insensitive duplicate detection works on keyed hashes alone.
+	_, err := a.put(docs, "NOTES.TXT", "x")
 	wantCode(t, err, domain.CodeConflict)
-
-	v2, err := e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: docs, Name: "notes.txt", Overwrite: true, Size: -1},
-		strings.NewReader("hello v2"))
-	if err != nil || v2.ID != f.ID {
-		t.Fatalf("overwrite: %v", err)
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Detail["existingId"] != f.ID {
+		t.Fatalf("conflict should identify the existing file: %v", err)
 	}
+
+	must[*domain.Node](t)(a.putVersion(f.ID, "notes.txt", "hello v2"))
+	a.mustRead(f.ID, "hello v2")
 	vs := must[[]*domain.Version](t)(e.svc.ListVersions(e.ctx, a.p, f.ID))
 	if len(vs) != 2 {
 		t.Fatalf("versions = %d", len(vs))
 	}
-	restored := must[*domain.Node](t)(e.svc.RestoreVersion(e.ctx, a.p, f.ID, vs[1].ID))
-	if got := e.read(t, a.p, restored.ID); got != "hello v1" {
-		t.Fatalf("after restore %q", got)
-	}
+	must[*domain.Node](t)(e.svc.RestoreVersion(e.ctx, a.p, f.ID, vs[1].ID))
+	a.mustRead(f.ID, "hello v1")
 
-	// Stale revisions are rejected (optimistic concurrency).
-	name := "renamed.txt"
-	_, err = e.svc.Update(e.ctx, a.p, f.ID, service.UpdateRequest{Name: &name, Revision: 1})
-	wantCode(t, err, domain.CodePrecondition)
-	must[*domain.Node](t)(e.svc.Update(e.ctx, a.p, f.ID, service.UpdateRequest{Name: &name}))
-
-	me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p))
-	if want := int64(len("hello v1")*2 + len("hello v2")); me.UsedBytes != want {
-		t.Fatalf("used = %d, want %d (all versions count)", me.UsedBytes, want)
+	// Rename = new encrypted name and hash; move = also a re-wrapped key.
+	archive := a.mkdir(a.root, "Archive")
+	n := must[*domain.Node](t)(e.svc.Update(e.ctx, a.p, f.ID, service.UpdateRequest{
+		ParentID: &archive, Entry: a.entry(archive, f.ID, "old-notes.txt", a.keys[f.ID])}))
+	if name, err := a.keys[archive].DecryptName(f.ID, n.NameEnc); err != nil || name != "old-notes.txt" {
+		t.Fatalf("moved name: %q %v", name, err)
 	}
+	// A move without a re-wrapped key is refused.
+	_, err = e.svc.Update(e.ctx, a.p, f.ID, service.UpdateRequest{ParentID: &docs,
+		Entry: service.EntryFields{NameEnc: n.NameEnc, NameHash: n.NameHash}})
+	wantCode(t, err, domain.CodeInvalid)
+	a.mustRead(f.ID, "hello v1")
 }
 
-func TestContentIsEncryptedAtRest(t *testing.T) {
+// The headline property: a single stored container, copied out of storage
+// as a backup, can be restored with only the owner's keys, still encrypted.
+func TestIndependentBackupAndRestore(t *testing.T) {
 	e := newEnv(t)
-	a := e.user(t, "alice")
-	secret := strings.Repeat("TOP-SECRET-PLAINTEXT ", 1000)
-	must[*domain.Node](t)(e.put(t, a.p, a.root, "s.txt", secret))
-	files := e.blobFiles(t)
-	if len(files) != 1 {
-		t.Fatalf("blob files = %d", len(files))
+	a := e.user("alice")
+	f := must[*domain.Node](t)(a.put(a.root, "taxes-2026.pdf", "very private"))
+	backup, err := os.ReadFile(e.blobFiles()[0]) // e.g. from a volume backup or an API download
+	if err != nil {
+		t.Fatal(err)
 	}
-	raw, _ := os.ReadFile(files[0])
-	if bytes.Contains(raw, []byte("TOP-SECRET")) {
-		t.Fatal("plaintext found in blob storage")
+
+	// The file is deleted and purged: no node, no key, no database trace.
+	if err := a.trash(f.ID, "taxes-2026.pdf", "file"); err != nil {
+		t.Fatal(err)
 	}
+	if err := e.svc.DeletePermanently(e.ctx, a.p, f.ID); err != nil {
+		t.Fatal(err)
+	}
+	must[int](t)(e.svc.RunMaintenance(e.ctx, 10))
+	if len(e.blobFiles()) != 0 {
+		t.Fatal("blob not purged")
+	}
+
+	// Restore: open the owner seal with the space keys (derived from the
+	// passphrase or recovery code), read the name from the encrypted
+	// metadata, and re-link the unchanged container.
+	p, err := e2ee.ParsePrefix(bytes.NewReader(backup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nk, err := p.OwnerNodeKey(a.spaces[a.home])
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := p.Keys(nk)
+	meta := must[*e2ee.Meta](t)(p.DecryptMeta(k))
+	if meta.Name != "taxes-2026.pdf" {
+		t.Fatalf("meta name %q", meta.Name)
+	}
+	if err := e2ee.DecryptVerify(bytes.NewReader(backup[p.BodyOffset():]), io.Discard, p, k, a.acct.Public()); err != nil {
+		t.Fatalf("backup does not verify: %v", err)
+	}
+	id := secure.NewID()
+	restored, err := e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, NewID: id,
+		Entry: a.entry(a.root, id, meta.Name, nk), Size: int64(len(backup))}, bytes.NewReader(backup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.keys[id] = nk
+	a.mustRead(restored.ID, "very private")
+	stored, _ := os.ReadFile(e.blobFiles()[0])
+	if !bytes.Equal(stored, backup) {
+		t.Fatal("restored container should be byte-identical to the backup")
+	}
+
+	// Someone else's container (sealed to their space) is refused.
+	b := e.user("bob")
+	foreign := b.container(b.home, e2ee.NewNodeKey(), "x", "x")
+	id2 := secure.NewID()
+	_, err = e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, NewID: id2,
+		Entry: a.entry(a.root, id2, "x", e2ee.NewNodeKey()), Size: int64(len(foreign))}, bytes.NewReader(foreign))
+	wantCode(t, err, domain.CodeInvalid)
 }
 
 func TestTenantIsolation(t *testing.T) {
 	e := newEnv(t)
-	a, b := e.user(t, "alice"), e.user(t, "bob")
-	private := e.mkdir(t, a, a.root, "Private")
-	f := must[*domain.Node](t)(e.put(t, a.p, private, "diary.txt", "dear diary"))
-
-	// Every operation on someone else's data looks exactly like "no such item".
+	a, b := e.user("alice"), e.user("bob")
+	private := a.mkdir(a.root, "Private")
+	f := must[*domain.Node](t)(a.put(private, "diary.txt", "dear diary"))
 	_, err := e.svc.GetNode(e.ctx, b.p, f.ID)
 	wantCode(t, err, domain.CodeNotFound)
 	_, _, _, err = e.svc.ListChildren(e.ctx, b.p, private, "", 0)
 	wantCode(t, err, domain.CodeNotFound)
 	_, err = e.svc.OpenContent(e.ctx, b.p, f.ID, "")
 	wantCode(t, err, domain.CodeNotFound)
-	_, err = e.put(t, b.p, private, "planted.txt", "x")
+	_, err = e.svc.NodePath(e.ctx, b.p, f.ID)
 	wantCode(t, err, domain.CodeNotFound)
-	wantCode(t, e.svc.Trash(e.ctx, b.p, f.ID, 0), domain.CodeNotFound)
-	_, _, err = e.svc.CreateLink(e.ctx, b.p, f.ID, service.LinkOptions{})
+	_, err = e.svc.ListTrash(e.ctx, b.p, a.home)
 	wantCode(t, err, domain.CodeNotFound)
-	_, err = e.svc.Update(e.ctx, b.p, f.ID, service.UpdateRequest{ParentID: &b.root})
-	wantCode(t, err, domain.CodeNotFound)
-	// Bob cannot pull Alice's file into his tree, nor push his into hers.
-	bf := must[*domain.Node](t)(e.put(t, b.p, b.root, "mine.txt", "b"))
-	_, err = e.svc.Update(e.ctx, b.p, bf.ID, service.UpdateRequest{ParentID: &private})
-	wantCode(t, err, domain.CodeNotFound)
-	// Malformed IDs are rejected without reaching storage.
 	_, err = e.svc.GetNode(e.ctx, b.p, "../../etc/passwd")
 	wantCode(t, err, domain.CodeNotFound)
-}
-
-func TestReadShare(t *testing.T) {
-	e := newEnv(t)
-	a, b := e.user(t, "alice"), e.user(t, "bob")
-	photos := e.mkdir(t, a, a.root, "Photos")
-	trip := e.mkdir(t, a, photos, "Trip")
-	pic := must[*domain.Node](t)(e.put(t, a.p, trip, "beach.jpg", "jpegdata"))
-	must[*domain.Share](t)(e.svc.ShareWithUser(e.ctx, a.p, photos, "bob@example.test", domain.PermRead))
-
-	if got := e.read(t, b.p, pic.ID); got != "jpegdata" {
-		t.Fatal("grantee cannot read inside the share")
-	}
-	items := must[[]service.SharedItem](t)(e.svc.SharedWithMe(e.ctx, b.p))
-	if len(items) != 1 || items[0].Node.Node.ID != photos {
-		t.Fatalf("shared-with-me = %+v", items)
-	}
-	// Visible, so denials are "forbidden" rather than "not found".
-	_, err := e.put(t, b.p, trip, "x.jpg", "x")
-	wantCode(t, err, domain.CodeForbidden)
-	wantCode(t, e.svc.Trash(e.ctx, b.p, pic.ID, 0), domain.CodeForbidden)
-	_, err = e.svc.ShareWithUser(e.ctx, b.p, trip, "alice@example.test", domain.PermRead)
-	wantCode(t, err, domain.CodeForbidden) // no re-sharing
-	_, _, err = e.svc.CreateLink(e.ctx, b.p, trip, service.LinkOptions{})
-	wantCode(t, err, domain.CodeForbidden)
-	// Alice's root, above the share, stays invisible.
-	_, err = e.svc.GetNode(e.ctx, b.p, a.root)
+	// Moving one's own item into someone else's folder is refused.
+	bf := must[*domain.Node](t)(b.put(b.root, "mine.txt", "b"))
+	_, err = e.svc.Update(e.ctx, b.p, bf.ID, service.UpdateRequest{ParentID: &private, Entry: b.entry(b.root, bf.ID, "x", b.keys[bf.ID])})
 	wantCode(t, err, domain.CodeNotFound)
 }
 
-func TestWriteShare(t *testing.T) {
+func TestUserShares(t *testing.T) {
 	e := newEnv(t)
-	a, b := e.user(t, "alice"), e.user(t, "bob")
-	team := e.mkdir(t, a, a.root, "Team")
-	sh := must[*domain.Share](t)(e.svc.ShareWithUser(e.ctx, a.p, team, "bob@example.test", domain.PermWrite))
+	a, b := e.user("alice"), e.user("bob")
+	photos := a.mkdir(a.root, "Photos")
+	pic := must[*domain.Node](t)(a.put(photos, "beach.jpg", "jpegdata"))
 
-	f := must[*domain.Node](t)(e.put(t, b.p, team, "report.txt", "by bob"))
-	if f.OwnerID != a.p.UserID {
-		t.Fatal("content written into a share must belong to (and be charged to) the owner")
+	recipient := must[*service.PublicUser](t)(e.svc.LookupUser(e.ctx, a.p, "bob@example.test"))
+	rpub, err := e2ee.VerifyPublicKeys(recipient.ID, e2ee.PublicKeys{Enc: recipient.Keys.Enc, Sig: recipient.Keys.Sig}, recipient.Keys.SelfSig)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p)); me.UsedBytes != int64(len("by bob")) {
-		t.Fatalf("owner usage = %d", me.UsedBytes)
-	}
-	name := "final.txt"
-	must[*domain.Node](t)(e.svc.Update(e.ctx, b.p, f.ID, service.UpdateRequest{Name: &name}))
+	shareID := secure.NewID()
+	sealed, sig, _ := e2ee.ShareNode(a.acct, rpub, shareID, photos, "write", "Photos", a.keys[photos])
+	sh := must[*domain.Share](t)(e.svc.ShareWithUser(e.ctx, a.p, photos, service.NewUserShare{
+		ShareID: shareID, RecipientID: b.u.ID, Permission: domain.PermWrite, SealedKey: sealed, Sig: sig}))
 
-	// Changing the share root itself needs write on *its* parent, which Bob lacks.
-	wantCode(t, e.svc.Trash(e.ctx, b.p, team, 0), domain.CodeForbidden)
-	_, err := e.svc.Update(e.ctx, b.p, team, service.UpdateRequest{Name: &name})
+	// Bob discovers the share, verifies Alice's signature, and gets the key.
+	items := must[[]service.SharedItem](t)(e.svc.SharedWithMe(e.ctx, b.p))
+	if len(items) != 1 {
+		t.Fatalf("shared-with-me = %d", len(items))
+	}
+	it := items[0].Share
+	nk, name, err := e2ee.OpenShare(b.acct, e.users[it.CreatedBy], it.ID, it.NodeID, string(it.Permission), it.SealedKey, it.ShareSig)
+	if err != nil || name != "Photos" {
+		t.Fatalf("open share: %q %v", name, err)
+	}
+	b.keys[photos], b.spaceOf[photos], b.pubs[a.home] = nk, a.home, a.spaces[a.home].PublicKey()
+
+	// Bob's key path starts at the share, not at Alice's root.
+	path := must[*service.Path](t)(e.svc.NodePath(e.ctx, b.p, pic.ID))
+	if path.Share == nil || path.Nodes[0].ID != photos || path.Space.Role != domain.RoleNone {
+		t.Fatalf("path entry = %+v", path)
+	}
+	b.keys[pic.ID] = must[*e2ee.NodeKey](t)(nk.UnwrapChild(pic.ID, path.Nodes[1].WrappedKey))
+	b.mustRead(pic.ID, "jpegdata")
+
+	// Bob writes into the share; Alice's space pays and Alice can read it.
+	up := must[*domain.Node](t)(b.put(photos, "sunset.jpg", "by bob"))
+	if up.SpaceID != a.home {
+		t.Fatal("content written into a share belongs to the sharer's space")
+	}
+	a.keys[up.ID] = must[*e2ee.NodeKey](t)(a.keys[photos].UnwrapChild(up.ID, up.WrappedKey))
+	a.mustRead(up.ID, "by bob")
+	// Bob cannot trash the shared folder itself, nor re-share it.
+	wantCode(t, b.trash(photos, "Photos", "folder"), domain.CodeForbidden)
+	_, err = e.svc.ShareWithUser(e.ctx, b.p, photos, service.NewUserShare{ShareID: secure.NewID(),
+		RecipientID: a.u.ID, Permission: domain.PermRead, SealedKey: sealed, Sig: sig})
 	wantCode(t, err, domain.CodeForbidden)
-	// Moving content out of the share into Bob's own storage is refused.
-	_, err = e.svc.Update(e.ctx, b.p, f.ID, service.UpdateRequest{ParentID: &b.root})
-	wantCode(t, err, domain.CodeInvalid)
 
-	// Revocation takes effect immediately.
 	if err := e.svc.DeleteShare(e.ctx, a.p, sh.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, err = e.svc.GetNode(e.ctx, b.p, f.ID)
+	_, err = e.svc.OpenContent(e.ctx, b.p, pic.ID, "")
 	wantCode(t, err, domain.CodeNotFound)
 }
 
-func TestReadOnlyCredential(t *testing.T) {
+func TestTeamFolders(t *testing.T) {
 	e := newEnv(t)
-	a := e.user(t, "alice")
-	f := must[*domain.Node](t)(e.put(t, a.p, a.root, "a.txt", "a"))
-	ro := service.Principal{UserID: a.p.UserID, ReadOnly: true}
-	if got := e.read(t, ro, f.ID); got != "a" {
-		t.Fatal("read-only credential cannot read")
+	admin := e.user("admin", "nas-admins")
+	bob := e.user("bob")
+	carol := e.user("carol")
+	dave := e.login("dave", "engineering") // in the group, no keys yet
+
+	// Bob (any user) creates a team folder.
+	teamID, rootID := secure.NewID(), secure.NewID()
+	team := e2ee.OpenSpace(teamID, e2ee.NewTeamSecret())
+	rootKey := e2ee.NewNodeKey()
+	grant, gsig, _ := team.Grant(bob.acct, bob.acct.Public())
+	sp := must[*domain.Space](t)(e.svc.CreateTeam(e.ctx, bob.p, service.NewTeam{ID: teamID, RootID: rootID,
+		NameEnc: team.EncryptName("Launch Plan"), Grant: grant, GrantSig: gsig,
+		Keys: service.SpaceKeys{PublicKey: e2ee.B64(team.PublicKey()), KeySig: e2ee.SignSpaceKey(bob.acct, teamID, team.PublicKey()),
+			RootKey: team.WrapRoot(rootID, rootKey)}}))
+	if sp.QuotaBytes != service.DefaultConfig().DefaultTeamQuota {
+		t.Fatal("team folders have their own quota")
 	}
-	_, err := e.put(t, ro, a.root, "b.txt", "b")
+	bob.keys[rootID], bob.spaces[teamID], bob.pubs[teamID], bob.spaceOf[rootID] = rootKey, team, team.PublicKey(), teamID
+	plan := must[*domain.Node](t)(bob.put(rootID, "plan.md", "ship it"))
+
+	// Item 2: Bob adds Carol directly. She is authorized at once, but holds
+	// no key until a manager's client grants it.
+	write := domain.RoleWrite
+	if err := e.svc.UpdateMember(e.ctx, bob.p, teamID, carol.u.ID, service.MemberUpdate{Role: &write}); err != nil {
+		t.Fatal(err)
+	}
+	info := must[*service.SpaceInfo](t)(e.svc.GetSpace(e.ctx, carol.p, teamID))
+	if info.Role != domain.RoleWrite || info.Membership.Grant != "" {
+		t.Fatalf("carol membership = %+v", info.Membership)
+	}
+	cg, cs, _ := team.Grant(bob.acct, e.users[carol.u.ID])
+	if err := e.svc.UpdateMember(e.ctx, bob.p, teamID, carol.u.ID, service.MemberUpdate{Grant: cg, GrantSig: cs}); err != nil {
+		t.Fatal(err)
+	}
+	info = must[*service.SpaceInfo](t)(e.svc.GetSpace(e.ctx, carol.p, teamID))
+	m := info.Membership
+	cTeam, err := e2ee.OpenGrant(carol.acct, e.users[m.GrantedBy], teamID, m.Grant, m.GrantSig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name, _ := cTeam.DecryptName(info.Space.NameEnc); name != "Launch Plan" {
+		t.Fatalf("team name %q", name)
+	}
+	rk := must[*e2ee.NodeKey](t)(cTeam.UnwrapRoot(rootID, info.Space.RootKey))
+	carol.keys[rootID], carol.spaceOf[rootID], carol.pubs[teamID] = rk, teamID, team.PublicKey()
+	carol.keys[plan.ID] = must[*e2ee.NodeKey](t)(rk.UnwrapChild(plan.ID, plan.WrappedKey))
+	carol.mustRead(plan.ID, "ship it")
+	must[*domain.Node](t)(carol.put(rootID, "notes.md", "from carol"))
+
+	// Item 3: only administrators map IdP groups to team folders.
+	wantCode(t, e.svc.SetGroupMapping(e.ctx, bob.p, teamID, "engineering", domain.RoleRead), domain.CodeForbidden)
+	if err := e.svc.SetGroupMapping(e.ctx, admin.p, teamID, "engineering", domain.RoleRead); err != nil {
+		t.Fatal(err)
+	}
+	// Dave arrives through the group: authorized, and listed as awaiting a key.
+	if _, err := e.svc.GetNode(e.ctx, dave.p, plan.ID); err != nil {
+		t.Fatalf("group member not authorized: %v", err)
+	}
+	pending := 0
+	for _, mb := range must[[]*domain.Member](t)(e.svc.ListMembers(e.ctx, bob.p, teamID)) {
+		if mb.Grant == "" {
+			pending++
+		}
+	}
+	if pending != 1 {
+		t.Fatalf("pending grants = %d, want 1 (dave)", pending)
+	}
+	wantCode(t, e.svc.UpdateMember(e.ctx, bob.p, teamID, dave.u.ID, service.MemberUpdate{Grant: cg, GrantSig: cs}),
+		domain.CodePrecondition) // dave has not set up keys
+	// The group's role is read: Dave cannot write.
+	id := secure.NewID()
+	_, err = e.svc.Upload(e.ctx, dave.p, service.UploadRequest{ParentID: rootID, NewID: id,
+		Entry: bob.entry(rootID, id, "x", e2ee.NewNodeKey())}, strings.NewReader(""))
 	wantCode(t, err, domain.CodeForbidden)
-	wantCode(t, e.svc.Trash(e.ctx, ro, f.ID, 0), domain.CodeForbidden)
-	_, _, err = e.svc.CreateLink(e.ctx, ro, f.ID, service.LinkOptions{})
-	wantCode(t, err, domain.CodeForbidden)
+
+	// Removing the mapping revokes group access immediately.
+	if err := e.svc.DeleteGroupMapping(e.ctx, admin.p, teamID, "engineering"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.GetNode(e.ctx, dave.p, plan.ID)
+	wantCode(t, err, domain.CodeNotFound)
+	carol.mustRead(plan.ID, "ship it") // still a direct member
+
+	// The last key-holding manager cannot leave; others can.
+	wantCode(t, e.svc.RemoveMember(e.ctx, bob.p, teamID, bob.u.ID), domain.CodeConflict)
+	if err := e.svc.RemoveMember(e.ctx, carol.p, teamID, carol.u.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = e.svc.GetNode(e.ctx, carol.p, plan.ID)
+	wantCode(t, err, domain.CodeNotFound)
+
+	// Deleting the team folder purges its content.
+	before := len(e.blobFiles())
+	if err := e.svc.DeleteTeam(e.ctx, bob.p, teamID); err != nil {
+		t.Fatal(err)
+	}
+	must[int](t)(e.svc.RunMaintenance(e.ctx, 10))
+	if after := len(e.blobFiles()); after != before-2 {
+		t.Fatalf("blobs %d -> %d", before, after)
+	}
+	_, err = e.svc.GetSpace(e.ctx, bob.p, teamID)
+	wantCode(t, err, domain.CodeNotFound)
 }
 
 func TestTrashRestoreAndPurge(t *testing.T) {
 	e := newEnv(t)
-	a, b := e.user(t, "alice"), e.user(t, "bob")
-	dir := e.mkdir(t, a, a.root, "Old")
-	inner := e.mkdir(t, a, dir, "Inner")
-	f := must[*domain.Node](t)(e.put(t, a.p, inner, "f.txt", "12345"))
-	g := must[*domain.Node](t)(e.put(t, a.p, dir, "g.txt", "678"))
-	must[*domain.Share](t)(e.svc.ShareWithUser(e.ctx, a.p, dir, "bob@example.test", domain.PermRead))
+	a := e.user("alice")
+	dir := a.mkdir(a.root, "Old")
+	f := must[*domain.Node](t)(a.put(dir, "f.txt", "12345"))
+	g := must[*domain.Node](t)(a.put(dir, "g.txt", "678"))
+	if err := a.trash(g.ID, "g.txt", "file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.trash(dir, "Old", "folder"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.svc.GetNode(e.ctx, a.p, f.ID)
+	wantCode(t, err, domain.CodeNotFound)
 
-	// g is trashed on its own first; then the whole folder.
-	if err := e.svc.Trash(e.ctx, a.p, g.ID, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.svc.Trash(e.ctx, a.p, dir, 0); err != nil {
-		t.Fatal(err)
-	}
-	// Everything inside a trashed folder disappears, for owner and grantee alike.
-	for _, p := range []service.Principal{a.p, b.p} {
-		_, err := e.svc.GetNode(e.ctx, p, f.ID)
-		wantCode(t, err, domain.CodeNotFound)
-	}
-	// The name is free again while the folder sits in the trash.
-	clash := e.mkdir(t, a, a.root, "Old")
-	_, err := e.svc.Restore(e.ctx, a.p, dir, nil)
-	wantCode(t, err, domain.CodeConflict)
-	newName := "Old (restored)"
-	must[*domain.Node](t)(e.svc.Restore(e.ctx, a.p, dir, &newName))
-	if got := e.read(t, b.p, f.ID); got != "12345" {
-		t.Fatal("restored content not readable by grantee")
-	}
-	_ = clash
-
-	// Permanently delete the folder: content and quota go away, but g (trashed
-	// separately) survives in the trash and can still be restored.
-	if err := e.svc.Trash(e.ctx, a.p, dir, 0); err != nil {
-		t.Fatal(err)
-	}
+	// Purge the folder; g (trashed separately) survives and stays restorable
+	// even though the folder whose key wrapped it is gone.
 	if err := e.svc.DeletePermanently(e.ctx, a.p, dir); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := e.svc.RunMaintenance(e.ctx, 10); err != nil || n != 1 {
-		t.Fatalf("purged %d, %v", n, err)
+	if n, _ := e.svc.RunMaintenance(e.ctx, 10); n != 1 {
+		t.Fatal("folder not purged")
 	}
-	if me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p)); me.UsedBytes != 3 {
-		t.Fatalf("used = %d, want 3 (only g remains)", me.UsedBytes)
+	_, sp, _ := e.svc.Me(e.ctx, a.p)
+	if sp.UsedBytes != g.Size {
+		t.Fatalf("used = %d, want %d", sp.UsedBytes, g.Size)
 	}
-	if files := e.blobFiles(t); len(files) != 1 {
-		t.Fatalf("blob files = %d, want 1", len(files))
+	entries := must[[]service.TrashEntry](t)(e.svc.ListTrash(e.ctx, a.p, a.home))
+	if len(entries) != 1 || entries[0].Node.ID != g.ID {
+		t.Fatalf("trash = %+v", entries)
 	}
-	restored := must[*domain.Node](t)(e.svc.Restore(e.ctx, a.p, g.ID, nil))
-	if restored.ParentID != a.root {
-		t.Fatal("orphaned trash item should restore into the root folder")
+	tn := entries[0].Node
+	nk, kn, err := e2ee.OpenTrashKey(a.spaces[a.home], e.users[tn.TrashedBy], tn.ID, tn.RestoreKey, tn.RestoreSig)
+	if err != nil || kn.Name != "g.txt" {
+		t.Fatalf("open trash key: %v", err)
 	}
-	if got := e.read(t, a.p, g.ID); got != "678" {
-		t.Fatal("g lost")
-	}
-	// Only the owner can see or act on their trash.
-	wantCode(t, e.svc.DeletePermanently(e.ctx, b.p, g.ID), domain.CodeNotFound)
-}
-
-func TestTrashExpiry(t *testing.T) {
-	e := newEnv(t, func(c *service.Config) { c.TrashRetention = -time.Second })
-	a := e.user(t, "alice")
-	f := must[*domain.Node](t)(e.put(t, a.p, a.root, "f.txt", "data"))
-	if err := e.svc.Trash(e.ctx, a.p, f.ID, 0); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := e.svc.RunMaintenance(e.ctx, 10); err != nil || n != 1 {
-		t.Fatalf("purged %d, %v", n, err)
-	}
-	if me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p)); me.UsedBytes != 0 {
-		t.Fatalf("used = %d", me.UsedBytes)
-	}
+	a.keys[g.ID] = nk
+	must[*domain.Node](t)(e.svc.Restore(e.ctx, a.p, g.ID, service.RestoreRequest{ParentID: a.root,
+		Entry: a.entry(a.root, g.ID, kn.Name, nk)}))
+	a.mustRead(g.ID, "678")
 }
 
 func TestQuotaIsAtomic(t *testing.T) {
-	e := newEnv(t, func(c *service.Config) { c.DefaultQuota = 1000 })
-	a := e.user(t, "alice")
-	_, err := e.put(t, a.p, a.root, "big", strings.Repeat("x", 1001))
-	wantCode(t, err, domain.CodeQuota)
-	// Unknown-size uploads are cut off at the remaining quota.
-	_, err = e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, Name: "stream", Size: -1},
-		strings.NewReader(strings.Repeat("x", 1001)))
-	wantCode(t, err, domain.CodeQuota)
-
-	// 20 concurrent 100-byte uploads against a 1000-byte quota: exactly 10 win.
+	e := newEnv(t)
+	a := e.user("alice")
+	one := len(a.container(a.home, e2ee.NewNodeKey(), "f00", strings.Repeat("y", 100)))
+	if err := e.svc.SetQuota(e.ctx, a.home, int64(one*10+one/2)); err != nil {
+		t.Fatal(err)
+	}
+	// Encrypt everything first (the test client is single-threaded), then
+	// race 20 uploads against a quota that fits exactly 10.
+	reqs := make([]service.UploadRequest, 20)
+	bodies := make([][]byte, 20)
+	for i := range reqs {
+		id, nk, name := secure.NewID(), e2ee.NewNodeKey(), fmt.Sprintf("f%02d", i)
+		bodies[i] = a.container(a.home, nk, name, strings.Repeat("y", 100))
+		reqs[i] = service.UploadRequest{ParentID: a.root, NewID: id, Entry: a.entry(a.root, id, name, nk), Size: int64(len(bodies[i]))}
+	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	ok := 0
-	for i := range 20 {
+	for i := range reqs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := e.put(t, a.p, a.root, fmt.Sprintf("f%d", i), strings.Repeat("y", 100)); err == nil {
+			if _, err := e.svc.Upload(e.ctx, a.p, reqs[i], bytes.NewReader(bodies[i])); err == nil {
 				mu.Lock()
 				ok++
 				mu.Unlock()
@@ -414,127 +638,115 @@ func TestQuotaIsAtomic(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p))
-	if ok != 10 || me.UsedBytes != 1000 {
-		t.Fatalf("succeeded %d, used %d", ok, me.UsedBytes)
+	_, sp, _ := e.svc.Me(e.ctx, a.p)
+	if ok != 10 || sp.UsedBytes != int64(10*one) {
+		t.Fatalf("succeeded %d, used %d", ok, sp.UsedBytes)
 	}
-	if files := e.blobFiles(t); len(files) != 10 {
-		t.Fatalf("rejected uploads left %d blobs behind", len(files)-10)
-	}
-}
-
-func TestUploadIntegrity(t *testing.T) {
-	e := newEnv(t)
-	a := e.user(t, "alice")
-	_, err := e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, Name: "a", Size: 10}, strings.NewReader("short"))
-	wantCode(t, err, domain.CodeInvalid)
-	_, err = e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, Name: "a", Size: 2}, strings.NewReader("too long"))
-	wantCode(t, err, domain.CodeInvalid)
-	_, err = e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, Name: "a", Size: 3, SHA256: sum("abd")},
-		strings.NewReader("abc"))
-	wantCode(t, err, domain.CodeInvalid)
-	for _, bad := range []string{"", ".", "..", "a/b", "a\\b", "x\x00y", "evil‮fdp.exe", " lead"} {
-		_, err = e.put(t, a.p, a.root, bad, "x")
-		wantCode(t, err, domain.CodeInvalid)
-	}
-	if files := e.blobFiles(t); len(files) != 0 {
-		t.Fatalf("rejected uploads left %d blobs behind", len(files))
-	}
-	if me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p)); me.UsedBytes != 0 {
-		t.Fatalf("rejected uploads charged quota: %d", me.UsedBytes)
+	if n := len(e.blobFiles()); n != 10 {
+		t.Fatalf("rejected uploads left %d extra blobs", n-10)
 	}
 }
 
-func TestMoveCannotCreateCycle(t *testing.T) {
+func TestUploadValidation(t *testing.T) {
 	e := newEnv(t)
-	a := e.user(t, "alice")
-	x := e.mkdir(t, a, a.root, "x")
-	y := e.mkdir(t, a, x, "y")
-	_, err := e.svc.Update(e.ctx, a.p, x, service.UpdateRequest{ParentID: &y})
+	a := e.user("alice")
+	nk := e2ee.NewNodeKey()
+	good := a.container(a.home, nk, "a", "hello")
+	up := func(body []byte, size int64, mutate func(*service.UploadRequest)) error {
+		id := secure.NewID()
+		req := service.UploadRequest{ParentID: a.root, NewID: id, Entry: a.entry(a.root, id, "a", nk), Size: size}
+		if mutate != nil {
+			mutate(&req)
+		}
+		_, err := e.svc.Upload(e.ctx, a.p, req, bytes.NewReader(body))
+		return err
+	}
+	cases := map[string]error{
+		"not a container":  up([]byte("plain text"), -1, nil),
+		"truncated":        up(good[:len(good)-10], -1, nil),
+		"trailing bytes":   up(append(bytes.Clone(good), 1, 2, 3), -1, nil),
+		"length mismatch":  up(good, int64(len(good)+1), nil),
+		"bad wrapped key":  up(good, -1, func(r *service.UploadRequest) { r.Entry.WrappedKey = "AAAA" }),
+		"bad name hash":    up(good, -1, func(r *service.UploadRequest) { r.Entry.NameHash = "NOTHEX" }),
+		"bad name":         up(good, -1, func(r *service.UploadRequest) { r.Entry.NameEnc = "!!" }),
+		"client-chosen ID": up(good, -1, func(r *service.UploadRequest) { r.NewID = "../../x" }),
+	}
+	for name, err := range cases {
+		if domain.CodeOf(err) != domain.CodeInvalid {
+			t.Errorf("%s: got %v, want invalid", name, err)
+		}
+	}
+	if n := len(e.blobFiles()); n != 0 {
+		t.Fatalf("rejected uploads left %d blobs", n)
+	}
+	if err := up(good, int64(len(good)), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadOnlyAndCycles(t *testing.T) {
+	e := newEnv(t)
+	a := e.user("alice")
+	x := a.mkdir(a.root, "x")
+	y := a.mkdir(x, "y")
+	_, err := e.svc.Update(e.ctx, a.p, x, service.UpdateRequest{ParentID: &y, Entry: a.entry(y, x, "x", a.keys[x])})
 	wantCode(t, err, domain.CodeInvalid)
-	_, err = e.svc.Update(e.ctx, a.p, x, service.UpdateRequest{ParentID: &x})
-	wantCode(t, err, domain.CodeInvalid)
-	wantCode(t, e.svc.Trash(e.ctx, a.p, a.root, 0), domain.CodeForbidden)
+	ro := service.Principal{UserID: a.p.UserID, ReadOnly: true}
+	id := secure.NewID()
+	_, err = e.svc.CreateFolder(e.ctx, ro, a.root, id, a.entry(a.root, id, "z", e2ee.NewNodeKey()))
+	wantCode(t, err, domain.CodeForbidden)
+	_, _, err = e.svc.CreateLink(e.ctx, ro, x, service.LinkOptions{ShareID: secure.NewID(), LinkKey: e2ee.B64(make([]byte, 64))})
+	wantCode(t, err, domain.CodeForbidden)
 }
 
 func TestPublicLinks(t *testing.T) {
 	e := newEnv(t, func(c *service.Config) { c.LinkMaxFailures = 3 })
-	a := e.user(t, "alice")
-	pub := e.mkdir(t, a, a.root, "Public")
-	f := must[*domain.Node](t)(e.put(t, a.p, pub, "flyer.pdf", "pdfdata"))
-	secret := must[*domain.Node](t)(e.put(t, a.p, a.root, "secret.txt", "nope"))
+	a := e.user("alice")
+	pub := a.mkdir(a.root, "Public")
+	f := must[*domain.Node](t)(a.put(pub, "flyer.pdf", "pdfdata"))
+	secret := must[*domain.Node](t)(a.put(a.root, "secret.txt", "nope"))
 
-	_, token, err := e.svc.CreateLink(e.ctx, a.p, pub, service.LinkOptions{})
+	linkSecret := e2ee.NewLinkSecret()
+	shareID := secure.NewID()
+	_, token, err := e.svc.CreateLink(e.ctx, a.p, pub, service.LinkOptions{ShareID: shareID,
+		LinkKey: e2ee.LinkKey(linkSecret, shareID, pub, "Public", a.keys[pub])})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cred := service.LinkCredential{Token: token}
-	_, kids, _, err := e.svc.LinkChildren(e.ctx, cred, "", "", 0)
-	if err != nil || len(kids) != 1 {
-		t.Fatalf("list via link: %v", err)
+	// A visitor derives keys from the link secret plus the returned path.
+	view := must[*service.LinkView](t)(e.svc.LinkNode(e.ctx, cred, f.ID))
+	nk, name, err := e2ee.OpenLinkKey(linkSecret, view.Share.ID, view.Share.NodeID, view.Share.LinkKey)
+	if err != nil || name != "Public" {
+		t.Fatalf("link key: %v", err)
 	}
-	c, err := e.svc.LinkOpen(e.ctx, cred, f.ID)
+	fk := must[*e2ee.NodeKey](t)(nk.UnwrapChild(f.ID, view.Path[1].WrappedKey))
+	c := must[*service.Content](t)(e.svc.LinkOpen(e.ctx, cred, f.ID))
+	p, _ := e2ee.ParsePrefix(c)
+	k, err := p.Keys(fk)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var out bytes.Buffer
+	if err := e2ee.DecryptVerify(c, &out, p, k, a.acct.Public()); err != nil || out.String() != "pdfdata" {
+		t.Fatalf("visitor decrypt: %q %v", out.String(), err)
+	}
 	c.Close()
-	// A link never reaches outside its own subtree.
 	_, err = e.svc.LinkOpen(e.ctx, cred, secret.ID)
 	wantCode(t, err, domain.CodeNotFound)
-	_, _, err = e.svc.LinkNode(e.ctx, cred, a.root)
-	wantCode(t, err, domain.CodeNotFound)
-	// Wrong or malformed tokens look like nothing at all.
-	_, _, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: secure.NewToken()}, "")
-	wantCode(t, err, domain.CodeNotFound)
-	_, _, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: "x"}, "")
+	_, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: secure.NewToken()}, "")
 	wantCode(t, err, domain.CodeNotFound)
 
-	// Password-protected link with lockout.
-	_, ptoken, _ := e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{Password: "correct horse battery"})
-	_, _, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: ptoken}, "")
-	wantCode(t, err, domain.CodeUnauthorized)
+	sid := secure.NewID()
+	_, ptoken, _ := e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{ShareID: sid, Password: "correct horse battery",
+		LinkKey: e2ee.LinkKey(linkSecret, sid, f.ID, "flyer.pdf", a.keys[f.ID])})
 	for range 3 {
-		_, _, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: ptoken, Password: "wrong guess!"}, "")
+		_, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: ptoken, Password: "wrong guess!"}, "")
 		wantCode(t, err, domain.CodeUnauthorized)
 	}
-	_, _, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: ptoken, Password: "correct horse battery"}, "")
-	wantCode(t, err, domain.CodeRateLimited) // locked, even with the right password
-
-	// Download limits.
-	_, ltoken, _ := e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{MaxDownloads: 1})
-	c, err = e.svc.LinkOpen(e.ctx, service.LinkCredential{Token: ltoken}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Close()
-	_, err = e.svc.LinkOpen(e.ctx, service.LinkCredential{Token: ltoken}, "")
-	wantCode(t, err, domain.CodeGone)
-
-	// Expiry bounds are enforced and links die with the trash.
+	_, err = e.svc.LinkNode(e.ctx, service.LinkCredential{Token: ptoken, Password: "correct horse battery"}, "")
+	wantCode(t, err, domain.CodeRateLimited)
 	past := time.Now().Add(-time.Hour)
-	_, _, err = e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{ExpiresAt: &past})
+	_, _, err = e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{ShareID: secure.NewID(), LinkKey: view.Share.LinkKey, ExpiresAt: &past})
 	wantCode(t, err, domain.CodeInvalid)
-	if err := e.svc.Trash(e.ctx, a.p, pub, 0); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = e.svc.LinkNode(e.ctx, cred, "")
-	wantCode(t, err, domain.CodeNotFound)
-}
-
-func TestCorruptBlobIsDetected(t *testing.T) {
-	e := newEnv(t)
-	a := e.user(t, "alice")
-	f := must[*domain.Node](t)(e.put(t, a.p, a.root, "f.txt", strings.Repeat("z", 5000)))
-	path := e.blobFiles(t)[0]
-	raw, _ := os.ReadFile(path)
-	raw[100] ^= 0xff
-	os.WriteFile(path, raw, 0o600)
-	c, err := e.svc.OpenContent(e.ctx, a.p, f.ID, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	if _, err := io.ReadAll(c); !errors.Is(err, blobcrypt.ErrCorrupt) {
-		t.Fatalf("tampered blob read without error: %v", err)
-	}
 }

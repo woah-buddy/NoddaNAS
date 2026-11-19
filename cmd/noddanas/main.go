@@ -2,8 +2,7 @@
 //
 //	noddanas serve                 run the server (default)
 //	noddanas migrate               apply database migrations and exit
-//	noddanas keygen [id]           print a new encryption keyring line
-//	noddanas set-quota EMAIL SIZE  set a user's storage quota (e.g. 50GiB)
+//	noddanas set-quota EMAIL SIZE  set a user's personal storage quota (e.g. 50GiB)
 //	noddanas healthcheck           probe the local server (for container HEALTHCHECK)
 //	noddanas version               print the version
 package main
@@ -23,7 +22,6 @@ import (
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/blobcrypt"
 	"github.com/woah-buddy/NoddaNAS/internal/config"
 	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
@@ -45,15 +43,6 @@ func main() {
 		err = serve()
 	case "migrate":
 		err = migrate()
-	case "keygen":
-		id := "k" + time.Now().UTC().Format("20060102")
-		if len(os.Args) > 2 {
-			id = os.Args[2]
-		}
-		var line string
-		if line, err = blobcrypt.GenerateKeyLine(id); err == nil {
-			fmt.Println(line)
-		}
 	case "set-quota":
 		err = setQuota(os.Args[2:])
 	case "healthcheck":
@@ -61,7 +50,7 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	default:
-		err = fmt.Errorf("unknown command %q (try: serve, migrate, keygen, set-quota, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "noddanas:", err)
@@ -77,26 +66,6 @@ func newLogger(level string) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 }
 
-// loadKeyring reads the KEK keyring and refuses to start if the file is
-// readable by other users: it is the one secret that unlocks every file.
-func loadKeyring(path string, log *slog.Logger) (*blobcrypt.Keyring, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("keyring: %w (generate one with: noddanas keygen)", err)
-	}
-	if st.Mode().Perm()&0o007 != 0 {
-		return nil, fmt.Errorf("keyring %s is world-accessible (mode %v); restrict it to 0400 or 0440", path, st.Mode().Perm())
-	}
-	if st.Mode().Perm()&0o070 != 0 {
-		log.Warn("keyring file is group-readable; prefer mode 0400", "path", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return blobcrypt.ParseKeyring(data)
-}
-
 func serve() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -107,10 +76,6 @@ func serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	keys, err := loadKeyring(cfg.KeyringFile, log)
-	if err != nil {
-		return err
-	}
 	store, err := postgres.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -126,11 +91,22 @@ func serve() error {
 		return err
 	}
 
-	svc := service.New(store, blobs, keys, cfg.Service, log)
-	am := auth.NewManager(store, svc, cfg.Auth, auth.NewOIDC(cfg.OIDC))
-	if len(cfg.OIDC.AllowedGroups) == 0 && len(cfg.OIDC.AllowedEmailDomains) == 0 {
-		log.Warn("no OIDC access policy set: every account your identity provider authenticates can sign in " +
-			"(set NODDANAS_OIDC_ALLOWED_GROUPS or NODDANAS_OIDC_ALLOWED_EMAIL_DOMAINS)")
+	svc := service.New(store, blobs, cfg.Service, log)
+	var oidc *auth.OIDC
+	var saml *auth.SAML
+	if cfg.OIDC != nil {
+		oidc = auth.NewOIDC(*cfg.OIDC)
+	}
+	if cfg.SAML != nil {
+		saml = auth.NewSAML(*cfg.SAML)
+		if !cfg.SAML.TrustEmail {
+			log.Info("SAML emails are not treated as verified; set NODDANAS_SAML_TRUST_EMAIL=true if your IdP verifies them (needed for sharing by email)")
+		}
+	}
+	am := auth.NewManager(store, svc, cfg.Auth, oidc, saml)
+	if cfg.Policy.Open() {
+		log.Warn("no sign-in policy set: every account your identity provider authenticates can sign in " +
+			"(set NODDANAS_ALLOWED_GROUPS or NODDANAS_ALLOWED_EMAIL_DOMAINS)")
 	}
 	api := httpapi.New(svc, am, httpapi.Config{
 		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV,
@@ -214,10 +190,6 @@ func setQuota(args []string) error {
 		return fmt.Errorf("configuration:\n%w", err)
 	}
 	log := newLogger("warn")
-	keys, err := loadKeyring(cfg.KeyringFile, log)
-	if err != nil {
-		return err
-	}
 	store, err := postgres.Open(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -227,8 +199,8 @@ func setQuota(args []string) error {
 	if err != nil {
 		return err
 	}
-	svc := service.New(store, blobs, keys, cfg.Service, log)
-	if err := svc.SetQuotaByEmail(context.Background(), args[0], size); err != nil {
+	svc := service.New(store, blobs, cfg.Service, log)
+	if err := svc.SetUserQuotaByEmail(context.Background(), args[0], size); err != nil {
 		return err
 	}
 	fmt.Printf("quota for %s set to %d bytes\n", args[0], size)

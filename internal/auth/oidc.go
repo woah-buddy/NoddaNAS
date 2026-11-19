@@ -28,13 +28,35 @@ type OIDCConfig struct {
 	RedirectURL  string // e.g. https://files.example.com/auth/callback
 	Scopes       []string
 
-	// Access policy. If both are empty, anyone the IdP authenticates may
-	// sign in, which is only appropriate for an IdP you control.
-	AllowedGroups       []string // require one of these in the groups claim
-	GroupsClaim         string   // defaults to "groups"
-	AllowedEmailDomains []string // require a verified email in one of these domains
+	GroupsClaim string // claim holding group names; defaults to "groups"
+	Policy      Policy
 
 	PostLogoutRedirectURL string
+}
+
+// Policy restricts who may sign in. If both lists are empty, anyone the IdP
+// authenticates may sign in, which is only appropriate for an IdP you control.
+type Policy struct {
+	AllowedGroups       []string // require one of these groups
+	AllowedEmailDomains []string // require a verified email in one of these domains
+}
+
+// Open reports whether the policy admits everyone.
+func (p Policy) Open() bool { return len(p.AllowedGroups) == 0 && len(p.AllowedEmailDomains) == 0 }
+
+// Check applies the policy to an asserted identity.
+func (p Policy) Check(id service.Identity) error {
+	if len(p.AllowedGroups) > 0 &&
+		!slices.ContainsFunc(id.Groups, func(g string) bool { return slices.Contains(p.AllowedGroups, g) }) {
+		return ErrNotAllowed
+	}
+	if len(p.AllowedEmailDomains) > 0 {
+		_, domainPart, ok := strings.Cut(strings.ToLower(id.Email), "@")
+		if !id.EmailVerified || !ok || !slices.Contains(p.AllowedEmailDomains, domainPart) {
+			return ErrNotAllowed
+		}
+	}
+	return nil
 }
 
 // OIDC is a lazily-initialized OIDC client. Discovery happens on first use,
@@ -111,6 +133,7 @@ func (m *Manager) BeginLogin(ctx context.Context, returnTo string) (string, *htt
 	token := secure.NewToken()
 	req := &LoginRequest{
 		TokenHash: secure.HashToken(secure.PurposeLogin, token),
+		Kind:      "oidc",
 		State:     secure.NewToken(), // CSRF protection for the callback
 		Nonce:     secure.NewToken(), // binds the ID token to this flow (replay protection)
 		Verifier:  oauth2.GenerateVerifier(),
@@ -154,7 +177,7 @@ func (m *Manager) CompleteLogin(r *http.Request) (*domain.User, string, error) {
 	}
 	// Consumed atomically: a login request can complete at most once.
 	req, err := m.store.ConsumeLoginRequest(ctx, secure.HashToken(secure.PurposeLogin, c.Value), m.now())
-	if err != nil {
+	if err != nil || req.Kind != "oidc" {
 		return nil, "", fmt.Errorf("%w (unknown or expired login request)", ErrLoginFailed)
 	}
 	q := r.URL.Query()
@@ -192,8 +215,9 @@ func (m *Manager) CompleteLogin(r *http.Request) (*domain.User, string, error) {
 		Email:         claimString(claims, "email"),
 		EmailVerified: claimBool(claims, "email_verified"),
 		Name:          firstNonEmpty(claimString(claims, "name"), claimString(claims, "preferred_username")),
+		Groups:        claimStrings(claims, m.oidc.cfg.GroupsClaim),
 	}
-	if err := m.oidc.checkPolicy(claims, id); err != nil {
+	if err := m.oidc.cfg.Policy.Check(id); err != nil {
 		return nil, "", err
 	}
 	u, err := m.svc.LoginUser(ctx, id)
@@ -206,23 +230,6 @@ func (m *Manager) CompleteLogin(r *http.Request) (*domain.User, string, error) {
 // ErrNotAllowed is shown when the IdP authenticated someone who is not
 // permitted to use this NoddaNAS instance.
 var ErrNotAllowed = domain.E(domain.CodeForbidden, "your account is not permitted to use this service")
-
-func (o *OIDC) checkPolicy(claims map[string]json.RawMessage, id service.Identity) error {
-	if len(o.cfg.AllowedGroups) > 0 {
-		var groups []string
-		_ = json.Unmarshal(claims[o.cfg.GroupsClaim], &groups)
-		if !slices.ContainsFunc(groups, func(g string) bool { return slices.Contains(o.cfg.AllowedGroups, g) }) {
-			return ErrNotAllowed
-		}
-	}
-	if len(o.cfg.AllowedEmailDomains) > 0 {
-		_, domainPart, ok := strings.Cut(strings.ToLower(id.Email), "@")
-		if !id.EmailVerified || !ok || !slices.Contains(o.cfg.AllowedEmailDomains, domainPart) {
-			return ErrNotAllowed
-		}
-	}
-	return nil
-}
 
 // LogoutURL returns the IdP's RP-initiated logout URL, or "" if the IdP
 // does not support it.
@@ -244,6 +251,18 @@ func (m *Manager) LogoutURL(ctx context.Context) string {
 	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// claimStrings reads a claim that is a list of strings (or a single string).
+func claimStrings(c map[string]json.RawMessage, k string) []string {
+	var list []string
+	if json.Unmarshal(c[k], &list) == nil {
+		return list
+	}
+	if s := claimString(c, k); s != "" {
+		return []string{s}
+	}
+	return nil
 }
 
 func claimString(c map[string]json.RawMessage, k string) string {

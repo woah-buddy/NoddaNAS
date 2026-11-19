@@ -1,42 +1,37 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"io"
-	"mime"
-	"path"
-	"strings"
 
-	"github.com/woah-buddy/NoddaNAS/internal/blobcrypt"
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
 	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/validate"
 )
 
-// UploadRequest describes file content arriving from a client. Either
-// NodeID (new version of an existing file) or ParentID+Name (new file) is set.
+// UploadRequest describes an end-to-end encrypted container arriving from a
+// client. Either NewID+ParentID+Entry (a new file) or NodeID (a new version
+// of an existing file) is set.
 type UploadRequest struct {
-	ParentID  string
-	Name      string
-	Overwrite bool // if a file with Name exists, add a version instead of failing
+	ParentID string
+	NewID    string
+	Entry    EntryFields
 
 	NodeID   string
-	Revision int64 // optional: expected current revision of NodeID
+	Revision int64
 
-	Size        int64  // declared size in bytes, or -1 if unknown
-	SHA256      string // optional declared digest (hex); verified if given
-	ContentType string
+	Size int64 // declared Content-Length, or -1 if unknown
 }
 
-// uploadTarget is where an upload will land, resolved and authorized.
 type uploadTarget struct {
 	existing *domain.Node // nil for a new file
-	parent   *domain.Node // for new files
-	name     string
-	ownerID  string
+	parent   *domain.Node
+	space    *domain.Space
 }
 
 func (s *Service) resolveUploadTarget(ctx context.Context, p Principal, req *UploadRequest) (*uploadTarget, error) {
@@ -48,10 +43,12 @@ func (s *Service) resolveUploadTarget(ctx context.Context, p Principal, req *Upl
 		if a.node.Kind != domain.KindFile {
 			return nil, domain.E(domain.CodeInvalid, "not a file")
 		}
-		return &uploadTarget{existing: a.node, name: a.node.Name, ownerID: a.node.OwnerID}, nil
+		return &uploadTarget{existing: a.node, space: a.space}, nil
 	}
-	name, err := validate.Name(req.Name)
-	if err != nil {
+	if err := validate.ID(req.NewID); err != nil {
+		return nil, err
+	}
+	if err := req.Entry.validate(true); err != nil {
 		return nil, err
 	}
 	a, err := s.authorize(ctx, p, req.ParentID, domain.PermWrite)
@@ -64,33 +61,22 @@ func (s *Service) resolveUploadTarget(ctx context.Context, p Principal, req *Upl
 	if len(a.chain) >= s.cfg.MaxDepth {
 		return nil, errTooDeep
 	}
-	t := &uploadTarget{parent: a.node, name: name, ownerID: a.node.OwnerID}
-	existing, err := s.store.GetChildByName(ctx, a.node.ID, validate.NameKey(name))
-	switch {
-	case errors.Is(err, domain.ErrNotFound):
-		return t, nil
-	case err != nil:
+	if _, err := s.store.GetChildByHash(ctx, a.node.ID, req.Entry.NameHash); err == nil {
+		return nil, s.nameConflict(ctx, domain.ErrConflict, a.node.ID, req.Entry.NameHash)
+	} else if !errors.Is(err, domain.ErrNotFound) {
 		return nil, err
-	case existing.Kind != domain.KindFile:
-		return nil, domain.E(domain.CodeConflict, "a folder with that name already exists")
-	case !req.Overwrite:
-		return nil, &domain.Error{Code: domain.CodeConflict, Message: "a file with that name already exists",
-			Detail: map[string]string{"existingId": existing.ID}}
 	}
-	t.existing = existing
-	return t, nil
+	return &uploadTarget{parent: a.node, space: a.space}, nil
 }
 
-// errOverLimit signals that a body exceeded its allowed size.
-var errOverLimit = errors.New("body exceeds allowed size")
-
-// limitReader fails (rather than silently truncating like io.LimitReader)
-// once more than n bytes have been read.
+// limitReader fails (rather than silently truncating) past n bytes.
 type limitReader struct {
 	r    io.Reader
 	n    int64
 	read int64
 }
+
+var errOverLimit = errors.New("body exceeds the container's declared size")
 
 func (l *limitReader) Read(p []byte) (int, error) {
 	if int64(len(p)) > l.n-l.read+1 {
@@ -104,62 +90,39 @@ func (l *limitReader) Read(p []byte) (int, error) {
 	return k, err
 }
 
-// Upload stores new file content. The bytes are streamed (never buffered
-// whole), size-limited, hashed and encrypted on the way to the blob store.
+// Upload stores a client-encrypted container. The server cannot decrypt
+// it; it checks the container's structure (version, algorithm, owning space)
+// and exact length, hashes it, and charges its size to the space's quota.
 func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, body io.Reader) (*domain.Node, error) {
-	if req.SHA256 != "" {
-		if err := validate.SHA256Hex(req.SHA256); err != nil {
-			return nil, err
-		}
-	}
-	if req.Size > s.cfg.MaxFileSize {
-		return nil, domain.E(domain.CodeTooLarge, "file exceeds the maximum size")
-	}
 	target, err := s.resolveUploadTarget(ctx, p, &req)
 	if err != nil {
 		return nil, err
 	}
-
-	// Quota pre-check. This is advisory (it saves streaming gigabytes only
-	// to be refused); the binding check is atomic, in CommitContent.
-	owner, err := s.store.GetUser(ctx, target.ownerID)
+	var head bytes.Buffer
+	prefix, err := e2ee.ParsePrefix(io.TeeReader(io.LimitReader(body, 12+e2ee.MaxHeaderLen), &head))
 	if err != nil {
-		return nil, err
+		return nil, domain.E(domain.CodeInvalid, "body is not a valid NoddaNAS encrypted container")
 	}
-	remaining := max(owner.QuotaBytes-owner.UsedBytes, 0)
-	if req.Size > remaining {
-		return nil, domain.E(domain.CodeQuota, "storage quota exceeded")
+	if prefix.Owner.Space != target.space.ID {
+		return nil, domain.E(domain.CodeInvalid, "the container is sealed to a different space")
 	}
-	limit, quotaBound := s.cfg.MaxFileSize, false
-	if remaining < limit {
-		limit, quotaBound = remaining, true
-	}
-	if req.Size >= 0 {
-		limit, quotaBound = req.Size, false
+	total := prefix.TotalSize()
+	switch {
+	case req.Size >= 0 && req.Size != total:
+		return nil, domain.E(domain.CodeInvalid, "Content-Length does not match the container's declared size")
+	case total > s.cfg.MaxFileSize:
+		return nil, domain.E(domain.CodeTooLarge, "file exceeds the maximum size")
+	case total > target.space.QuotaBytes-target.space.UsedBytes:
+		return nil, domain.E(domain.CodeQuota, "storage quota exceeded") // advisory; the binding check is atomic
 	}
 
 	blobKey := secure.NewID()
-	dek, wrapped, err := s.keys.NewDataKey(blobKey)
-	if err != nil {
-		return nil, err
-	}
-	lr := &limitReader{r: body, n: limit}
+	lr := &limitReader{r: io.MultiReader(&head, body), n: total}
 	h := sha256.New()
-	enc, err := blobcrypt.NewEncryptReader(io.TeeReader(lr, h), dek)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.blobs.Create(ctx, blobKey, enc); err != nil {
+	if _, err := s.blobs.Create(ctx, blobKey, io.TeeReader(lr, h)); err != nil {
 		_ = s.blobs.Delete(context.WithoutCancel(ctx), blobKey)
 		if errors.Is(err, errOverLimit) {
-			switch {
-			case req.Size >= 0:
-				return nil, domain.E(domain.CodeInvalid, "body is longer than the declared size")
-			case quotaBound:
-				return nil, domain.E(domain.CodeQuota, "storage quota exceeded")
-			default:
-				return nil, domain.E(domain.CodeTooLarge, "file exceeds the maximum size")
-			}
+			return nil, domain.E(domain.CodeInvalid, "body is longer than the container's declared size")
 		}
 		return nil, err
 	}
@@ -167,42 +130,34 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 		_ = s.blobs.Delete(context.WithoutCancel(ctx), blobKey)
 		return nil, err
 	}
-	digest := hex.EncodeToString(h.Sum(nil))
-	if req.Size >= 0 && lr.read != req.Size {
-		return fail(domain.E(domain.CodeInvalid, "body is shorter than the declared size"))
+	if lr.read != total {
+		return fail(domain.E(domain.CodeInvalid, "body is shorter than the container's declared size"))
 	}
-	if req.SHA256 != "" && !secure.Equal(digest, req.SHA256) {
-		return fail(domain.E(domain.CodeInvalid, "content does not match the declared SHA-256"))
+	// Re-authorize: the upload may have taken minutes, and access may have
+	// been revoked (or the folder trashed) while bytes were in flight.
+	if target, err = s.resolveUploadTarget(ctx, p, &req); err != nil {
+		return fail(err)
 	}
-
-	// Re-authorize: an upload can take minutes, and the caller's access may
-	// have been revoked (or the folder trashed) while bytes were in flight.
-	target, err = s.resolveUploadTarget(ctx, p, &req)
+	now := s.now()
+	v := &domain.Version{ID: secure.NewID(), SpaceID: target.space.ID, BlobKey: blobKey, Size: total,
+		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID}
+	n, err := s.commit(ctx, p, target, &req, v)
 	if err != nil {
 		return fail(err)
 	}
-	ctype := detectContentType(req.ContentType, target.name)
-	v := &domain.Version{
-		ID: secure.NewID(), OwnerID: target.ownerID, BlobKey: blobKey, WrappedKey: wrapped,
-		Size: lr.read, SHA256: digest, CreatedAt: s.now(), CreatedBy: p.UserID,
-	}
-	n, err := s.commit(ctx, p, target, v, ctype, req.Revision)
-	if err != nil {
-		return fail(err)
-	}
-	s.audit(ctx, "file.upload", p, "node", n.ID, "version", v.ID, "size", v.Size, "owner", target.ownerID)
+	s.audit(ctx, "file.upload", p, "node", n.ID, "version", v.ID, "size", v.Size, "space", v.SpaceID)
 	s.pruneVersions(ctx, n)
 	return n, nil
 }
 
-func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, v *domain.Version, ctype string, rev int64) (*domain.Node, error) {
+func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req *UploadRequest, v *domain.Version) (*domain.Node, error) {
 	var n domain.Node
 	isNew := t.existing == nil
+	rev := req.Revision
 	if isNew {
-		n = domain.Node{
-			ID: secure.NewID(), OwnerID: t.ownerID, ParentID: t.parent.ID, Name: t.name, Kind: domain.KindFile,
-			CreatedAt: v.CreatedAt, Revision: 1,
-		}
+		n = domain.Node{ID: req.NewID, SpaceID: t.space.ID, ParentID: t.parent.ID, Kind: domain.KindFile,
+			NameEnc: req.Entry.NameEnc, NameHash: req.Entry.NameHash, WrappedKey: req.Entry.WrappedKey,
+			CreatedAt: v.CreatedAt, CreatedBy: p.UserID, Revision: 1}
 	} else {
 		n = *t.existing
 		if rev == 0 {
@@ -210,27 +165,17 @@ func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, v *d
 		}
 	}
 	v.NodeID = n.ID
-	n.Size, n.SHA256, n.VersionID, n.ContentType = v.Size, v.SHA256, v.ID, ctype
-	n.ModifiedAt, n.ModifiedBy = v.CreatedAt, p.UserID
-	if err := s.store.CommitContent(ctx, &n, validate.NameKey(n.Name), v, isNew, rev); err != nil {
-		return nil, nameConflict(err)
+	n.Size, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy = v.Size, v.SHA256, v.ID, v.CreatedAt, p.UserID
+	if err := s.store.CommitContent(ctx, &n, v, isNew, rev); err != nil {
+		if isNew {
+			return nil, s.nameConflict(ctx, err, n.ParentID, n.NameHash)
+		}
+		return nil, err
 	}
 	return &n, nil
 }
 
-func detectContentType(declared, name string) string {
-	ct := validate.ContentType(declared)
-	if ct == "application/octet-stream" {
-		if byExt := mime.TypeByExtension(strings.ToLower(path.Ext(name))); byExt != "" {
-			ct = validate.ContentType(byExt)
-		}
-	}
-	return ct
-}
-
-// pruneVersions keeps at most MaxVersions versions per file. The database
-// row (which holds the only copy of the data key) is deleted first, so even
-// if deleting the blob then fails, the leftover ciphertext is unreadable.
+// pruneVersions keeps at most MaxVersions versions per file.
 func (s *Service) pruneVersions(ctx context.Context, n *domain.Node) {
 	vs, err := s.store.ListVersions(ctx, n.ID)
 	if err != nil || len(vs) <= s.cfg.MaxVersions {
@@ -248,21 +193,18 @@ func (s *Service) pruneVersions(ctx context.Context, n *domain.Node) {
 	}
 	for _, v := range old {
 		if err := s.blobs.Delete(ctx, v.BlobKey); err != nil {
-			s.log.WarnContext(ctx, "orphaned blob (already crypto-shredded)", "blob", v.BlobKey, "err", err)
+			s.log.WarnContext(ctx, "orphaned blob", "blob", v.BlobKey, "err", err)
 		}
 	}
 }
 
-// Content is an open, decrypting reader over one version of a file.
+// Content is one stored container, open for reading. It is ciphertext: the
+// client decrypts it.
 type Content struct {
 	Node    *domain.Node
 	Version *domain.Version
-	io.ReadSeeker
-	closer io.Closer
+	io.ReadSeekCloser
 }
-
-// Close releases the underlying blob.
-func (c *Content) Close() error { return c.closer.Close() }
 
 func (s *Service) openVersion(ctx context.Context, n *domain.Node, versionID string) (*Content, error) {
 	if versionID == "" {
@@ -275,23 +217,14 @@ func (s *Service) openVersion(ctx context.Context, n *domain.Node, versionID str
 	if err != nil {
 		return nil, err
 	}
-	dek, err := s.keys.Unwrap(v.WrappedKey, v.BlobKey)
-	if err != nil {
-		return nil, err
-	}
 	rc, err := s.blobs.Open(ctx, v.BlobKey)
 	if err != nil {
 		return nil, err
 	}
-	r, err := blobcrypt.NewReader(rc, dek, v.Size)
-	if err != nil {
-		rc.Close()
-		return nil, err
-	}
-	return &Content{Node: n, Version: v, ReadSeeker: r, closer: rc}, nil
+	return &Content{Node: n, Version: v, ReadSeekCloser: rc}, nil
 }
 
-// OpenContent opens a file version (current if versionID is "") for reading.
+// OpenContent opens a file version (current if versionID is "").
 func (s *Service) OpenContent(ctx context.Context, p Principal, nodeID, versionID string) (*Content, error) {
 	a, err := s.authorize(ctx, p, nodeID, domain.PermRead)
 	if err != nil {
@@ -319,8 +252,9 @@ func (s *Service) ListVersions(ctx context.Context, p Principal, nodeID string) 
 	return s.store.ListVersions(ctx, nodeID)
 }
 
-// RestoreVersion makes an old version current again by storing it as a new
-// version (re-encrypted under a fresh data key). History is never rewritten.
+// RestoreVersion makes an old version current again by storing a copy of
+// its container as a new version. The container is unchanged (still
+// encrypted, still decryptable with the file's key); history is preserved.
 func (s *Service) RestoreVersion(ctx context.Context, p Principal, nodeID, versionID string) (*domain.Node, error) {
 	a, err := s.authorize(ctx, p, nodeID, domain.PermWrite)
 	if err != nil {
@@ -334,10 +268,7 @@ func (s *Service) RestoreVersion(ctx context.Context, p Principal, nodeID, versi
 		return nil, err
 	}
 	defer old.Close()
-	n, err := s.Upload(ctx, p, UploadRequest{
-		NodeID: nodeID, Revision: a.node.Revision, Size: old.Version.Size, SHA256: old.Version.SHA256,
-		ContentType: a.node.ContentType,
-	}, old)
+	n, err := s.Upload(ctx, p, UploadRequest{NodeID: nodeID, Revision: a.node.Revision, Size: old.Version.Size}, old)
 	if err == nil {
 		s.audit(ctx, "file.version_restore", p, "node", nodeID, "from_version", versionID)
 	}

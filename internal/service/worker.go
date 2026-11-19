@@ -37,7 +37,49 @@ func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error
 		}
 		purged++
 	}
+	for ctx.Err() == nil {
+		sp, err := s.store.ClaimDeletedSpace(ctx, purgeLease)
+		if errors.Is(err, domain.ErrNotFound) {
+			break
+		} else if err != nil {
+			return purged, err
+		}
+		if err := s.purgeSpace(ctx, sp); err != nil {
+			s.log.ErrorContext(ctx, "space purge failed", "space", sp.ID, "err", err)
+			break
+		}
+	}
 	return purged, nil
+}
+
+// purgeSpace permanently deletes a deleted team space: blobs first, then
+// rows, so an interrupted purge is simply resumed.
+func (s *Service) purgeSpace(ctx context.Context, sp *domain.Space) error {
+	for ctx.Err() == nil {
+		versions, err := s.store.SpaceVersions(ctx, sp.ID, 200)
+		if err != nil {
+			return err
+		}
+		if len(versions) == 0 {
+			break
+		}
+		for _, v := range versions {
+			if err := s.blobs.Delete(ctx, v.BlobKey); err != nil {
+				return err
+			}
+		}
+		if err := s.store.DeleteVersions(ctx, versions); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.store.DeleteSpace(ctx, sp.ID); err != nil {
+		return err
+	}
+	s.log.InfoContext(ctx, "audit", "event", "space.purged", "space", sp.ID)
+	return nil
 }
 
 // purge permanently deletes a node and everything under it. Each step is
@@ -68,7 +110,7 @@ func (s *Service) purge(ctx context.Context, n *domain.Node) error {
 	if err := s.store.DeleteSubtree(ctx, n.ID); err != nil {
 		return err
 	}
-	s.log.InfoContext(ctx, "audit", "event", "node.purged", "node", n.ID, "owner", n.OwnerID)
+	s.log.InfoContext(ctx, "audit", "event", "node.purged", "node", n.ID, "space", n.SpaceID)
 	return nil
 }
 

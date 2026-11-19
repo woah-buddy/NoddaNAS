@@ -12,8 +12,8 @@ import (
 // bearer secrets are stored; see internal/secure.HashToken.
 
 func (s *Store) CreateLoginRequest(ctx context.Context, r *auth.LoginRequest) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO login_requests (token_hash, state, nonce, pkce_verifier, return_to, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6)`, r.TokenHash, r.State, r.Nonce, r.Verifier, r.ReturnTo, r.ExpiresAt)
+	_, err := s.db.Exec(ctx, `INSERT INTO login_requests (token_hash, kind, state, nonce, pkce_verifier, return_to, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`, r.TokenHash, r.Kind, r.State, r.Nonce, r.Verifier, r.ReturnTo, r.ExpiresAt)
 	return mapErr(err)
 }
 
@@ -22,8 +22,8 @@ func (s *Store) CreateLoginRequest(ctx context.Context, r *auth.LoginRequest) er
 func (s *Store) ConsumeLoginRequest(ctx context.Context, tokenHash string, now time.Time) (*auth.LoginRequest, error) {
 	r := &auth.LoginRequest{}
 	err := s.db.QueryRow(ctx, `DELETE FROM login_requests WHERE token_hash=$1
-		RETURNING token_hash, state, nonce, pkce_verifier, return_to, expires_at`, tokenHash).
-		Scan(&r.TokenHash, &r.State, &r.Nonce, &r.Verifier, &r.ReturnTo, &r.ExpiresAt)
+		RETURNING token_hash, kind, state, nonce, pkce_verifier, return_to, expires_at`, tokenHash).
+		Scan(&r.TokenHash, &r.Kind, &r.State, &r.Nonce, &r.Verifier, &r.ReturnTo, &r.ExpiresAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}

@@ -1,6 +1,11 @@
 // Package domain holds NoddaNAS's core types. It has no dependencies on
 // HTTP, databases or storage backends, so the security rules built on top of
 // it can be read and tested on their own.
+//
+// With end-to-end encryption the server never holds plaintext names or
+// usable keys. Fields such as NameEnc, WrappedKey or Grant are opaque
+// client-produced ciphertext (see docs/E2EE.md); the server only stores,
+// relays and authorizes access to them.
 package domain
 
 import "time"
@@ -13,62 +18,172 @@ const (
 	KindFolder Kind = "folder"
 )
 
-// Node is a file or folder. The tree lives in the metadata store; blob
-// storage only ever sees opaque random keys, never user-supplied names.
+// Node is a file or folder in a space.
 type Node struct {
-	ID          string
-	OwnerID     string // tenant boundary: the user whose quota pays for this node
-	ParentID    string // empty for a user's root folder
-	Name        string
-	Kind        Kind
-	Size        int64
-	ContentType string
-	SHA256      string // lowercase hex of the current content (files only)
-	VersionID   string // current version (files only)
-	CreatedAt   time.Time
-	ModifiedAt  time.Time
-	ModifiedBy  string
-	Revision    int64 // incremented on every change; used for optimistic concurrency
-	TrashedAt   *time.Time
-}
-
-// IsRoot reports whether the node is a user's root folder.
-func (n *Node) IsRoot() bool { return n.ParentID == "" }
-
-// Version is one stored revision of a file's content.
-type Version struct {
-	ID         string
-	NodeID     string
-	OwnerID    string
-	BlobKey    string
-	WrappedKey string // the content's data key, encrypted under the server's key-encryption key
-	Size       int64
-	SHA256     string
+	ID         string // chosen by the client (bound into its encryption)
+	SpaceID    string // tenant boundary: the space whose quota pays for it
+	ParentID   string // empty for a space's root folder
+	Kind       Kind
+	NameEnc    string // client-encrypted name (empty for roots)
+	NameHash   string // client-computed keyed hash, unique per folder
+	WrappedKey string // node key wrapped under the parent's key (empty for roots)
+	Size       int64  // current container size (files)
+	SHA256     string // current container's SHA-256 (files)
+	VersionID  string
 	CreatedAt  time.Time
 	CreatedBy  string
+	ModifiedAt time.Time
+	ModifiedBy string
+	Revision   int64
+	TrashedAt  *time.Time
+	TrashedBy  string
+	RestoreKey string // node key + name sealed to the space, for restoring from trash
+	RestoreSig string
 }
 
-// User is a NoddaNAS account, provisioned just-in-time on first login.
+// IsRoot reports whether the node is a space's root folder.
+func (n *Node) IsRoot() bool { return n.ParentID == "" }
+
+// Version is one stored, client-encrypted container.
+type Version struct {
+	ID        string
+	NodeID    string
+	SpaceID   string
+	BlobKey   string
+	Size      int64
+	SHA256    string
+	CreatedAt time.Time
+	CreatedBy string
+}
+
+// User is a NoddaNAS account, provisioned just-in-time on first sign-in.
 type User struct {
-	ID          string // internal random ID; never the IdP subject
-	Issuer      string // OIDC issuer
-	Subject     string // OIDC subject, unique per issuer
-	Email       string // set only if the IdP asserted it as verified
-	DisplayName string
+	ID              string // internal random ID; never the IdP subject
+	Issuer          string // OIDC issuer or SAML IdP entity ID
+	Subject         string // OIDC subject or SAML NameID
+	Email           string // set only if the IdP asserted it as verified
+	DisplayName     string
+	Admin           bool
+	PersonalSpaceID string
+	Keys            *PublicKeys // nil until the user sets up encryption
+	KeyBundle       string      // opaque client key bundle (JSON)
+	CreatedAt       time.Time
+}
+
+// PublicKeys are a user's published E2EE keys (base64url).
+type PublicKeys struct {
+	Enc     string
+	Sig     string
+	SelfSig string
+}
+
+// SpaceKind distinguishes personal spaces from team folders.
+type SpaceKind string
+
+const (
+	SpacePersonal SpaceKind = "personal"
+	SpaceTeam     SpaceKind = "team"
+)
+
+// Space is an independently owned tree with its own quota.
+type Space struct {
+	ID          string
+	Kind        SpaceKind
+	OwnerUserID string // personal spaces only
 	RootID      string
+	NameEnc     string // team spaces only, encrypted under the space secret
+	PublicKey   string // space X25519 public key
+	KeySig      string // creator's signature over PublicKey
+	KeySigner   string
+	RootKey     string // root node key wrapped under the space secret
 	QuotaBytes  int64
 	UsedBytes   int64
 	CreatedAt   time.Time
+	CreatedBy   string
+	DeletedAt   *time.Time
 }
 
-// Permission is what a share grants. Owners implicitly hold every permission.
+// HasKeys reports whether the space's encryption keys have been set up.
+func (s *Space) HasKeys() bool { return s.PublicKey != "" }
+
+// Role is a member's role in a team space.
+type Role string
+
+const (
+	RoleNone   Role = ""
+	RoleRead   Role = "read"
+	RoleWrite  Role = "write"
+	RoleManage Role = "manage"
+)
+
+// Permission converts a space role into a node permission.
+func (r Role) Permission() Permission {
+	switch r {
+	case RoleRead:
+		return PermRead
+	case RoleWrite:
+		return PermWrite
+	case RoleManage:
+		return PermOwner
+	}
+	return PermNone
+}
+
+// Max returns the stronger of two roles.
+func (r Role) Max(o Role) Role {
+	if r.Permission().Rank() >= o.Permission().Rank() {
+		return r
+	}
+	return o
+}
+
+// Valid reports whether r is a real role.
+func (r Role) Valid() bool { return r == RoleRead || r == RoleWrite || r == RoleManage }
+
+// Membership is a user's relationship to a team space.
+type Membership struct {
+	SpaceID    string
+	UserID     string
+	DirectRole Role   // explicitly added
+	GroupRoles []Role // via identity-provider group mappings
+	Grant      string // space secret sealed to the user (empty until granted)
+	GrantSig   string
+	GrantedBy  string
+	AddedAt    time.Time
+}
+
+// Role is the effective role: the strongest of direct and group roles.
+func (m *Membership) Role() Role {
+	r := m.DirectRole
+	for _, g := range m.GroupRoles {
+		r = r.Max(g)
+	}
+	return r
+}
+
+// Member is a membership plus the member's public identity.
+type Member struct {
+	Membership
+	DisplayName string
+	Email       string
+	Keys        *PublicKeys
+}
+
+// GroupMapping maps an identity-provider group to a team space role.
+type GroupMapping struct {
+	SpaceID string
+	Group   string
+	Role    Role
+}
+
+// Permission is what a caller may do with a node.
 type Permission string
 
 const (
 	PermNone  Permission = ""
 	PermRead  Permission = "read"
 	PermWrite Permission = "write" // implies read
-	PermOwner Permission = "owner" // never stored on a share
+	PermOwner Permission = "owner" // full control: share, link, manage
 )
 
 // Allows reports whether p is at least as strong as want.
@@ -100,23 +215,26 @@ const (
 
 // Share grants access to a node and everything beneath it.
 type Share struct {
-	ID         string
+	ID         string // chosen by the client (bound into its encryption)
 	Kind       ShareKind
 	NodeID     string
-	OwnerID    string
+	SpaceID    string
 	CreatedBy  string
 	Permission Permission
 	CreatedAt  time.Time
 
-	// User shares.
+	// User shares: node key + name sealed to the recipient, signed by the sharer.
 	RecipientID string
+	SealedKey   string
+	ShareSig    string
 
-	// Link shares. The token itself is never stored, only its SHA-256, so a
-	// leaked database does not leak working links.
+	// Link shares. The token is stored only as a hash; the key that decrypts
+	// (LinkKey) needs the link secret that lives in the URL fragment.
 	TokenHash      string
-	PasswordHash   string // argon2id PHC string; empty if the link has no password
+	LinkKey        string
+	PasswordHash   string
 	ExpiresAt      *time.Time
-	MaxDownloads   int64 // 0 = unlimited
+	MaxDownloads   int64
 	Downloads      int64
 	FailedAttempts int64
 	LockedUntil    *time.Time
@@ -132,14 +250,8 @@ func (s *Share) Locked(now time.Time) bool {
 	return s.LockedUntil != nil && now.Before(*s.LockedUntil)
 }
 
-// TrashEntry is a trashed node and when it will be purged automatically.
-type TrashEntry struct {
-	Node      *Node
-	ExpiresAt time.Time
-}
-
 // AppPassword is a revocable credential for non-browser clients (WebDAV,
-// CLI, sync tools). Only a hash of the secret is stored.
+// CLI). Only a hash of the secret is stored.
 type AppPassword struct {
 	ID         string
 	UserID     string
