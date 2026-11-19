@@ -23,7 +23,9 @@ lint:
 	go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 -format json ./... > govulncheck.json; \
+	  s=$$?; [ $$s -eq 0 ] || [ $$s -eq 3 ] || exit $$s
+	go run ./tools/vulngate -exceptions .github/govulncheck-exceptions.json < govulncheck.json
 
 gosec:
 	go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -exclude-dir=internal/testutil ./...

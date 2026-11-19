@@ -40,3 +40,7 @@ and an update to the threat model.
 12. Bulk or destructive operations get one code path per scope (a user's links vs. every link):
     an empty or missing identifier must never widen the scope. Instance-wide actions require an
     administrator's interactive session, and each has a shell equivalent for break-glass use.
+13. A known vulnerability is never silenced. If govulncheck reports one that does not affect us
+    (for example a stale advisory record), add an entry to `.github/govulncheck-exceptions.json`
+    naming the exact advisory and module, with the evidence and an expiry at most 90 days away.
+    `tools/vulngate` enforces all of this and fails when an exception expires.

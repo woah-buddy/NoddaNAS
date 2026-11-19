@@ -17,3 +17,4 @@ secrets/
 .idea/
 .vscode/
 .DS_Store
+govulncheck.json

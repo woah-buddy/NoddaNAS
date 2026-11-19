@@ -1,0 +1,8 @@
+[
+  {
+    "id": "GO-2026-6909",
+    "module": "github.com/crewjam/saml",
+    "expires": "2026-12-31",
+    "reason": "Stale Go vulndb record (no fixed range yet; golang/vulndb#6909, CL 861981 pending). The upstream advisory GHSA-mvp6-372g-vf8r lists 0.5.2 as patched; we use v0.6.3, whose source binds NameID and statements to the SAML assertion namespace and rejects assertions without Subject or Conditions before using them. Our own code (internal/auth/saml.go) also refuses assertions without a NameID, and BaseID subjects are not accepted."
+  }
+]

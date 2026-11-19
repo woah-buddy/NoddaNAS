@@ -99,9 +99,17 @@ jobs:
           # version, but CI and scans must use a toolchain with security fixes.
           go-version: '1.26.x'
           check-latest: true
-      # Reachability-aware: fails only on vulnerabilities our code can actually reach.
+      # Reachability-aware: fails on vulnerabilities our code can actually reach,
+      # except reviewed, expiring exceptions in .github/govulncheck-exceptions.json.
+      # The gate fails closed if govulncheck errors or its output is unrecognized.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+        run: |
+          set +e
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 -format json ./... > govulncheck.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then echo "govulncheck failed (exit $status)"; exit "$status"; fi
+          go run ./tools/vulngate -exceptions .github/govulncheck-exceptions.json < govulncheck.json
       - name: gosec
         if: success() || failure() # report both scanners' findings in one run
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -exclude-dir=internal/testutil ./...
