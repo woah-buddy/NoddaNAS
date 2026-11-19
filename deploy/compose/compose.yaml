@@ -26,29 +26,64 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
     environment:
+      # Fixed by this setup, on purpose: the public URL is built from
+      # NODDANAS_HOST; the database URL and OIDC client secret are Docker
+      # secrets (secrets/); only Caddy's network may set X-Forwarded-For.
+      # Also fixed by omission: NoddaNAS listens on :8080 behind Caddy, which
+      # terminates TLS, and stores data in the noddanas-data volume at /data.
       NODDANAS_PUBLIC_URL: https://${NODDANAS_HOST:?set NODDANAS_HOST in .env}
       NODDANAS_DATABASE_URL_FILE: /run/secrets/database_url
-      # Sign-in: OIDC and/or SAML (configure at least one in .env).
+      NODDANAS_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      NODDANAS_TRUSTED_PROXIES: 172.30.0.0/24
+
+      # Every other setting comes from .env, named without the NODDANAS_
+      # prefix (see .env.example and docs/ADMIN_GUIDE.md section 7). Empty
+      # means the built-in default. internal/config's tests fail if a setting
+      # the server reads is missing here.
+      # Sign-in: OIDC and/or SAML (configure at least one).
       NODDANAS_OIDC_ISSUER: ${OIDC_ISSUER:-}
       NODDANAS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      NODDANAS_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      NODDANAS_OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-}
+      NODDANAS_OIDC_SCOPES: ${OIDC_SCOPES:-}
       NODDANAS_SAML_IDP_METADATA_URL: ${SAML_IDP_METADATA_URL:-}
+      NODDANAS_SAML_IDP_METADATA_FILE: ${SAML_IDP_METADATA_FILE:-}
+      NODDANAS_SAML_ENTITY_ID: ${SAML_ENTITY_ID:-}
+      NODDANAS_SAML_SP_KEY_FILE: ${SAML_SP_KEY_FILE:-}
+      NODDANAS_SAML_SP_CERT_FILE: ${SAML_SP_CERT_FILE:-}
       NODDANAS_SAML_TRUST_EMAIL: ${SAML_TRUST_EMAIL:-false}
+      NODDANAS_SAML_EMAIL_ATTRIBUTES: ${SAML_EMAIL_ATTRIBUTES:-}
+      NODDANAS_SAML_NAME_ATTRIBUTES: ${SAML_NAME_ATTRIBUTES:-}
+      NODDANAS_SAML_GROUP_ATTRIBUTES: ${SAML_GROUP_ATTRIBUTES:-}
+      # Who may sign in, and who administers.
       NODDANAS_ALLOWED_GROUPS: ${ALLOWED_GROUPS:-}
       NODDANAS_ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
       NODDANAS_ADMIN_GROUPS: ${ADMIN_GROUPS:-}
+      NODDANAS_TEAM_CREATION: ${TEAM_CREATION:-}
+      # Storage and limits.
       NODDANAS_DEFAULT_QUOTA: ${DEFAULT_QUOTA:-10GiB}
       NODDANAS_DEFAULT_TEAM_QUOTA: ${DEFAULT_TEAM_QUOTA:-50GiB}
-      # Optional branding (docs/THEMING.md); files live in ./branding.
+      NODDANAS_MAX_FILE_SIZE: ${MAX_FILE_SIZE:-}
+      NODDANAS_MAX_VERSIONS: ${MAX_VERSIONS:-}
+      NODDANAS_TRASH_RETENTION: ${TRASH_RETENTION:-}
+      # Sharing and sessions.
+      NODDANAS_LINK_DEFAULT_TTL: ${LINK_DEFAULT_TTL:-}
+      NODDANAS_LINK_MAX_TTL: ${LINK_MAX_TTL:-}
+      NODDANAS_SESSION_IDLE: ${SESSION_IDLE:-}
+      NODDANAS_SESSION_MAX_AGE: ${SESSION_MAX_AGE:-}
+      # Runtime.
+      NODDANAS_LOG_LEVEL: ${LOG_LEVEL:-}
+      NODDANAS_WEBDAV: ${WEBDAV:-}
+      NODDANAS_WORKER: ${WORKER:-}
+      NODDANAS_AUTO_MIGRATE: ${AUTO_MIGRATE:-}
+      # Branding (docs/THEMING.md); files live in ./branding.
       NODDANAS_BRAND_NAME: ${BRAND_NAME:-}
       NODDANAS_THEME_FILE: ${THEME_FILE:-}
       NODDANAS_BRAND_LOGO_FILE: ${BRAND_LOGO_FILE:-}
-      # Only Caddy (on the frontend network) may set X-Forwarded-For.
-      NODDANAS_TRUSTED_PROXIES: 172.30.0.0/24
     secrets: [database_url, oidc_client_secret]
     volumes:
       - noddanas-data:/data
       - ./branding:/etc/noddanas/branding:ro
+      - ./saml:/etc/noddanas/saml:ro
     networks: [frontend, backend]
     depends_on:
       postgres:

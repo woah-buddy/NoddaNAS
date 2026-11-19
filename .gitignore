@@ -8,6 +8,8 @@ coverage.*
 # Local runtime data and secrets: never commit these
 /data/
 secrets/
+deploy/compose/saml/*
+!deploy/compose/saml/README.md
 *.keyring
 .env
 .env.*

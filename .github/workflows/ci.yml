@@ -131,3 +131,80 @@ jobs:
         run: >
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2
           image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed noddanas:ci
+
+  # Brings up the real Docker Compose stack the way docs/ADMIN_GUIDE.md §3
+  # describes (secrets script, PostgreSQL, NoddaNAS, Caddy), then exercises
+  # settings, operator commands and the documented backup/restore commands.
+  compose:
+    name: Docker Compose stack (end to end)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/compose
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create secrets
+        run: sudo ../../scripts/init-secrets.sh
+      - name: compose.yaml is valid with the example settings
+        run: docker compose --env-file .env.example config --quiet
+      - name: Configure a throwaway instance
+        run: |
+          cat > .env <<'EOF'
+          NODDANAS_HOST=localhost
+          OIDC_ISSUER=https://idp.example.invalid
+          OIDC_CLIENT_ID=noddanas
+          ALLOWED_GROUPS=noddanas-users
+          ADMIN_GROUPS=noddanas-admins
+          TEAM_CREATION=false
+          MAX_VERSIONS=5
+          LOG_LEVEL=debug
+          EOF
+          docker compose config --quiet
+      - name: Start the stack
+        run: docker compose up -d --build --wait --wait-timeout 300
+      - name: Reachable through Caddy over HTTPS, hardened
+        run: |
+          code=000
+          for i in $(seq 1 30); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/readyz || true)
+            [ "$code" = 204 ] && break
+            sleep 2
+          done
+          test "$code" = 204
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/)" = 308
+          curl -sk https://localhost/api/v1/auth/methods | grep -q '"oidc":true'
+          curl -skI https://localhost/ | grep -qi '^content-security-policy:.*trusted-types'
+          if curl -skI -H 'Accept-Encoding: gzip, br, zstd' https://localhost/app.js | grep -qi '^content-encoding:'; then
+            echo "responses must not be compressed (BREACH)"; exit 1
+          fi
+      - name: Settings from .env reach the server; secrets stay files
+        run: |
+          env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose ps -q noddanas)")
+          echo "$env" | grep -qx 'NODDANAS_TEAM_CREATION=false'
+          echo "$env" | grep -qx 'NODDANAS_MAX_VERSIONS=5'
+          echo "$env" | grep -qx 'NODDANAS_LOG_LEVEL=debug'
+          if echo "$env" | grep -q '^NODDANAS_DATABASE_URL='; then
+            echo "the database URL must only be passed as a file"; exit 1
+          fi
+      - name: Operator commands run in the container
+        run: |
+          docker compose exec -T noddanas /noddanas verify-storage --hash
+          docker compose exec -T noddanas /noddanas revoke-sessions --all
+      - name: Documented backup and restore commands work (DISASTER_RECOVERY.md)
+        run: |
+          docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > "$RUNNER_TEMP/noddanas-db.dump"
+          test -s "$RUNNER_TEMP/noddanas-db.dump"
+          docker compose stop noddanas
+          docker compose exec -T postgres dropdb -U noddanas noddanas
+          docker compose exec -T postgres createdb -U noddanas noddanas
+          docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner < "$RUNNER_TEMP/noddanas-db.dump"
+          docker compose up -d --wait --wait-timeout 180
+          docker compose exec -T noddanas /noddanas verify-storage --hash
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

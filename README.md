@@ -86,7 +86,7 @@ OIDC or SAML identity provider.
    cd deploy/compose
    cp .env.example .env            # host, OIDC and/or SAML, allowed groups, admin groups
    sudo ../../scripts/init-secrets.sh
-   sudo sh -c 'printf %s "<oidc client secret>" > secrets/oidc_client_secret'   # if using OIDC
+   sudo sh -c 'read -r s && printf %s "$s" > secrets/oidc_client_secret'   # OIDC: paste the secret, then Enter
    docker compose up -d --build
    ```
 
