@@ -34,7 +34,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
       - run: go mod verify
       - run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
       - run: go tool cover -func=coverage.out | tail -1
@@ -48,7 +51,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
       - name: Install Playwright and Chromium
         run: |
           npm install --global --ignore-scripts playwright@1.63.0
@@ -65,9 +71,18 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      # "Trojan Source": invisible bidirectional characters make code read
+      # differently to reviewers than to compilers. Write them as escapes.
+      - name: No hidden bidirectional characters
+        run: |
+          git ls-files -z -- '*.go' '*.js' '*.mjs' '*.html' '*.css' '*.md' '*.json' '*.yaml' '*.yml' '*.sql' '*.sh' |
+            xargs -0 perl -CSD -ne 'if (/[\x{202A}-\x{202E}\x{2066}-\x{2069}]/) { print "$ARGV:$.: hidden bidirectional character\n"; $bad = 1 } close ARGV if eof; END { exit($bad ? 1 : 0) }'
       - run: go vet ./...
       - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
@@ -80,11 +95,15 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
       # Reachability-aware: fails only on vulnerabilities our code can actually reach.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
       - name: gosec
+        if: success() || failure() # report both scanners' findings in one run
         run: go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -exclude-dir=internal/testutil ./...
 
   container:

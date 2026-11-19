@@ -381,7 +381,7 @@ func TestValidateName(t *testing.T) {
 			t.Errorf("rejected %q", ok)
 		}
 	}
-	for _, bad := range []string{"", ".", "..", "a/b", "a\\b", " x", "x ", "a\x00b", "evil‮fdp.exe", strings.Repeat("a", 256)} {
+	for _, bad := range []string{"", ".", "..", "a/b", "a\\b", " x", "x ", "a\x00b", "evil\u202efdp.exe", strings.Repeat("a", 256)} {
 		if ValidateName(bad) == nil {
 			t.Errorf("accepted %q", bad)
 		}

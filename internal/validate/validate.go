@@ -28,7 +28,7 @@ const MaxNameBytes = 255
 // are about integrity and anti-spoofing rather than path traversal:
 //   - no separators or NUL, so a name is always exactly one path segment;
 //   - no control characters, which corrupt logs and terminals;
-//   - no bidirectional overrides, which let "evil‮fdp.exe" render as "evilexe.pdf";
+//   - no bidirectional overrides, which let "evil\u202efdp.exe" render as "evilexe.pdf";
 //   - no "." / ".." and no leading/trailing whitespace, which confuse clients.
 func Name(raw string) (string, error) {
 	if !utf8.ValidString(raw) {

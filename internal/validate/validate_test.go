@@ -21,7 +21,7 @@ func TestName(t *testing.T) {
 	}
 	for _, bad := range []string{
 		"", ".", "..", "...", "a/b", `a\b`, "nul\x00", "tab\there", "new\nline", " lead", "trail ",
-		"evil‮fdp.exe", "x⁦y", strings.Repeat("a", 256), "\xff\xfe",
+		"evil\u202efdp.exe", "x\u2066y", strings.Repeat("a", 256), "\xff\xfe",
 	} {
 		if _, err := Name(bad); err == nil {
 			t.Errorf("Name(%q) accepted", bad)

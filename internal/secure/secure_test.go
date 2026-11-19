@@ -10,7 +10,7 @@ func TestTokens(t *testing.T) {
 	if a == b || !ValidToken(a) || ValidToken(a[:42]) || ValidToken(a+"=") {
 		t.Fatal("token generation/validation wrong")
 	}
-	if len(NewID()) != 32 || NewID() == NewID() {
+	if id1, id2 := NewID(), NewID(); len(id1) != 32 || id1 == id2 {
 		t.Fatal("IDs must be 32 hex chars and unique")
 	}
 	ap := NewAppPassword()
@@ -34,7 +34,7 @@ func TestPasswords(t *testing.T) {
 	if !VerifyPassword("correct horse battery staple", h) || VerifyPassword("wrong", h) {
 		t.Fatal("verification wrong")
 	}
-	if HashPassword("x") == HashPassword("x") {
+	if h1, h2 := HashPassword("x"), HashPassword("x"); h1 == h2 {
 		t.Fatal("hashes must be salted")
 	}
 	// Tampered parameters are rejected rather than honoured (DoS guard).

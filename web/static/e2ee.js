@@ -327,7 +327,7 @@ export function validateName(name) {
   if (!n || utf8(n).length > 255) return 'Names must be 1-255 bytes.';
   if (/^\.+$/.test(n)) return 'Names cannot consist only of dots.';
   if (n.trim() !== n) return 'Names cannot start or end with spaces.';
-  if (/[\/\\\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/.test(n)) return 'Names cannot contain /, \\, control or bidirectional characters.';
+  if (/[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(n)) return 'Names cannot contain /, \\, control or bidirectional characters.';
   return '';
 }
 
