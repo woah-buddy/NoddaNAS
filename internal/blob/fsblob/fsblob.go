@@ -2,9 +2,15 @@
 // Docker volume, a NAS mount, an NFS/CephFS share, a Kubernetes PVC).
 //
 // Blob keys are server-generated random IDs, never user input, and they are
-// still validated before being turned into a path. Writes go to a temporary
-// file first and are linked into place only once complete and fsynced, so a
-// crash never leaves a half-written blob under a real key.
+// still validated before being turned into a path. On top of that, every
+// file operation goes through an os.Root opened on the data directory, so
+// even a bug in key validation could not reach a file outside it (the
+// kernel-level equivalent of a chroot for this one directory: "..", absolute
+// paths and symlinks that point outside are all refused).
+//
+// Writes go to a temporary file first and are linked into place only once
+// complete and fsynced, so a crash never leaves a half-written blob under a
+// real key.
 package fsblob
 
 import (
@@ -16,27 +22,39 @@ import (
 	"path/filepath"
 
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/validate"
 )
 
 // Store is a filesystem-backed blob store.
 type Store struct {
-	blobs string
-	tmp   string
+	root *os.Root // the data directory; all paths below are relative to it
 }
 
-// New prepares root (which must be an absolute path) for use.
-func New(root string) (*Store, error) {
-	if !filepath.IsAbs(root) {
-		return nil, fmt.Errorf("fsblob: root %q must be an absolute path", root)
+const (
+	blobsDir = "blobs"
+	tmpDir   = "tmp"
+)
+
+// New prepares dir (which must be an absolute path) for use.
+func New(dir string) (*Store, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("fsblob: root %q must be an absolute path", dir)
 	}
-	s := &Store{blobs: filepath.Join(root, "blobs"), tmp: filepath.Join(root, "tmp")}
-	for _, d := range []string{s.blobs, s.tmp} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("fsblob: %w", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("fsblob: %w", err)
+	}
+	for _, d := range []string{blobsDir, tmpDir} {
+		if err := root.MkdirAll(d, 0o700); err != nil {
+			_ = root.Close()
 			return nil, fmt.Errorf("fsblob: %w", err)
 		}
 	}
-	return s, nil
+	return &Store{root: root}, nil
 }
 
 func (s *Store) path(key string) (string, error) {
@@ -45,7 +63,7 @@ func (s *Store) path(key string) (string, error) {
 	if err := validate.ID(key); err != nil {
 		return "", fmt.Errorf("fsblob: invalid key")
 	}
-	return filepath.Join(s.blobs, key[0:2], key[2:4], key), nil
+	return filepath.Join(blobsDir, key[0:2], key[2:4], key), nil
 }
 
 // Create writes r to a new blob. It fails if the key already exists.
@@ -54,12 +72,12 @@ func (s *Store) Create(ctx context.Context, key string, r io.Reader) (int64, err
 	if err != nil {
 		return 0, err
 	}
-	f, err := os.CreateTemp(s.tmp, "upload-*")
+	tmpName := filepath.Join(tmpDir, "upload-"+secure.NewID())
+	f, err := s.root.OpenFile(tmpName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, err
 	}
-	tmpName := f.Name()
-	defer os.Remove(tmpName) // no-op once linked into place
+	defer func() { _ = s.root.Remove(tmpName) }() // no-op once moved into place
 
 	n, err := io.Copy(f, ctxReader{ctx, r})
 	if err == nil {
@@ -71,23 +89,23 @@ func (s *Store) Create(ctx context.Context, key string, r io.Reader) (int64, err
 	if err != nil {
 		return n, err
 	}
-	if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
+	if err := s.root.MkdirAll(filepath.Dir(final), 0o700); err != nil {
 		return n, err
 	}
-	// os.Link refuses to replace an existing file, which makes the write
+	// Link refuses to replace an existing file, which makes the write
 	// no-clobber; fall back to rename on filesystems without hard links.
-	if err := os.Link(tmpName, final); err != nil {
+	if err := s.root.Link(tmpName, final); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return n, domain.E(domain.CodeConflict, "blob exists")
 		}
-		if _, statErr := os.Lstat(final); statErr == nil {
+		if _, statErr := s.root.Lstat(final); statErr == nil {
 			return n, domain.E(domain.CodeConflict, "blob exists")
 		}
-		if err := os.Rename(tmpName, final); err != nil {
+		if err := s.root.Rename(tmpName, final); err != nil {
 			return n, err
 		}
 	}
-	syncDir(filepath.Dir(final))
+	s.syncDir(filepath.Dir(final))
 	return n, nil
 }
 
@@ -97,7 +115,7 @@ func (s *Store) Open(_ context.Context, key string) (io.ReadSeekCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
+	f, err := s.root.Open(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, domain.ErrNotFound
 	}
@@ -110,7 +128,7 @@ func (s *Store) Delete(_ context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := s.root.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -118,19 +136,24 @@ func (s *Store) Delete(_ context.Context, key string) error {
 
 // Ping verifies the storage root is writable (used by readiness checks).
 func (s *Store) Ping(context.Context) error {
-	f, err := os.CreateTemp(s.tmp, "ping-*")
+	name := filepath.Join(tmpDir, "ping-"+secure.NewID())
+	f, err := s.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	name := f.Name()
-	f.Close()
-	return os.Remove(name)
+	if err := f.Close(); err != nil {
+		_ = s.root.Remove(name)
+		return err
+	}
+	return s.root.Remove(name)
 }
 
-func syncDir(dir string) {
-	if d, err := os.Open(dir); err == nil {
+// syncDir makes a directory entry durable. Best effort: not every
+// filesystem supports fsync on directories.
+func (s *Store) syncDir(dir string) {
+	if d, err := s.root.Open(dir); err == nil {
 		_ = d.Sync()
-		d.Close()
+		_ = d.Close()
 	}
 }
 

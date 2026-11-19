@@ -35,7 +35,10 @@ func (s *Server) redirectToIdP(w http.ResponseWriter, r *http.Request, u string,
 		return
 	}
 	http.SetCookie(w, cookie)
-	http.Redirect(w, r, u, http.StatusFound)
+	// u is the IdP's authorization URL, built by the auth manager from the
+	// configured issuer or SAML metadata; nothing in it comes from the request
+	// except the validated return path, which stays server-side.
+	http.Redirect(w, r, u, http.StatusFound) // #nosec G710 -- see above
 }
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +88,9 @@ func (s *Server) handleSAMLMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/samlmetadata+xml")
-	w.Write([]byte(xml.Header))
-	w.Write(out)
+	if _, err := w.Write(append([]byte(xml.Header), out...)); err != nil {
+		s.log.DebugContext(r.Context(), "write SAML metadata", "err", err)
+	}
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

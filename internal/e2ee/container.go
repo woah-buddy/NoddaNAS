@@ -66,7 +66,7 @@ func BodySize(size int64) int64 { return size + Chunks(size)*tagSize }
 
 func chunkNonce(i int64, last bool) []byte {
 	var n [12]byte
-	binary.BigEndian.PutUint64(n[3:11], uint64(i))
+	binary.BigEndian.PutUint64(n[3:11], uint64(i)) // #nosec G115 -- i is a chunk index, never negative
 	if last {
 		n[11] = 1
 	}
@@ -119,9 +119,12 @@ func NewWriter(src io.Reader, p WriteParams) (io.Reader, int64, error) {
 	h.Meta = B64(gcmSeal(fk.meta, metaJSON, join("file/meta")))
 	h.Signer.User, h.Signer.FP = p.Signer.UserID, p.Signer.Fingerprint()
 	hdr, _ := json.Marshal(h)
+	if len(hdr) > MaxHeaderLen {
+		return nil, 0, errors.New("e2ee: container header too large")
+	}
 	prefix := make([]byte, 0, 12+len(hdr))
 	prefix = append(prefix, Magic...)
-	prefix = binary.BigEndian.AppendUint32(prefix, uint32(len(hdr)))
+	prefix = binary.BigEndian.AppendUint32(prefix, uint32(len(hdr))) // #nosec G115 -- bounded by MaxHeaderLen above
 	prefix = append(prefix, hdr...)
 	total := int64(len(prefix)) + BodySize(p.Size) + TrailerSize
 	return &writer{

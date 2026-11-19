@@ -191,11 +191,11 @@ func loadTheme() (*theme.Theme, error) {
 // readLimited reads a whole file but refuses anything over max bytes, so a
 // misconfigured path (a huge file, /dev/zero) cannot exhaust memory.
 func readLimited(name string, max int64) ([]byte, error) {
-	f, err := os.Open(name)
+	f, err := os.Open(name) // #nosec G304 G703 -- path chosen by the operator in configuration
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return nil, err
@@ -225,7 +225,7 @@ func loadSAML(c *Config, mdURL, mdFile string) (*auth.SAMLConfig, error) {
 		}
 	}
 	if mdFile != "" {
-		b, err := os.ReadFile(mdFile)
+		b, err := os.ReadFile(mdFile) // #nosec G304 G703 -- path chosen by the operator in configuration
 		if err != nil {
 			return nil, fmt.Errorf("NODDANAS_SAML_IDP_METADATA_FILE: %w", err)
 		}
@@ -279,7 +279,7 @@ func secret(name string) (string, error) {
 	case v != "" && file != "":
 		return "", fmt.Errorf("set only one of %s and %s_FILE", name, name)
 	case file != "":
-		b, err := os.ReadFile(file)
+		b, err := os.ReadFile(file) // #nosec G304 G703 -- path chosen by the operator in configuration
 		if err != nil {
 			return "", fmt.Errorf("%s_FILE: %w", name, err)
 		}

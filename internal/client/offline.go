@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
+	"github.com/woah-buddy/NoddaNAS/internal/validate"
 )
 
 // Offline decryption: no server, no database. Everything here works from
@@ -127,8 +128,20 @@ type FolderRecord struct {
 // _noddanas-space.json) into a plaintext directory tree at out, with real
 // names. signers resolves other users' public keys for signature checks;
 // files signed by unknown users are skipped and reported.
+//
+// A mirror is untrusted input: anyone who could write to the backup, or a
+// collaborator holding the folder's key, could plant hostile IDs or names.
+// So IDs must be well-formed, every decrypted name must pass ValidateName,
+// and, as a backstop, all reads and writes go through os.Root handles for
+// the mirror and the output directory, which refuse any path that would
+// leave them ("..", absolute paths, symlinks pointing outside).
 func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.PublicUser) (files int, skipped []string, err error) {
-	raw, err := os.ReadFile(filepath.Join(mirror, "_noddanas-space.json"))
+	in, err := os.OpenRoot(mirror)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer in.Close()
+	raw, err := in.ReadFile("_noddanas-space.json")
 	if err != nil {
 		return 0, nil, err
 	}
@@ -148,9 +161,19 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 		signers = map[string]*e2ee.PublicUser{}
 	}
 	signers[k.Account.UserID] = k.Account.Public()
-	var walk func(dir, outDir string, nk *e2ee.NodeKey) error
-	walk = func(dir, outDir string, nk *e2ee.NodeKey) error {
-		raw, err := os.ReadFile(filepath.Join(dir, "_noddanas-folder.json"))
+	if err := os.MkdirAll(out, 0o700); err != nil {
+		return 0, nil, err
+	}
+	dst, err := os.OpenRoot(out)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer dst.Close()
+
+	// src and rel are paths relative to the mirror and output roots.
+	var walk func(src, rel string, nk *e2ee.NodeKey) error
+	walk = func(src, rel string, nk *e2ee.NodeKey) error {
+		raw, err := in.ReadFile(filepath.Join(src, "_noddanas-folder.json"))
 		if err != nil {
 			return err
 		}
@@ -158,15 +181,18 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 		if err := json.Unmarshal(raw, &fr); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(outDir, 0o700); err != nil {
+		if err := dst.MkdirAll(rel, 0o700); err != nil {
 			return err
 		}
 		for _, ch := range fr.Children {
+			if validate.ID(ch.ID) != nil {
+				return fmt.Errorf("refusing malformed ID %q in %s", ch.ID, src)
+			}
 			name, err := nk.DecryptName(ch.ID, ch.NameEnc)
 			if err != nil {
 				return fmt.Errorf("name of %s: %w", ch.ID, err)
 			}
-			if e2ee.ValidateName(name) != nil {
+			if e2ee.ValidateName(name) != nil || strings.ContainsAny(name, `/\`) {
 				return fmt.Errorf("refusing unsafe name for %s", ch.ID)
 			}
 			ck, err := nk.UnwrapChild(ch.ID, ch.WrappedKey)
@@ -174,29 +200,31 @@ func (k *OfflineKeys) DecryptTree(mirror, out string, signers map[string]*e2ee.P
 				return fmt.Errorf("key of %s: %w", ch.ID, err)
 			}
 			if ch.Kind == "folder" {
-				if err := walk(filepath.Join(dir, ch.ID), filepath.Join(outDir, name), ck); err != nil {
+				if err := walk(filepath.Join(src, ch.ID), filepath.Join(rel, name), ck); err != nil {
 					return err
 				}
 				continue
 			}
-			ok, err := decryptFile(filepath.Join(dir, ch.ID+".ndne"), filepath.Join(outDir, name), ck, signers)
+			ok, err := decryptFile(in, filepath.Join(src, ch.ID+".ndne"), dst, filepath.Join(rel, name), ck, signers)
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
 			if ok {
 				files++
 			} else {
-				skipped = append(skipped, filepath.Join(outDir, name))
+				skipped = append(skipped, filepath.Join(out, rel, name))
 			}
 		}
 		return nil
 	}
-	err = walk(mirror, out, root)
+	err = walk(".", ".", root)
 	return files, skipped, err
 }
 
-func decryptFile(src, dst string, nk *e2ee.NodeKey, signers map[string]*e2ee.PublicUser) (bool, error) {
-	f, err := os.Open(src)
+// decryptFile decrypts one container from the mirror into the output tree.
+// It writes to a temporary name first and never replaces an existing file.
+func decryptFile(in *os.Root, src string, out *os.Root, dst string, nk *e2ee.NodeKey, signers map[string]*e2ee.PublicUser) (bool, error) {
+	f, err := in.Open(src)
 	if err != nil {
 		return false, err
 	}
@@ -214,19 +242,31 @@ func decryptFile(src, dst string, nk *e2ee.NodeKey, signers map[string]*e2ee.Pub
 		return false, nil
 	}
 	tmp := dst + ".partial"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	w, err := out.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return false, err
 	}
-	err = e2ee.DecryptVerify(f, out, p, keys, signer)
-	if cerr := out.Close(); err == nil {
+	err = e2ee.DecryptVerify(f, w, p, keys, signer)
+	if cerr := w.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		// Link (not rename) so that a duplicate name cannot overwrite a file
+		// already written from this backup. Filesystems without hard links
+		// (FAT, exFAT, some network shares) fall back to a checked rename.
+		if lerr := out.Link(tmp, dst); lerr != nil {
+			if _, serr := out.Lstat(dst); serr == nil || errors.Is(lerr, os.ErrExist) {
+				err = fmt.Errorf("%s already exists", dst)
+			} else {
+				err = out.Rename(tmp, dst)
+			}
+		}
+	}
+	_ = out.Remove(tmp)
 	if err != nil {
-		os.Remove(tmp)
 		return false, err
 	}
-	return true, os.Rename(tmp, dst)
+	return true, nil
 }
 
 // SafeJoin is used by tools that write decrypted names to disk.

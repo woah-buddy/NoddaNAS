@@ -26,10 +26,12 @@ func (s *Server) uiHandler() http.Handler {
 		w.Header().Set("Content-Security-Policy", uiCSP)
 		w.Header().Set("Cache-Control", "no-cache")
 		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-		if st, err := fs.Stat(s.ui, name); name == "" || err != nil || st.IsDir() {
+		if st, err := fs.Stat(s.ui, name); name == "" || !fs.ValidPath(name) || err != nil || st.IsDir() {
 			// Client-side routes (/s, /trash, ...) all load the app shell.
 			name = "index.html"
 		}
-		http.ServeFileFS(w, r, s.ui, name)
+		// name is a cleaned, fs.ValidPath-checked path into the embedded,
+		// read-only UI file system, which has nothing else in it to reach.
+		http.ServeFileFS(w, r, s.ui, name) // #nosec G703 -- see above
 	})
 }

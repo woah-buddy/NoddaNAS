@@ -78,7 +78,7 @@ Online commands need NODDANAS_URL and an app password (NODDANAS_TOKEN or NODDANA
 // secret reads a secret from NAME_FILE or prompts without echo.
 func secret(fileEnv, prompt string) (string, error) {
 	if f := os.Getenv(fileEnv); f != "" {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(f) // #nosec G304 G703 -- the user's own CLI configuration
 		return strings.TrimSpace(string(b)), err
 	}
 	fmt.Fprint(os.Stderr, prompt)
@@ -98,7 +98,7 @@ func online(ctx context.Context, cmd string, args []string) error {
 	}
 	token := os.Getenv("NODDANAS_TOKEN")
 	if f := os.Getenv("NODDANAS_TOKEN_FILE"); f != "" {
-		b, err := os.ReadFile(f)
+		b, err := os.ReadFile(f) // #nosec G304 G703 -- the user's own CLI configuration
 		if err != nil {
 			return err
 		}
@@ -150,7 +150,7 @@ func online(ctx context.Context, cmd string, args []string) error {
 		return writeAtomically(arg(1, n.Name), func(w io.Writer) error { _, err := c.Download(ctx, n.ID, w); return err })
 	case "put":
 		local := arg(0, "")
-		f, err := os.Open(local)
+		f, err := os.Open(local) // #nosec G304 -- the file the user asked to upload
 		if err != nil {
 			return err
 		}
@@ -302,7 +302,7 @@ func offline(cmd string, args []string) error {
 	if *keysFile == "" || len(pos) != 2 {
 		usage()
 	}
-	data, err := os.ReadFile(*keysFile)
+	data, err := os.ReadFile(*keysFile) // #nosec G304 G703 -- the key backup the user named
 	if err != nil {
 		return err
 	}
@@ -320,7 +320,7 @@ func offline(cmd string, args []string) error {
 	}
 	switch cmd {
 	case "decrypt":
-		in, err := os.Open(pos[0])
+		in, err := os.Open(pos[0]) // #nosec G304 G703 -- the container the user asked to decrypt
 		if err != nil {
 			return err
 		}
@@ -355,11 +355,11 @@ func writeAtomically(dst string, fn func(io.Writer) error) error {
 		return err
 	}
 	if err := fn(tmp); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), dst)
+	return os.Rename(tmp.Name(), dst) // #nosec G703 -- the destination the user asked for
 }

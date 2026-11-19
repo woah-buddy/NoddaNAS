@@ -47,7 +47,7 @@ func ValidToken(t string) bool {
 const (
 	PurposeLinkToken   = "noddanas/link-token/v1"
 	PurposeSession     = "noddanas/session/v1"
-	PurposeAppPassword = "noddanas/app-password/v1"
+	PurposeAppPassword = "noddanas/app-password/v1" // #nosec G101 -- a domain-separation label, not a credential
 	PurposeLogin       = "noddanas/login-request/v1"
 )
 
@@ -136,7 +136,7 @@ func VerifyPassword(password, phc string) bool {
 	if err != nil || len(want) < 16 || len(want) > 64 {
 		return false
 	}
-	got := argon2.IDKey([]byte(password), salt, t, mem, p, uint32(len(want)))
+	got := argon2.IDKey([]byte(password), salt, t, mem, p, uint32(len(want))) // #nosec G115 -- len(want) <= 64, checked above
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 

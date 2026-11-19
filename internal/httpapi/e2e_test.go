@@ -161,6 +161,7 @@ type harness struct {
 	svc  *service.Service
 	oidc *fakeOIDC
 	saml *samlIdP
+	am   *auth.Manager
 	base string
 }
 
@@ -188,6 +189,7 @@ func newHarness(t *testing.T) *harness {
 	samlSP := auth.NewSAML(auth.SAMLConfig{MetadataURL: h.base + "/auth/saml/metadata", ACSURL: h.base + "/auth/saml/acs",
 		IDPMetadata: idpMD, TrustEmail: true, Policy: policy})
 	am := auth.NewManager(store, svc, auth.Config{SessionIdle: time.Hour, SessionAbsolute: 24 * time.Hour}, oidc, samlSP)
+	h.am = am
 	handler = httpapi.New(svc, am, httpapi.Config{PublicURL: pub, EnableWebDAV: true,
 		RateLimits: httpapi.RateLimits{Login: 6000, Public: 6000, AuthFailures: 6000}}, log, web.Static(), store, blobs).Handler()
 
@@ -572,6 +574,33 @@ func TestEndToEnd(t *testing.T) {
 		if err != nil || string(got) != secret {
 			t.Fatalf("offline tree: %q %v", got, err)
 		}
+
+		// Restoring into a directory where a symlink stands in for a folder
+		// of the backup cannot write through it to somewhere else.
+		outside, trap := t.TempDir(), t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(trap, "Docs")); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := keys.DecryptTree(mirror, trap, nil); err == nil {
+			t.Fatal("decrypt-tree followed a symlink out of the output directory")
+		}
+		if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+			t.Fatal("decrypt-tree wrote outside the output directory")
+		}
+		// A tampered folder record with a path-shaped ID is refused before
+		// any path is built from it.
+		recPath := filepath.Join(mirror, "_noddanas-folder.json")
+		rec, _ := os.ReadFile(recPath)
+		var fr map[string]any
+		if err := json.Unmarshal(rec, &fr); err != nil {
+			t.Fatal(err)
+		}
+		fr["children"].([]any)[0].(map[string]any)["id"] = "../../../etc"
+		tampered, _ := json.Marshal(fr)
+		os.WriteFile(recPath, tampered, 0o600)
+		if _, _, err := keys.DecryptTree(mirror, t.TempDir(), nil); err == nil || !strings.Contains(err.Error(), "malformed ID") {
+			t.Fatalf("tampered ID: %v", err)
+		}
 	})
 
 	t.Run("credential scoping and HTTP hardening", func(t *testing.T) {
@@ -609,6 +638,105 @@ func TestEndToEnd(t *testing.T) {
 		ui.Body.Close()
 		if !strings.Contains(ui.Header.Get("Content-Security-Policy"), "require-trusted-types-for 'script'") {
 			t.Fatal("UI CSP missing Trusted Types")
+		}
+	})
+
+	t.Run("shared by me and the link kill switches", func(t *testing.T) {
+		call := func(b *http.Client, method, path, bearer string) (int, string) {
+			t.Helper()
+			req, _ := http.NewRequest(method, h.base+path, nil)
+			req.Header.Set("Sec-Fetch-Site", "same-origin")
+			if bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+bearer)
+			}
+			resp, err := b.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(raw)
+		}
+		must[string](t)(alice.CreateLink(ctx, f, "", 0, 0))
+		code, body := call(aliceB, "GET", "/api/v1/shared-by-me", "")
+		if code != 200 || !strings.Contains(body, `"type":"link"`) || !strings.Contains(body, `"status":"active"`) {
+			t.Fatalf("shared-by-me: %d %.300s", code, body)
+		}
+		// The creator's list carries no key material.
+		for _, field := range []string{"linkKey", "sealedKey", `"sig"`, "tokenHash"} {
+			if strings.Contains(body, field) {
+				t.Fatalf("shared-by-me exposes %s", field)
+			}
+		}
+
+		// The global switch: administrators only, and never via an app password.
+		var ap struct{ Token string }
+		req, _ := http.NewRequest("POST", h.base+"/api/v1/app-passwords", strings.NewReader(`{"name":"kill-test"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ := aliceB.Do(req)
+		json.NewDecoder(resp.Body).Decode(&ap)
+		resp.Body.Close()
+		if code, _ := call(h.srv.Client(), "POST", "/api/v1/admin/links/revoke-all", ap.Token); code != 403 {
+			t.Fatalf("admin kill switch via app password: %d", code)
+		}
+		if code, _ := call(bobB, "POST", "/api/v1/admin/links/revoke-all", ""); code != 403 {
+			t.Fatalf("admin kill switch as non-admin: %d", code)
+		}
+		// Cross-site requests are refused before reaching it.
+		req, _ = http.NewRequest("POST", h.base+"/api/v1/links/revoke-all", nil)
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		resp, _ = aliceB.Do(req)
+		resp.Body.Close()
+		if resp.StatusCode != 403 {
+			t.Fatalf("cross-site kill switch: %d", resp.StatusCode)
+		}
+
+		// Alice's own switch.
+		code, body = call(aliceB, "POST", "/api/v1/links/revoke-all", "")
+		if code != 200 || strings.Contains(body, `"revoked":0`) {
+			t.Fatalf("revoke mine: %d %s", code, body)
+		}
+		if _, body = call(aliceB, "GET", "/api/v1/shared-by-me", ""); strings.Contains(body, `"type":"link"`) {
+			t.Fatal("links still listed after revocation")
+		}
+		if code, body = call(aliceB, "POST", "/api/v1/admin/links/revoke-all", ""); code != 200 || !strings.Contains(body, `"revoked":`) {
+			t.Fatalf("admin revoke: %d %s", code, body)
+		}
+	})
+
+	t.Run("operator offboarding ends sessions and app passwords", func(t *testing.T) {
+		carolB := h.loginOIDC(idpUser{sub: "carol", email: "carol@example.test", groups: []string{"nas-users"}})
+		var ap struct{ Token string }
+		req, _ := http.NewRequest("POST", h.base+"/api/v1/app-passwords", strings.NewReader(`{"name":"laptop"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := carolB.Do(req)
+		status(t, resp, err, 201)
+		req, _ = http.NewRequest("POST", h.base+"/api/v1/app-passwords", strings.NewReader(`{"name":"laptop"}`))
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Content-Type", "application/json")
+		resp, _ = carolB.Do(req)
+		json.NewDecoder(resp.Body).Decode(&ap)
+		resp.Body.Close()
+		carolApp := client.New(h.base, h.srv.Client(), ap.Token)
+		me := must[*client.Me](t)(carolApp.Me(ctx))
+		if _, err := client.New(h.base, carolB, "").Me(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		n, err := h.am.RevokeUserCredentials(ctx, me.User.ID)
+		if err != nil || n != 2 {
+			t.Fatalf("revoked %d app passwords: %v", n, err)
+		}
+		if _, err := client.New(h.base, carolB, "").Me(ctx); err == nil {
+			t.Fatal("browser session survived offboarding")
+		}
+		if _, err := carolApp.Me(ctx); err == nil {
+			t.Fatal("app password survived offboarding")
+		}
+		if _, err := h.am.RevokeUserCredentials(ctx, ""); err == nil {
+			t.Fatal("empty user accepted")
 		}
 	})
 }

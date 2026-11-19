@@ -307,7 +307,7 @@ func ParseRecoveryCode(s string) ([]byte, error) {
 		n += 5
 		if n >= 8 {
 			n -= 8
-			out = append(out, byte(bits>>n))
+			out = append(out, byte(bits>>n)) // #nosec G115 -- keeps the low 8 bits on purpose (base32 decoding)
 		}
 	}
 	if count != 32 || len(out) != 20 {

@@ -129,7 +129,7 @@ func (c *Client) json(ctx context.Context, method, path string, in, out any) err
 	}
 	resp, err := c.do(ctx, method, path, body, hdr, out)
 	if err == nil && out == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	return err
 }
@@ -729,7 +729,7 @@ func (c *Client) upload(ctx context.Context, method, path string, body io.Reader
 	}
 	resp, err := c.doSized(ctx, method, path, body, size, h, out)
 	if err == nil && out == nil {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 	}
 	return err
 }

@@ -175,14 +175,18 @@ func (m *Manager) BeginSAMLLogin(ctx context.Context, returnTo string) (string, 
 	}); err != nil {
 		return "", nil, err
 	}
-	c := &http.Cookie{Name: SAMLCookie, Value: token, Path: "/", Secure: true, HttpOnly: true,
+	// SameSite=None is required: the IdP returns the user with a cross-site
+	// POST, and a Lax or Strict cookie would not be sent with it. The cookie
+	// is still Secure, HttpOnly, __Host- prefixed, valid for 10 minutes, and
+	// useless on its own (it only binds one pending sign-in to this browser).
+	c := &http.Cookie{Name: SAMLCookie, Value: token, Path: "/", Secure: true, HttpOnly: true, // #nosec G124 -- see above
 		SameSite: http.SameSiteNoneMode, MaxAge: 600}
 	return u.String(), c, nil
 }
 
 // ClearSAMLCookie removes the SAML binding cookie.
 func ClearSAMLCookie() *http.Cookie {
-	return &http.Cookie{Name: SAMLCookie, Value: "", Path: "/", Secure: true, HttpOnly: true,
+	return &http.Cookie{Name: SAMLCookie, Value: "", Path: "/", Secure: true, HttpOnly: true, // #nosec G124 -- deletes the cookie above; attributes match it
 		SameSite: http.SameSiteNoneMode, MaxAge: -1}
 }
 
