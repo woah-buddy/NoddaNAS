@@ -246,6 +246,29 @@ func (s *Share) Expired(now time.Time) bool {
 	return s.ExpiresAt != nil && !now.Before(*s.ExpiresAt)
 }
 
+// Exhausted reports whether a link has used up its download limit.
+func (s *Share) Exhausted() bool {
+	return s.MaxDownloads > 0 && s.Downloads >= s.MaxDownloads
+}
+
+// Status summarizes whether a share currently works: "active", or for
+// links "expired", "exhausted" (download limit reached) or "locked" (too
+// many wrong passwords, temporarily).
+func (s *Share) Status(now time.Time) string {
+	if s.Kind != ShareLink {
+		return "active"
+	}
+	switch {
+	case s.Expired(now):
+		return "expired"
+	case s.Exhausted():
+		return "exhausted"
+	case s.Locked(now):
+		return "locked"
+	}
+	return "active"
+}
+
 // Locked reports whether a link is temporarily locked after failed passwords.
 func (s *Share) Locked(now time.Time) bool {
 	return s.LockedUntil != nil && now.Before(*s.LockedUntil)

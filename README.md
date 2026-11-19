@@ -31,7 +31,8 @@ in the browser.
 | Offline recovery | `noddanas-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
 | Personal spaces | Every user has one, with a per-user quota |
 | Team folders | Direct members (read / write / manage), IdP group mappings (admin), separate quota, signed key grants |
-| Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links |
+| Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links; one **Shared** page (with me / by me) |
+| Kill switches | Revoke all of your own public links, or (administrators) every link on the server; shell commands for break-glass link revocation and user offboarding |
 | Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
 | Clients | Web app (no build step, no npm dependencies) and `noddanas-cli` (Go) |
 | Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
@@ -61,6 +62,10 @@ recovery code, your files cannot be decrypted by anyone.
 
 ## Quick start (Docker Compose)
 
+This is the short version. The [administrator guide](docs/ADMIN_GUIDE.md) covers installation
+(Compose and Kubernetes), identity-provider setup, configuration, backups, upgrades, monitoring,
+user offboarding and incident response step by step.
+
 Requirements: Docker with Compose, a DNS name pointing at the host, ports 80/443 reachable, and an
 OIDC or SAML identity provider.
 
@@ -88,40 +93,19 @@ OIDC or SAML identity provider.
    backups (it is itself encrypted).
 
 To change a user's quota: `docker compose exec noddanas /noddanas set-quota alice@example.com 100GiB`
-(administrators can also set any space's quota through the API).
+(administrators can also set any space's quota through the API). Next steps: the
+[administrator guide](docs/ADMIN_GUIDE.md#6-first-sign-in-and-day-one-tasks).
 
 ## Configuration
 
-All settings are environment variables. Secrets may instead be given as a file path in the same
-name with a `_FILE` suffix (preferred).
+All settings are environment variables, validated at startup (NoddaNAS refuses to start with an
+unsafe or incomplete configuration and lists every problem). The required ones are
+`NODDANAS_PUBLIC_URL`, `NODDANAS_DATABASE_URL` (or `_FILE`) and a sign-in method
+(`NODDANAS_OIDC_ISSUER` and/or `NODDANAS_SAML_IDP_METADATA_URL`); you should also set
+`NODDANAS_ALLOWED_GROUPS` and `NODDANAS_ADMIN_GROUPS`.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `NODDANAS_PUBLIC_URL` | *(required)* | External origin, e.g. `https://files.example.com` (HTTPS; plain HTTP only for localhost) |
-| `NODDANAS_DATABASE_URL` | *(required)* | PostgreSQL DSN; use `sslmode=verify-full` off-host |
-| `NODDANAS_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | | OIDC sign-in (optional if SAML is set) |
-| `NODDANAS_OIDC_GROUPS_CLAIM` / `_SCOPES` | `groups` / `openid,email,profile` | |
-| `NODDANAS_SAML_IDP_METADATA_URL` or `_FILE` | | SAML sign-in (optional if OIDC is set); URL must be https |
-| `NODDANAS_SAML_SP_KEY_FILE` / `_CERT_FILE` | | Optional SP key pair: signs AuthnRequests, decrypts encrypted assertions |
-| `NODDANAS_SAML_ENTITY_ID` | metadata URL | |
-| `NODDANAS_SAML_TRUST_EMAIL` | `false` | Treat asserted emails as verified (needed for sharing by email) |
-| `NODDANAS_SAML_EMAIL_ATTRIBUTES` / `_NAME_` / `_GROUP_` | common names | Attribute names (comma-separated) |
-| `NODDANAS_ALLOWED_GROUPS` | | Sign-in requires one of these groups. **Set this or the next.** |
-| `NODDANAS_ALLOWED_EMAIL_DOMAINS` | | Sign-in requires a verified email in one of these domains |
-| `NODDANAS_ADMIN_GROUPS` | | Members administer group mappings and quotas |
-| `NODDANAS_TEAM_CREATION` | `true` | Whether any user may create team folders |
-| `NODDANAS_BRAND_NAME` / `_LOGO_FILE` | `NoddaNAS` / | Instance name; PNG/JPEG logo (re-encoded) |
-| `NODDANAS_THEME_FILE` | | Color tokens and accents; validated, contrast-checked ([THEMING.md](docs/THEMING.md)) |
-| `NODDANAS_DEFAULT_QUOTA` / `_TEAM_QUOTA` | `10GiB` / `50GiB` | Quotas for new personal / team spaces |
-| `NODDANAS_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file |
-| `NODDANAS_MAX_VERSIONS` | `10` | Versions kept per file (all count towards quota) |
-| `NODDANAS_TRASH_RETENTION` | `30d` | How long trashed items are kept |
-| `NODDANAS_LINK_DEFAULT_TTL` / `_MAX_TTL` | `30d` / `365d` | Public link lifetime default / maximum |
-| `NODDANAS_SESSION_IDLE` / `_MAX_AGE` | `12h` / `7d` | Browser session lifetimes |
-| `NODDANAS_DATA_DIR` | `/data` | Where encrypted containers are stored |
-| `NODDANAS_TRUSTED_PROXIES` | | CIDRs whose `X-Forwarded-For` is trusted |
-| `NODDANAS_WEBDAV` / `_WORKER` / `_AUTO_MIGRATE` | `true` | Read-only WebDAV, background worker, startup migrations |
-| `NODDANAS_LISTEN` / `_TLS_CERT_FILE` / `_TLS_KEY_FILE` / `_LOG_LEVEL` | `:8080` / / / `info` | |
+The complete reference, with defaults, is in the
+[administrator guide](docs/ADMIN_GUIDE.md#7-configuration-reference).
 
 ## Backups and the CLI
 
@@ -197,7 +181,7 @@ internal/blob/         blob storage adapter (filesystem)
 web/static/            web client; e2ee.js is the browser E2EE implementation
 test/interop/          browser side of the Go <-> WebCrypto interoperability test
 deploy/                Docker Compose and Kubernetes reference deployments
-docs/                  E2EE spec, architecture, threat model, operations, API, theming
+docs/                  administrator guide, E2EE spec, architecture, threat model, API, theming
 ```
 
 ## Roadmap

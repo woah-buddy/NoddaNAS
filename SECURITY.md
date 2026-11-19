@@ -37,3 +37,6 @@ and an update to the threat model.
 11. Theming stays data, not code: allowlisted tokens with strict value grammars, stylesheets
     generated server-side, no CSP exceptions, contrast checked, images re-encoded
     ([docs/THEMING.md](docs/THEMING.md)).
+12. Bulk or destructive operations get one code path per scope (a user's links vs. every link):
+    an empty or missing identifier must never widen the scope. Instance-wide actions require an
+    administrator's interactive session, and each has a shell equivalent for break-glass use.

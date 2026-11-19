@@ -305,8 +305,9 @@ async function route() {
     if (!S.acct) return unlockScreen();
     document.getElementById('nav').hidden = false;
     renderQuota();
-    for (const a of document.querySelectorAll('nav a')) a.classList.toggle('active', path === a.getAttribute('href') || (a.getAttribute('href') !== '/' && path.startsWith(a.getAttribute('href'))));
-    if (path === '/shared') return await sharedView();
+    for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', path === a.getAttribute('href') || (a.getAttribute('href') !== '/' && path.startsWith(a.getAttribute('href'))));
+    if (path === '/shared') return await sharedWithMeView();
+    if (path === '/shared/by-me') return await sharedByMeView();
     if (path === '/teams') return await teamsView();
     if (path.startsWith('/teams/')) return await teamView(path.split('/')[2]);
     if (path === '/trash' || path.startsWith('/trash/')) return await trashView(path.split('/')[2] || S.me.personalSpace.id);
@@ -677,7 +678,14 @@ async function shareDialog(c) {
   try { await refresh(); } catch (e) { toast(e.message); d.close(); }
 }
 
-async function sharedView() {
+// ---- shared ---------------------------------------------------------------------------------------------------
+// One page, two tabs: what others shared with you, and what you shared.
+function sharedTabs(active) {
+  const tab = (href, label, id) => h('a', { href, 'data-nav': '', class: active === id ? 'active' : '', 'aria-current': active === id ? 'page' : null }, label);
+  return h('nav', { class: 'tabs', 'aria-label': 'Shared' }, tab('/shared', 'Shared with me', 'with'), tab('/shared/by-me', 'Shared by me', 'by'));
+}
+
+async function sharedWithMeView() {
   const { items } = await api('GET', '/api/v1/shared-with-me');
   const rows = [];
   for (const it of items) {
@@ -698,8 +706,88 @@ async function sharedView() {
         if (await confirmBox('Leave share', `Remove “${name}” from your shared items?`, 'Leave')) await act(() => api('DELETE', `/api/v1/shares/${it.share.id}`), 'Removed');
       } }, 'Leave'))));
   }
-  main.replaceChildren(h('div', { class: 'panel' }, h('h1', {}, 'Shared with me'),
+  main.replaceChildren(h('div', { class: 'panel' }, h('h1', {}, 'Shared'), sharedTabs('with'),
     h('table', {}, h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { class: 'empty' }, 'Nothing has been shared with you yet.'))))));
+}
+
+const LINK_STATUS = { active: 'Active', expired: 'Expired', exhausted: 'Download limit reached', locked: 'Locked after wrong passwords' };
+
+// mapLimit runs fn over items with at most n in flight.
+async function mapLimit(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (next < items.length) { const k = next++; out[k] = await fn(items[k]); }
+  }));
+  return out;
+}
+
+// describeShared decrypts an item's name and location through the normal
+// key path. The server cannot help: it only has the encrypted names.
+async function describeShared(it) {
+  if (!it.node) return { name: 'In the trash, or no longer available to you', where: '', ok: false };
+  try {
+    const names = (await pathTo(it.node.id)).trail.map((t) => t.name);
+    return { name: names.at(-1), where: names.slice(0, -1).join(' / '), ok: true };
+  } catch { return { name: 'Could not decrypt this item', where: '', ok: false }; }
+}
+
+async function sharedByMeView() {
+  const { items, truncated } = await api('GET', '/api/v1/shared-by-me');
+  const info = await mapLimit(items, 6, describeShared);
+  const links = [], people = [];
+  items.forEach((it, i) => (it.share.type === 'link' ? links : people).push({ ...it, ...info[i] }));
+
+  const label = (x) => h('div', { class: 'name' },
+    h('span', { class: 'icon' }, !x.node ? '•' : x.node.kind === 'folder' ? '📁' : '📄'),
+    h('div', {}, x.ok && x.node.kind === 'folder' ? h('a', { href: `/f/${x.node.id}`, 'data-nav': '' }, x.name) : h('span', { class: x.ok ? '' : 'note' }, x.name),
+      x.where ? h('div', { class: 'note' }, x.where) : null));
+  const revoke = (x, title, text) => h('button', { class: 'link danger', onclick: async () => {
+    if (await confirmBox(title, text, 'Revoke')) await act(() => api('DELETE', `/api/v1/shares/${x.share.id}`), 'Revoked');
+  } }, 'Revoke');
+
+  const linkRows = links.map((x) => {
+    const st = Object.hasOwn(LINK_STATUS, x.share.status) ? x.share.status : 'active';
+    return h('tr', {}, h('td', {}, label(x)),
+      h('td', {}, h('span', { class: st === 'active' ? '' : 'note' }, LINK_STATUS[st])),
+      h('td', { class: 'num' }, fmtDate(x.share.createdAt)),
+      h('td', { class: 'num' }, x.share.expiresAt ? fmtDate(x.share.expiresAt) : 'Never'),
+      h('td', { class: 'num' }, x.share.maxDownloads ? `${x.share.downloads || 0} of ${x.share.maxDownloads}` : String(x.share.downloads || 0)),
+      h('td', {}, x.share.hasPassword ? 'Password' : 'None'),
+      h('td', { class: 'actions' }, revoke(x, 'Revoke link', `The public link to “${x.name}” stops working immediately for everyone who has it.`)));
+  });
+  const peopleRows = await Promise.all(people.map(async (x) => {
+    const who = (await userKeys(x.share.recipientId).catch(() => null))?.displayName || 'Unknown user';
+    return h('tr', {}, h('td', {}, label(x)), h('td', {}, who),
+      h('td', {}, x.share.permission === 'write' ? 'Can edit' : 'Can view'),
+      h('td', { class: 'num' }, fmtDate(x.share.createdAt)),
+      h('td', { class: 'actions' }, revoke(x, 'Stop sharing', `${who} loses access to “${x.name}”.`)));
+  }));
+
+  const killMine = h('button', { class: 'danger', disabled: links.length === 0, onclick: async () => {
+    const what = links.length === 1 && !truncated ? 'Your public link stops' : `All ${links.length}${truncated ? '+' : ''} of your public links stop`;
+    const ok = await confirmBox('Revoke all your public links?',
+      `${what} working immediately, including any you have already sent. ` +
+      'This cannot be undone; you can create new links later. Sharing with specific people is not affected.', 'Revoke all my links');
+    if (!ok) return;
+    try {
+      const { revoked } = await api('POST', '/api/v1/links/revoke-all');
+      toast(`Revoked ${revoked} public link${revoked === 1 ? '' : 's'}`);
+    } catch (e) { toast(e.message); }
+    route();
+  } }, 'Revoke all my public links');
+
+  // Columns marked with a leading '#' are numeric/date columns, right-aligned like their cells.
+  const head = (...cols) => h('thead', {}, h('tr', {}, cols.map((c) => (c.startsWith('#') ? h('th', { class: 'num' }, c.slice(1)) : h('th', {}, c)))));
+  main.replaceChildren(h('div', { class: 'panel' }, h('h1', {}, 'Shared'), sharedTabs('by'),
+    truncated ? h('p', { class: 'note' }, `Showing your ${items.length} most recent shares.`) : null,
+    h('div', { class: 'toolbar' }, h('h2', {}, 'Public links'), killMine),
+    h('p', { class: 'note' }, 'A link’s address cannot be shown again: its decryption key exists only in the link itself and was never stored. To share again, create a new link.'),
+    h('table', {}, linkRows.length ? head('Item', 'Status', '#Created', '#Expires', '#Downloads', 'Protection', '') : null,
+      h('tbody', {}, linkRows.length ? linkRows : h('tr', {}, h('td', { class: 'empty' }, 'You have no public links.')))),
+    h('h2', {}, 'Shared with people'),
+    h('table', {}, peopleRows.length ? head('Item', 'With', 'Permission', '#Shared', '') : null,
+      h('tbody', {}, peopleRows.length ? peopleRows : h('tr', {}, h('td', { class: 'empty' }, 'You have not shared anything with specific people.'))))));
 }
 
 // ---- team folders ------------------------------------------------------------------------------------------
@@ -888,6 +976,7 @@ async function settingsView() {
         settingsView();
       } catch (err) { toast(err.message); }
     } }, apName, h('label', {}, ro, ' read-only'), h('button', { class: 'primary' }, 'Create')),
+    adminSection(),
     h('h2', {}, 'Session'),
     h('div', { class: 'toolbar' },
       h('button', { onclick: signOut }, 'Sign out'),
@@ -897,6 +986,23 @@ async function settingsView() {
           location.assign('/');
         }
       } }, 'Sign out everywhere'))));
+}
+
+function adminSection() {
+  if (!S.me.user.admin) return null;
+  return [h('h2', {}, 'Administration'),
+    h('p', { class: 'note' }, 'Emergency switch: revoke every public link created by anyone on this server. Links stop working immediately and cannot be restored. ' +
+      'Shares with specific people and team folders are not affected. Server operators can do the same from the shell: noddanas revoke-links --all.'),
+    h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: adminRevokeAllLinks }, 'Revoke all public links (all users)'))];
+}
+async function adminRevokeAllLinks() {
+  const typed = await prompt('Revoke every public link on this server?', 'This affects all users and cannot be undone. Type REVOKE ALL to confirm.');
+  if (typed === null) return;
+  if (typed.trim() !== 'REVOKE ALL') return toast('Not confirmed. Nothing was revoked.');
+  try {
+    const { revoked } = await api('POST', '/api/v1/admin/links/revoke-all');
+    toast(`Revoked ${revoked} public link${revoked === 1 ? '' : 's'} across the server`);
+  } catch (e) { toast(e.message); }
 }
 
 async function exportKeys() {

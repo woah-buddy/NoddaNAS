@@ -180,6 +180,121 @@ func (s *Service) SharedWithMe(ctx context.Context, p Principal) ([]SharedItem, 
 	return out, nil
 }
 
+// MaxSharedByMe bounds the "shared by me" list.
+const MaxSharedByMe = 1000
+
+// SharedByMeItem is a share the caller created. Node is nil when the caller
+// can no longer see the item (for example after leaving a team folder, or
+// while it is in the trash); the share is still listed so it can be revoked.
+type SharedByMeItem struct {
+	Share *domain.Share
+	Node  *NodeInfo
+}
+
+// SharedByMe lists the shares (user shares and public links) the caller
+// created, newest first. truncated reports that more exist than were listed.
+func (s *Service) SharedByMe(ctx context.Context, p Principal) (items []SharedByMeItem, truncated bool, err error) {
+	if p.UserID == "" {
+		return nil, false, domain.ErrUnauthorized
+	}
+	shares, err := s.store.ListSharesByCreator(ctx, p.UserID, MaxSharedByMe+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(shares) > MaxSharedByMe {
+		shares, truncated = shares[:MaxSharedByMe], true
+	}
+	items = make([]SharedByMeItem, len(shares))
+	for i, sh := range shares {
+		items[i].Share = sh
+		// Node details go through the normal access check, so this list
+		// never reveals more about an item than the caller could read anyway.
+		if info, err := s.GetNode(ctx, p, sh.NodeID); err == nil {
+			items[i].Node = info
+		}
+	}
+	return items, truncated, nil
+}
+
+// RevokeMyLinks is the caller's kill switch: it revokes every public link
+// they created, everywhere, in one atomic statement. Links stop working
+// immediately; the link secrets in already-shared URLs become useless
+// because the server no longer holds the token or the wrapped key.
+func (s *Service) RevokeMyLinks(ctx context.Context, p Principal) (int64, error) {
+	if p.UserID == "" {
+		return 0, domain.ErrUnauthorized
+	}
+	if p.ReadOnly {
+		return 0, domain.E(domain.CodeForbidden, "this credential is read-only")
+	}
+	n, err := s.store.DeleteLinksByCreator(ctx, p.UserID)
+	if err != nil {
+		return 0, err
+	}
+	s.audit(ctx, "share.link.revoke_all", p, "count", n)
+	return n, nil
+}
+
+// AdminRevokeAllLinks is the instance-wide kill switch: it revokes every
+// public link created by anyone. Administrators only.
+func (s *Service) AdminRevokeAllLinks(ctx context.Context, p Principal) (int64, error) {
+	if err := s.requireAdmin(ctx, p); err != nil {
+		return 0, err
+	}
+	n, err := s.store.DeleteAllLinks(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "admin.links.revoke_all", "user", p.UserID, "count", n)
+	return n, nil
+}
+
+// OperatorFindUser resolves a user for operator commands, by ID or by
+// verified email. (Emails are recorded only when the identity provider
+// vouches for them, so the ID always works when the email may not.)
+func (s *Service) OperatorFindUser(ctx context.Context, emailOrID string) (*domain.User, error) {
+	if validate.ID(emailOrID) == nil {
+		return s.store.GetUser(ctx, emailOrID)
+	}
+	e, err := validate.Email(emailOrID)
+	if err != nil {
+		return nil, domain.E(domain.CodeInvalid, "give the user's email address or 32-character ID")
+	}
+	id, err := s.store.GetUserIDByEmail(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetUser(ctx, id)
+}
+
+// OperatorRevokeLinks is the break-glass path for the server operator (the
+// `noddanas revoke-links` command, run with database access). It works even
+// when the web UI or every administrator account is unavailable or
+// compromised. An empty or malformed user ID is rejected (it never means
+// "everyone"); use OperatorRevokeAllLinks for that.
+func (s *Service) OperatorRevokeLinks(ctx context.Context, userID string) (int64, error) {
+	if err := validate.ID(userID); err != nil {
+		return 0, domain.E(domain.CodeInvalid, "a user ID is required")
+	}
+	id := userID
+	n, err := s.store.DeleteLinksByCreator(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_user", "actor", "cli", "target", id, "count", n)
+	return n, nil
+}
+
+// OperatorRevokeAllLinks revokes every public link (break-glass, operator CLI).
+func (s *Service) OperatorRevokeAllLinks(ctx context.Context) (int64, error) {
+	n, err := s.store.DeleteAllLinks(ctx)
+	if err != nil {
+		return 0, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_all", "actor", "cli", "count", n)
+	return n, nil
+}
+
 // ---- anonymous access via public links ---------------------------------------------
 
 // LinkView is what a link visitor receives: the link (with its encrypted

@@ -62,6 +62,7 @@ type Store interface {
 	TouchAppPassword(ctx context.Context, id string, now time.Time) error
 	ListAppPasswords(ctx context.Context, userID string) ([]*domain.AppPassword, error)
 	DeleteAppPassword(ctx context.Context, userID, id string) error
+	DeleteUserAppPasswords(ctx context.Context, userID string) (int64, error)
 	DeleteExpiredAuth(ctx context.Context, now time.Time) error
 }
 
@@ -235,6 +236,19 @@ func (m *Manager) EndSession(r *http.Request) *http.Cookie {
 // EndAllSessions signs the user out everywhere.
 func (m *Manager) EndAllSessions(ctx context.Context, userID string) error {
 	return m.store.DeleteUserSessions(ctx, userID)
+}
+
+// RevokeUserCredentials ends every session and deletes every app password
+// of a user (operator offboarding). It does not stop new sign-ins: that is
+// the identity provider's decision, so remove the user there first.
+func (m *Manager) RevokeUserCredentials(ctx context.Context, userID string) (appPasswords int64, err error) {
+	if userID == "" {
+		return 0, domain.E(domain.CodeInvalid, "user required")
+	}
+	if err := m.store.DeleteUserSessions(ctx, userID); err != nil {
+		return 0, err
+	}
+	return m.store.DeleteUserAppPasswords(ctx, userID)
 }
 
 // CreateAppPassword mints an app password. The token is returned once.

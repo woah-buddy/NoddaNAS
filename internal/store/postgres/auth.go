@@ -62,6 +62,7 @@ func (s *Store) DeleteUserSessions(ctx context.Context, userID string) error {
 	return mapErr(err)
 }
 
+// #nosec G101 -- column names, not a credential (only token hashes are stored)
 const appPasswordCols = `id, user_id, name, token_hash, read_only, created_at, last_used_at, expires_at`
 
 func (s *Store) CreateAppPassword(ctx context.Context, ap *domain.AppPassword) error {
@@ -105,6 +106,15 @@ func (s *Store) DeleteAppPassword(ctx context.Context, userID, id string) error 
 		return domain.ErrNotFound
 	}
 	return mapErr(err)
+}
+
+// DeleteUserAppPasswords removes all of a user's app passwords.
+func (s *Store) DeleteUserAppPasswords(ctx context.Context, userID string) (int64, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM app_passwords WHERE user_id=$1", userID)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *Store) DeleteExpiredAuth(ctx context.Context, now time.Time) error {

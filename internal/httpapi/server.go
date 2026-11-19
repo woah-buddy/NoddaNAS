@@ -155,6 +155,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/nodes/{id}/shares", s.authed(s.handleCreateShare))
 	mux.HandleFunc("DELETE /api/v1/shares/{id}", s.authed(s.handleDeleteShare))
 	mux.HandleFunc("GET /api/v1/shared-with-me", s.authed(s.handleSharedWithMe))
+	mux.HandleFunc("GET /api/v1/shared-by-me", s.authed(s.handleSharedByMe))
+	// Kill switches. Yours: any credential that can write. Everyone's:
+	// administrators, from an interactive session only (a leaked app
+	// password must not be able to take every link on the instance down).
+	mux.HandleFunc("POST /api/v1/links/revoke-all", s.authed(s.handleRevokeMyLinks))
+	mux.HandleFunc("POST /api/v1/admin/links/revoke-all", s.sessionOnly(s.handleAdminRevokeAllLinks))
 
 	// Public links (anonymous). The access token travels in request bodies,
 	// never URLs; the key that decrypts never reaches the server at all.

@@ -3,6 +3,10 @@
 //	noddanas serve                 run the server (default)
 //	noddanas migrate               apply database migrations and exit
 //	noddanas set-quota EMAIL SIZE  set a user's personal storage quota (e.g. 50GiB)
+//	noddanas revoke-links --user EMAIL|ID | --all
+//	                               revoke public links (break-glass; works without the web UI)
+//	noddanas revoke-access --user EMAIL|ID
+//	                               offboard: end sessions, delete app passwords, revoke links
 //	noddanas healthcheck           probe the local server (for container HEALTHCHECK)
 //	noddanas version               print the version
 package main
@@ -23,6 +27,7 @@ import (
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
 	"github.com/woah-buddy/NoddaNAS/internal/config"
+	"github.com/woah-buddy/NoddaNAS/internal/domain"
 	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
 	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
@@ -45,12 +50,16 @@ func main() {
 		err = migrate()
 	case "set-quota":
 		err = setQuota(os.Args[2:])
+	case "revoke-links":
+		err = revokeLinks(os.Args[2:])
+	case "revoke-access":
+		err = revokeAccess(os.Args[2:])
 	case "healthcheck":
 		err = healthcheck()
 	case "version":
 		fmt.Println(version)
 	default:
-		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "noddanas:", err)
@@ -177,6 +186,35 @@ func migrate() error {
 	return store.Migrate(context.Background())
 }
 
+// operator is the service and auth layer opened directly against the
+// database, for commands run from the server's shell.
+type operator struct {
+	svc   *service.Service
+	auth  *auth.Manager
+	store *postgres.Store
+	log   *slog.Logger
+}
+
+func adminService() (*operator, func(), error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, nil, fmt.Errorf("configuration:\n%w", err)
+	}
+	store, err := postgres.Open(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	blobs, err := fsblob.New(cfg.DataDir)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	// Operator actions are audited to stdout like the server's own events.
+	log := newLogger("info")
+	svc := service.New(store, blobs, cfg.Service, log)
+	return &operator{svc: svc, auth: auth.NewManager(store, svc, cfg.Auth, nil, nil), store: store, log: log}, store.Close, nil
+}
+
 func setQuota(args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: noddanas set-quota EMAIL SIZE (e.g. 50GiB)")
@@ -185,25 +223,53 @@ func setQuota(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("configuration:\n%w", err)
-	}
-	log := newLogger("warn")
-	store, err := postgres.Open(context.Background(), cfg.DatabaseURL)
+	op, closeFn, err := adminService()
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	blobs, err := fsblob.New(cfg.DataDir)
-	if err != nil {
-		return err
-	}
-	svc := service.New(store, blobs, cfg.Service, log)
-	if err := svc.SetUserQuotaByEmail(context.Background(), args[0], size); err != nil {
+	defer closeFn()
+	if err := op.svc.SetUserQuotaByEmail(context.Background(), args[0], size); err != nil {
 		return err
 	}
 	fmt.Printf("quota for %s set to %d bytes\n", args[0], size)
+	return nil
+}
+
+// revokeLinks is the break-glass kill switch for public links. It needs no
+// web session, so it works even if the UI is down or admin accounts are
+// compromised. The scope must be stated explicitly: there is no default.
+func revokeLinks(args []string) error {
+	const usage = "usage: noddanas revoke-links --user EMAIL|ID   (one user's links)\n" +
+		"       noddanas revoke-links --all             (every public link on this instance)"
+	var all bool
+	var who string
+	switch {
+	case len(args) == 1 && args[0] == "--all":
+		all = true
+	case len(args) == 2 && args[0] == "--user" && args[1] != "":
+		who = args[1]
+	default:
+		return errors.New(usage)
+	}
+	op, closeFn, err := adminService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	var n int64
+	if all {
+		n, err = op.svc.OperatorRevokeAllLinks(context.Background())
+	} else {
+		var u *domain.User
+		if u, err = op.svc.OperatorFindUser(context.Background(), who); err != nil {
+			return fmt.Errorf("%s: %w", who, err)
+		}
+		n, err = op.svc.OperatorRevokeLinks(context.Background(), u.ID)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "revoked %d public link(s)\n", n)
 	return nil
 }
 
@@ -224,15 +290,48 @@ func healthcheck() error {
 	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
 		// Loopback probe of our own listener; the certificate names the
 		// public host, not 127.0.0.1.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // loopback self-probe only
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- loopback self-probe of our own listener
 	}}
-	resp, err := client.Get(scheme + "://" + addr + "/healthz")
+	resp, err := client.Get(scheme + "://" + addr + "/healthz") // #nosec G704 -- loopback address from our own listen setting
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("unhealthy: %s", resp.Status)
 	}
+	return nil
+}
+
+// revokeAccess offboards a user: every browser session ends, every app
+// password stops working, and every public link they created is revoked.
+// Remove the user from the identity provider (or the allowed groups) first,
+// or they can simply sign in again. Their files and team memberships are
+// left in place for an administrator to reassign or remove.
+func revokeAccess(args []string) error {
+	if len(args) != 2 || args[0] != "--user" || args[1] == "" {
+		return errors.New("usage: noddanas revoke-access --user EMAIL|ID")
+	}
+	op, closeFn, err := adminService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	ctx := context.Background()
+	u, err := op.svc.OperatorFindUser(ctx, args[1])
+	if err != nil {
+		return fmt.Errorf("%s: %w", args[1], err)
+	}
+	apps, err := op.auth.RevokeUserCredentials(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	links, err := op.svc.OperatorRevokeLinks(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	op.log.Warn("audit", "event", "operator.access.revoke", "actor", "cli", "target", u.ID, "app_passwords", apps, "links", links)
+	fmt.Fprintf(os.Stderr, "%s (%s): all sessions ended, %d app password(s) and %d public link(s) revoked\n",
+		u.ID, u.DisplayName, apps, links)
 	return nil
 }

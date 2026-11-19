@@ -253,6 +253,69 @@ func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request, p ser
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// sharedByMeView describes a share to its creator. It deliberately omits
+// key material (sealed keys, link keys, signatures): the list is for
+// reviewing and revoking, and the creator has no use for those fields.
+type sharedByMeView struct {
+	ID           string     `json:"id"`
+	Type         string     `json:"type"`
+	NodeID       string     `json:"nodeId"`
+	SpaceID      string     `json:"spaceId"`
+	Permission   string     `json:"permission"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	RecipientID  string     `json:"recipientId,omitempty"`
+	HasPassword  bool       `json:"hasPassword,omitempty"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	MaxDownloads int64      `json:"maxDownloads,omitempty"`
+	Downloads    int64      `json:"downloads,omitempty"`
+	Status       string     `json:"status"`
+}
+
+func (s *Server) handleSharedByMe(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	items, truncated, err := s.svc.SharedByMe(r.Context(), p)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	type item struct {
+		Share sharedByMeView `json:"share"`
+		Node  *nodeView      `json:"node"` // null if you can no longer see the item
+	}
+	now := time.Now()
+	out := make([]item, len(items))
+	for i, it := range items {
+		sh := it.Share
+		out[i].Share = sharedByMeView{
+			ID: sh.ID, Type: string(sh.Kind), NodeID: sh.NodeID, SpaceID: sh.SpaceID, Permission: string(sh.Permission),
+			CreatedAt: sh.CreatedAt, RecipientID: sh.RecipientID, HasPassword: sh.PasswordHash != "",
+			ExpiresAt: sh.ExpiresAt, MaxDownloads: sh.MaxDownloads, Downloads: sh.Downloads, Status: sh.Status(now),
+		}
+		if it.Node != nil {
+			v := viewInfo(it.Node)
+			out[i].Node = &v
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": out, "truncated": truncated})
+}
+
+func (s *Server) handleRevokeMyLinks(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	n, err := s.svc.RevokeMyLinks(r.Context(), p)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"revoked": n})
+}
+
+func (s *Server) handleAdminRevokeAllLinks(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	n, err := s.svc.AdminRevokeAllLinks(r.Context(), p)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"revoked": n})
+}
+
 func (s *Server) handleSharedWithMe(w http.ResponseWriter, r *http.Request, p service.Principal) {
 	items, err := s.svc.SharedWithMe(r.Context(), p)
 	if err != nil {

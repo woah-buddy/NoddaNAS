@@ -62,6 +62,8 @@ server is still responsible for (access control, integrity of structure, availab
 | Concurrency races, quota overshoot | Same-statement conditions in SQL | `TestQuotaIsAtomic` |
 | SQL injection | Parameterized queries; IDs format-validated | `store/postgres` |
 | Malicious or careless theme (CSS exfiltration, hidden warnings, fake UI, polyglot logo) | Themes are hex color tokens only, never CSS; stylesheet generated server-side; CSP unchanged; WCAG contrast enforced for every mode and accent; fail closed at startup; logos re-encoded to PNG, SVG refused, pixel bound checked before decode; operator-only (no web editing) | `TestThemeRejected`, `TestCSSIsInert`, `TestSanitizeLogo`, `TestThemeEndpoints` |
+| Leaked or abused public links at scale | Per-user and instance-wide kill switches revoke links in one SQL statement; the global web switch needs an admin *session* (not an app password) and a typed confirmation; per-user and global revocation are separate store methods, so no input can widen one into the other; `noddanas revoke-links` works without the web UI | `TestSharedByMeAndLinkKillSwitches`, e2e |
+| Departed or compromised user keeps access through existing sessions or app passwords | `noddanas revoke-access` ends sessions, deletes app passwords and revokes links; the IdP blocks new sign-ins | e2e "operator offboarding" |
 | CSRF | Go `CrossOriginProtection`, `SameSite=Lax` sessions, Host validation; the SAML ACS is exempt because it is authenticated by signature plus single-use binding | e2e |
 
 ### Repudiation

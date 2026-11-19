@@ -882,6 +882,32 @@ func (s *Store) ListSharesByRecipient(ctx context.Context, userID string) ([]*do
 	return scanShares(s.db.Query(ctx, "SELECT "+shareCols+" FROM shares WHERE recipient_id=$1 ORDER BY created_at DESC LIMIT 1000", userID))
 }
 
+// ListSharesByCreator returns up to limit shares the user created, newest first.
+func (s *Store) ListSharesByCreator(ctx context.Context, userID string, limit int) ([]*domain.Share, error) {
+	return scanShares(s.db.Query(ctx, "SELECT "+shareCols+" FROM shares WHERE created_by=$1 ORDER BY created_at DESC LIMIT $2", userID, limit))
+}
+
+// DeleteLinksByCreator revokes every public link the user created, in one
+// statement, and reports how many there were.
+func (s *Store) DeleteLinksByCreator(ctx context.Context, userID string) (int64, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM shares WHERE kind='link' AND created_by=$1", userID)
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteAllLinks revokes every public link on the instance. It is a separate
+// method (not DeleteLinksByCreator with an empty user) so that no input
+// value can widen a per-user revocation into a global one.
+func (s *Store) DeleteAllLinks(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM shares WHERE kind='link'")
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) GetGrants(ctx context.Context, userID string, nodeIDs []string) ([]*domain.Share, error) {
 	return scanShares(s.db.Query(ctx, "SELECT "+shareCols+
 		" FROM shares WHERE kind='user' AND recipient_id=$1 AND node_id = ANY($2)", userID, nodeIDs))

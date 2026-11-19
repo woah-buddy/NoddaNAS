@@ -119,6 +119,9 @@ type Store interface {
 	DeleteShare(ctx context.Context, id string) error
 	ListSharesByNode(ctx context.Context, nodeID string) ([]*domain.Share, error)
 	ListSharesByRecipient(ctx context.Context, userID string) ([]*domain.Share, error)
+	ListSharesByCreator(ctx context.Context, userID string, limit int) ([]*domain.Share, error)
+	DeleteLinksByCreator(ctx context.Context, userID string) (int64, error)
+	DeleteAllLinks(ctx context.Context) (int64, error)
 	GetGrants(ctx context.Context, userID string, nodeIDs []string) ([]*domain.Share, error)
 	RecordLinkDownload(ctx context.Context, id string) error
 	RecordLinkFailure(ctx context.Context, id string, threshold int64, until time.Time) error

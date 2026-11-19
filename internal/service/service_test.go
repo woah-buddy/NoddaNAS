@@ -750,3 +750,131 @@ func TestPublicLinks(t *testing.T) {
 	_, _, err = e.svc.CreateLink(e.ctx, a.p, f.ID, service.LinkOptions{ShareID: secure.NewID(), LinkKey: view.Share.LinkKey, ExpiresAt: &past})
 	wantCode(t, err, domain.CodeInvalid)
 }
+
+// link creates a public link for c on node id and returns its credential.
+func (c *client) link(id, name string, opts service.LinkOptions) service.LinkCredential {
+	c.t.Helper()
+	opts.ShareID = secure.NewID()
+	opts.LinkKey = e2ee.LinkKey(e2ee.NewLinkSecret(), opts.ShareID, id, name, c.keys[id])
+	_, token, err := c.e.svc.CreateLink(c.e.ctx, c.p, id, opts)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return service.LinkCredential{Token: token}
+}
+
+func TestSharedByMeAndLinkKillSwitches(t *testing.T) {
+	e := newEnv(t)
+	a, b, admin := e.user("alice"), e.user("bob"), e.user("root", "nas-admins")
+	docs := a.mkdir(a.root, "Docs")
+	f := must[*domain.Node](t)(a.put(docs, "report.pdf", "pdf"))
+	l1 := a.link(docs, "Docs", service.LinkOptions{})
+	l2 := a.link(f.ID, "report.pdf", service.LinkOptions{MaxDownloads: 1, Password: "a long link password"})
+	bobFile := must[*domain.Node](t)(b.put(b.root, "b.txt", "bee"))
+	lb := b.link(bobFile.ID, "b.txt", service.LinkOptions{})
+
+	// Alice also shares Docs with Bob directly; the kill switch must leave that alone.
+	rpub := e.users[b.u.ID]
+	shareID := secure.NewID()
+	sealed, sig, _ := e2ee.ShareNode(a.acct, rpub, shareID, docs, "read", "Docs", a.keys[docs])
+	must[*domain.Share](t)(e.svc.ShareWithUser(e.ctx, a.p, docs, service.NewUserShare{
+		ShareID: shareID, RecipientID: b.u.ID, Permission: domain.PermRead, SealedKey: sealed, Sig: sig}))
+
+	// Use up l2's single download: its status becomes "exhausted".
+	l2.Password = "a long link password"
+	if c, err := e.svc.LinkOpen(e.ctx, l2, f.ID); err != nil {
+		t.Fatal(err)
+	} else {
+		c.Close()
+	}
+
+	// Shared by me: Alice sees her three shares (and not Bob's), newest first, with status.
+	items, truncated, err := e.svc.SharedByMe(e.ctx, a.p)
+	if err != nil || truncated || len(items) != 3 {
+		t.Fatalf("shared-by-me: %d items, truncated=%v, %v", len(items), truncated, err)
+	}
+	kinds := map[domain.ShareKind]int{}
+	for _, it := range items {
+		kinds[it.Share.Kind]++
+		if it.Share.CreatedBy != a.u.ID || it.Node == nil {
+			t.Fatalf("unexpected item %+v", it)
+		}
+		if it.Share.NodeID == f.ID && it.Share.Status(time.Now()) != "exhausted" {
+			t.Fatalf("status = %s", it.Share.Status(time.Now()))
+		}
+	}
+	if kinds[domain.ShareLink] != 2 || kinds[domain.ShareUser] != 1 {
+		t.Fatalf("kinds = %v", kinds)
+	}
+
+	// A read-only credential cannot pull the switch.
+	_, err = e.svc.RevokeMyLinks(e.ctx, service.Principal{UserID: a.u.ID, ReadOnly: true})
+	wantCode(t, err, domain.CodeForbidden)
+
+	// Alice's switch: both her links die at once; Bob's link and her user share survive.
+	if n, err := e.svc.RevokeMyLinks(e.ctx, a.p); err != nil || n != 2 {
+		t.Fatalf("revoke mine = %d, %v", n, err)
+	}
+	for _, cred := range []service.LinkCredential{l1, l2} {
+		_, err := e.svc.LinkNode(e.ctx, cred, "")
+		wantCode(t, err, domain.CodeNotFound)
+	}
+	must[*service.LinkView](t)(e.svc.LinkNode(e.ctx, lb, ""))
+	if got := must[[]service.SharedItem](t)(e.svc.SharedWithMe(e.ctx, b.p)); len(got) != 1 {
+		t.Fatal("user share was revoked by the link kill switch")
+	}
+	if n, _ := e.svc.RevokeMyLinks(e.ctx, a.p); n != 0 {
+		t.Fatal("second revoke found links")
+	}
+
+	// The global switch is for administrators only.
+	_, err = e.svc.AdminRevokeAllLinks(e.ctx, a.p)
+	wantCode(t, err, domain.CodeForbidden)
+	_, err = e.svc.AdminRevokeAllLinks(e.ctx, service.Principal{UserID: admin.u.ID, ReadOnly: true})
+	wantCode(t, err, domain.CodeForbidden)
+	if n, err := e.svc.AdminRevokeAllLinks(e.ctx, admin.p); err != nil || n != 1 {
+		t.Fatalf("admin revoke = %d, %v", n, err)
+	}
+	_, err = e.svc.LinkNode(e.ctx, lb, "")
+	wantCode(t, err, domain.CodeNotFound)
+
+	// Operator break-glass: per user needs a real email; there is no "empty means everyone".
+	b.link(bobFile.ID, "b.txt", service.LinkOptions{})
+	a.link(f.ID, "report.pdf", service.LinkOptions{})
+	_, err = e.svc.OperatorRevokeLinks(e.ctx, "")
+	wantCode(t, err, domain.CodeInvalid)
+	_, err = e.svc.OperatorFindUser(e.ctx, "not an email")
+	wantCode(t, err, domain.CodeInvalid)
+	byEmail := must[*domain.User](t)(e.svc.OperatorFindUser(e.ctx, "bob@example.test"))
+	byID := must[*domain.User](t)(e.svc.OperatorFindUser(e.ctx, b.u.ID))
+	if byEmail.ID != b.u.ID || byID.ID != b.u.ID {
+		t.Fatal("operator user lookup")
+	}
+	if n, err := e.svc.OperatorRevokeLinks(e.ctx, byEmail.ID); err != nil || n != 1 {
+		t.Fatalf("operator revoke bob = %d, %v", n, err)
+	}
+	if n, err := e.svc.OperatorRevokeAllLinks(e.ctx); err != nil || n != 1 {
+		t.Fatalf("operator revoke all = %d, %v", n, err)
+	}
+
+	// An item the creator can no longer see (here: trashed) stays listed so
+	// its link can still be found and revoked, but without node details.
+	g := must[*domain.Node](t)(a.put(a.root, "gone.txt", "x"))
+	a.link(g.ID, "gone.txt", service.LinkOptions{})
+	if err := a.trash(g.ID, "gone.txt", "file"); err != nil {
+		t.Fatal(err)
+	}
+	items, _, _ = e.svc.SharedByMe(e.ctx, a.p)
+	var hidden int
+	for _, it := range items {
+		if it.Share.NodeID == g.ID && it.Node == nil {
+			hidden++
+		}
+	}
+	if hidden != 1 {
+		t.Fatal("link on an item the creator cannot see should be listed without node details")
+	}
+	if n, _ := e.svc.RevokeMyLinks(e.ctx, a.p); n != 1 {
+		t.Fatalf("revoking the hidden link: %d", n)
+	}
+}

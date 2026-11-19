@@ -94,6 +94,9 @@ IDs because they are bound into the encryption.
 | `POST /api/v1/nodes/{id}/shares` | User: `{"type":"user","shareId","recipientId","permission","sealedKey","sig"}`. Link: `{"type":"link","shareId","linkKey","password"?,"expiresAt"?,"maxDownloads"?}` → `token`, `urlPrefix` (append `.` + base64url link secret) |
 | `DELETE /api/v1/shares/{id}` | Revoke (owner/manager/creator) or leave (recipient) |
 | `GET /api/v1/shared-with-me` | Shares made with you, with sealed keys |
+| `GET /api/v1/shared-by-me` | Shares you created (`items[].share` with `status`: `active`, `expired`, `exhausted` or `locked`; `items[].node`, or null if you can no longer see the item), plus `truncated`. No key material. |
+| `POST /api/v1/links/revoke-all` | Kill switch: revoke every public link you created → `{"revoked": n}` (not with read-only credentials) |
+| `POST /api/v1/admin/links/revoke-all` | *session*, admin. Revoke every public link on the server → `{"revoked": n}` |
 
 ## Public links (anonymous; token in the body, key never sent)
 
