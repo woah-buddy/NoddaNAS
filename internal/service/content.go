@@ -58,7 +58,7 @@ func (s *Service) resolveUploadTarget(ctx context.Context, p Principal, req *Upl
 	if a.node.Kind != domain.KindFolder {
 		return nil, domain.E(domain.CodeInvalid, "parent is not a folder")
 	}
-	if len(a.chain) >= s.cfg.MaxDepth {
+	if len(a.chain) >= s.conf().MaxDepth {
 		return nil, errTooDeep
 	}
 	if _, err := s.store.GetChildByHash(ctx, a.node.ID, req.Entry.NameHash); err == nil {
@@ -110,7 +110,7 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	switch {
 	case req.Size >= 0 && req.Size != total:
 		return nil, domain.E(domain.CodeInvalid, "Content-Length does not match the container's declared size")
-	case total > s.cfg.MaxFileSize:
+	case total > s.conf().MaxFileSize:
 		return nil, domain.E(domain.CodeTooLarge, "file exceeds the maximum size")
 	case total > target.space.QuotaBytes-target.space.UsedBytes:
 		return nil, domain.E(domain.CodeQuota, "storage quota exceeded") // advisory; the binding check is atomic
@@ -178,11 +178,11 @@ func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req 
 // pruneVersions keeps at most MaxVersions versions per file.
 func (s *Service) pruneVersions(ctx context.Context, n *domain.Node) {
 	vs, err := s.store.ListVersions(ctx, n.ID)
-	if err != nil || len(vs) <= s.cfg.MaxVersions {
+	if err != nil || len(vs) <= s.conf().MaxVersions {
 		return
 	}
 	var old []*domain.Version
-	for _, v := range vs[s.cfg.MaxVersions:] {
+	for _, v := range vs[s.conf().MaxVersions:] {
 		if v.ID != n.VersionID {
 			old = append(old, v)
 		}

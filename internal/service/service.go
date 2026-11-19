@@ -12,6 +12,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,10 @@ type Principal struct {
 	// ReadOnly principals (e.g. a read-only app password) are capped at
 	// read permission no matter what they own or were granted.
 	ReadOnly bool
+	// ReauthAt is when the person last re-authenticated at their identity
+	// provider on request (zero if never in this session). Administrative
+	// changes require it to be recent; see RequireRecentSignIn.
+	ReauthAt time.Time
 }
 
 // Config holds tunable limits. Defaults are deliberately conservative.
@@ -64,22 +69,31 @@ func DefaultConfig() Config {
 type Service struct {
 	store Store
 	blobs BlobStore
-	cfg   Config
+	cfg   atomic.Pointer[Config]
 	log   *slog.Logger
 	now   func() time.Time
 }
 
 // New wires a Service.
 func New(store Store, blobs BlobStore, cfg Config, log *slog.Logger) *Service {
-	return &Service{store: store, blobs: blobs, cfg: cfg, log: log, now: func() time.Time { return time.Now().UTC() }}
+	s := &Service{store: store, blobs: blobs, log: log, now: func() time.Time { return time.Now().UTC() }}
+	s.cfg.Store(&cfg)
+	return s
 }
 
-// Config returns the service's configuration.
-func (s *Service) Config() Config { return s.cfg }
+// Config returns the service's current configuration.
+func (s *Service) Config() Config { return *s.cfg.Load() }
+
+// SetConfig replaces the configuration while the service runs (settings
+// changed in the web admin area). Operations already under way finish
+// with the configuration they started with.
+func (s *Service) SetConfig(c Config) { s.cfg.Store(&c) }
+
+func (s *Service) conf() *Config { return s.cfg.Load() }
 
 func (s *Service) isAdminGroups(groups []string) bool {
 	for _, g := range groups {
-		if slices.Contains(s.cfg.AdminGroups, g) {
+		if slices.Contains(s.conf().AdminGroups, g) {
 			return true
 		}
 	}
@@ -105,9 +119,9 @@ func toAttrs(kv []any) []slog.Attr {
 func (s *Service) pageSize(n int) int {
 	switch {
 	case n <= 0:
-		return s.cfg.PageSize
-	case n > s.cfg.MaxPageSize:
-		return s.cfg.MaxPageSize
+		return s.conf().PageSize
+	case n > s.conf().MaxPageSize:
+		return s.conf().MaxPageSize
 	default:
 		return n
 	}

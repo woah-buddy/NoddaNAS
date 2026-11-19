@@ -5,8 +5,10 @@ NoddaNAS has two layers of theming:
 - **Users** choose a mode (match system, light, dark, high contrast) and an accent color under
   *Settings → Appearance*. The choice is stored in that browser only (`localStorage`) and never
   sent to the server.
-- **Operators** can rename the instance, add a logo, adjust the light and dark palettes, add accent
-  colors and choose the default accent.
+- **Operators and administrators** can rename the instance, add a logo, adjust the light and dark
+  palettes, add accent colors and choose the default accent: in the server's configuration (below)
+  or under *Admin → Branding* in the web app, where the theme is edited as the same JSON and the
+  logo uploaded. A value in the configuration wins and is locked in the web app.
 
 "Match system" follows the operating system's light/dark setting, and switches to high contrast
 when the OS asks for more contrast (`prefers-contrast: more`).
@@ -56,8 +58,8 @@ that already exists (`blue`, `green`, `purple`, `orange`, `teal`, `rose`) replac
 
 ### Validation
 
-The theme is checked at startup. If anything is wrong, NoddaNAS **refuses to start** and lists every
-problem. It never falls back silently. Besides syntax, every combination of mode and accent must
+The theme is checked at startup, and before any web change is saved. If anything is wrong,
+NoddaNAS **refuses to start** (or to save) and lists every problem. It never falls back silently. Besides syntax, every combination of mode and accent must
 meet WCAG 2.x AA contrast (4.5:1) for each pair below:
 
 - `text` on `bg`, `panel` and `rowHover`
@@ -103,6 +105,14 @@ the rest of NoddaNAS.
    early script and the app accept a value only if it is in the allowlist. Anything else in
    storage is ignored. The values are only ever matched by CSS attribute selectors and are never
    inserted as markup or CSS. The brand name is set with `textContent`.
-7. **No runtime theme editing.** Branding is set by the operator in configuration, the same trust
-   level as the binary, not through an admin web page. This keeps theming out of the web attack
-   surface: an XSS bug or a stolen admin session cannot restyle the page into a phishing page.
+7. **Web editing is guarded, and can be locked.** Administrators can change the name, theme and
+   logo under Admin → Branding. That puts branding within reach of a stolen administrator session,
+   so the guards are layered. Every rule above still applies, because the web and the configuration
+   go through the same validator: a web theme is still only colors, contrast-checked, and a logo is
+   still re-encoded pixels. Saving needs a recent re-authentication at the identity provider, not
+   just a session (ADMIN_GUIDE §7, "Confirm it's you"). Every change is audited as
+   `settings.changed`. Setting `NODDANAS_BRAND_NAME`, `NODDANAS_THEME_FILE` or
+   `NODDANAS_BRAND_LOGO_FILE` locks that item to the configuration, and `NODDANAS_WEB_SETTINGS=false`
+   locks everything. So even a theme saved by an attacker cannot inject markup or script, hide a
+   warning or break contrast: the most it can change is colors, the name and the logo, which the
+   re-authentication and the audit trail make hard to do unnoticed.

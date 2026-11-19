@@ -80,7 +80,7 @@ func (s *Service) CreateTeam(ctx context.Context, p Principal, t NewTeam) (*doma
 	if err != nil {
 		return nil, err
 	}
-	if !s.cfg.TeamCreation && !me.Admin {
+	if !s.conf().TeamCreation && !me.Admin {
 		return nil, domain.E(domain.CodeForbidden, "only administrators can create team folders here")
 	}
 	if me.Keys == nil {
@@ -104,7 +104,7 @@ func (s *Service) CreateTeam(ctx context.Context, p Principal, t NewTeam) (*doma
 	sp := &domain.Space{
 		ID: t.ID, Kind: domain.SpaceTeam, RootID: t.RootID, NameEnc: t.NameEnc,
 		PublicKey: t.Keys.PublicKey, KeySig: t.Keys.KeySig, KeySigner: me.ID, RootKey: t.Keys.RootKey,
-		QuotaBytes: s.cfg.DefaultTeamQuota, CreatedAt: now, CreatedBy: me.ID,
+		QuotaBytes: s.conf().DefaultTeamQuota, CreatedAt: now, CreatedBy: me.ID,
 	}
 	root := &domain.Node{ID: t.RootID, SpaceID: t.ID, Kind: domain.KindFolder,
 		CreatedAt: now, CreatedBy: me.ID, ModifiedAt: now, ModifiedBy: me.ID, Revision: 1}
@@ -348,7 +348,7 @@ func (s *Service) AdminListTeams(ctx context.Context, p Principal) ([]*domain.Sp
 
 // AdminSetQuota sets any space's quota (administrators).
 func (s *Service) AdminSetQuota(ctx context.Context, p Principal, spaceID string, quota int64) error {
-	if err := s.requireAdmin(ctx, p); err != nil {
+	if err := s.RequireFreshAdmin(ctx, p); err != nil {
 		return err
 	}
 	if err := validate.ID(spaceID); err != nil {

@@ -10,6 +10,10 @@
 //	noddanas revoke-sessions --all sign everyone out of every browser (e.g. after a restore)
 //	noddanas verify-storage [--hash]
 //	                               check every stored file is present and intact (no keys needed)
+//	noddanas setup-link            print a one-time link to set up sign-in and become an administrator
+//	noddanas settings show         list settings and where each value comes from (secrets hidden)
+//	noddanas settings reset KEY|GROUP|all ...
+//	                               clear settings saved in the web admin area (break-glass)
 //	noddanas healthcheck           probe the local server (for container HEALTHCHECK)
 //	noddanas version               print the version
 package main
@@ -33,6 +37,7 @@ import (
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
 	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/NoddaNAS/internal/settings"
 	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
 	"github.com/woah-buddy/NoddaNAS/web"
 )
@@ -61,12 +66,16 @@ func main() {
 		err = revokeSessions(os.Args[2:])
 	case "verify-storage":
 		err = verifyStorage(os.Args[2:])
+	case "setup-link":
+		err = setupLink(os.Args[2:])
+	case "settings":
+		err = settingsCmd(os.Args[2:])
 	case "healthcheck":
 		err = healthcheck()
 	case "version":
 		fmt.Println(version)
 	default:
-		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, setup-link, settings, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "noddanas:", err)
@@ -108,25 +117,38 @@ func serve() error {
 	}
 
 	svc := service.New(store, blobs, cfg.Service, log)
-	var oidc *auth.OIDC
-	var saml *auth.SAML
-	if cfg.OIDC != nil {
-		oidc = auth.NewOIDC(*cfg.OIDC)
+	am := auth.NewManager(store, svc, cfg.Auth, nil, nil)
+	// The settings manager merges the environment with settings saved in
+	// the web admin area, applies them to the service and the sign-in
+	// methods, and keeps them current.
+	sm, err := settings.New(cfg, store, svc, am, log)
+	if err != nil {
+		return err
 	}
-	if cfg.SAML != nil {
-		saml = auth.NewSAML(*cfg.SAML)
-		if !cfg.SAML.TrustEmail {
-			log.Info("SAML emails are not treated as verified; set NODDANAS_SAML_TRUST_EMAIL=true if your IdP verifies them (needed for sharing by email)")
-		}
+	if err := sm.Load(ctx); err != nil {
+		return err
 	}
-	am := auth.NewManager(store, svc, cfg.Auth, oidc, saml)
-	if cfg.Policy.Open() {
+	rt := sm.Runtime()
+	switch {
+	case sm.SetupMode():
+		log.Warn("NoddaNAS is not set up yet: no sign-in method is configured. " +
+			"On the server, run `noddanas setup-link` for a one-time setup link (it is printed there, never logged)")
+	case rt.Policy.Open():
 		log.Warn("no sign-in policy set: every account your identity provider authenticates can sign in " +
-			"(set NODDANAS_ALLOWED_GROUPS or NODDANAS_ALLOWED_EMAIL_DOMAINS)")
+			"(set allowed groups or email domains in the admin area, or NODDANAS_ALLOWED_GROUPS / NODDANAS_ALLOWED_EMAIL_DOMAINS)")
+	}
+	if rt.SAML != nil && !rt.SAML.TrustEmail {
+		log.Info("SAML emails are not treated as verified; turn on \"trust asserted emails\" if your IdP verifies them (needed for sharing by email)")
+	}
+	if cfg.SettingsKey == nil {
+		log.Info("NODDANAS_SETTINGS_KEY is not set: secrets such as the OIDC client secret cannot be saved from the web admin area")
 	}
 	api := httpapi.New(svc, am, httpapi.Config{
-		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV, Theme: cfg.Theme,
+		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV, Theme: rt.Theme, Settings: sm,
 	}, log, web.Static(), store, blobs)
+	sm.OnApply(func(rt *config.Runtime) { api.SetTheme(rt.Theme) })
+	// Other replicas may save settings too; pick their changes up.
+	go sm.Watch(ctx, 15*time.Second)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -191,6 +213,74 @@ func migrate() error {
 	}
 	defer store.Close()
 	return store.Migrate(context.Background())
+}
+
+// setupLink prints a one-time setup link. It goes to this terminal only:
+// whoever opens it can choose the identity provider and become an
+// administrator, so it is never written to a log.
+func setupLink(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: noddanas setup-link")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("configuration:\n%w", err)
+	}
+	store, err := postgres.Open(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	link, exp, err := settings.NewSetupLink(context.Background(), store, cfg, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Open this link to set up sign-in. The first person to sign in through it becomes an administrator.\n\n  %s\n\n"+
+		"It works once, until %s, and replaces any earlier setup link. Treat it like a password: share it only with\n"+
+		"the person setting up NoddaNAS, over a channel you trust.\n", link, exp.Format(time.RFC1123))
+	return nil
+}
+
+// settingsCmd lists or clears settings saved in the web admin area. Reset
+// is the way out when saved settings stop the server from starting, or
+// lock everyone out; running servers pick the change up within seconds.
+func settingsCmd(args []string) error {
+	const usage = "usage: noddanas settings show\n       noddanas settings reset KEY|GROUP|all ...   (e.g. OIDC_CLIENT_SECRET, oidc, saml, branding)"
+	if len(args) == 0 || args[0] != "show" && args[0] != "reset" || args[0] == "show" && len(args) != 1 || args[0] == "reset" && len(args) < 2 {
+		return errors.New(usage)
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("configuration:\n%w", err)
+	}
+	store, err := postgres.Open(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if args[0] == "show" {
+		lines, err := settings.Describe(ctx, cfg, store)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%-24s %-8s %s\n", "SETTING", "SOURCE", "VALUE")
+		for _, l := range lines {
+			fmt.Println(l)
+		}
+		return nil
+	}
+	removed, err := settings.Reset(ctx, store, args[1:], time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if len(removed) == 0 {
+		fmt.Println("nothing to reset: none of those settings is saved in the web admin area")
+		return nil
+	}
+	newLogger("info").Info("audit", "event", "settings.reset", "user", "cli", "keys", removed)
+	fmt.Printf("reset %s (back to the environment or the default)\n", strings.Join(removed, ", "))
+	return nil
 }
 
 // operator is the service and auth layer opened directly against the

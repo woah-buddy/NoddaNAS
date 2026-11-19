@@ -18,8 +18,10 @@ for shape and size. `internal/client` is a complete reference client.
 | `invalid` | 400 | Bad input (including a malformed container or opaque field) |
 | `unauthorized` | 401 | Not signed in / bad credentials / link password needed |
 | `forbidden` | 403 | You can see the item but lack the needed permission or role |
+| `reauth_required` | 403 | An administrative change needs a recent sign-in: send the browser to `/auth/reauth` |
 | `not_found` | 404 | Does not exist **or you cannot see it** |
 | `conflict` | 409 | Name hash taken (`detail.existingId`, `detail.existingKind`) |
+| `confirm_required` | 409 | Repeat the request with `detail.confirm` added to its `confirm` list, after showing `message` to the person |
 | `gone` | 410 | Link expired or download limit reached |
 | `precondition` | 412 | Revision mismatch, or a prerequisite (e.g. recipient has no keys) |
 | `too_large` | 413 | Over the size limit |
@@ -33,12 +35,22 @@ IDs because they are bound into the encryption.
 
 | Method & path | |
 |---|---|
-| `GET /api/v1/auth/methods` | `{"oidc": bool, "saml": bool}` |
+| `GET /api/v1/auth/methods` | `{"oidc": bool, "saml": bool, "setup": bool}`; `setup` is true when no method is configured yet |
 | `GET /auth/login?return_to=/path` | OIDC sign-in |
 | `GET /auth/saml/login?return_to=/path` | SAML sign-in (SP-initiated) |
 | `POST /auth/saml/acs` | SAML assertion consumer (HTTP-POST binding) |
 | `GET /auth/saml/metadata` | SP metadata for your IdP |
 | `POST /auth/logout` | Ends the session; returns `{"logoutUrl"}` (OIDC RP-initiated logout) |
+| `GET /auth/reauth?return_to=/path` | *session*. "Confirm it's you": sign in again at the IdP (forced), through the method the account uses; the new session counts as a recent sign-in for 15 minutes |
+
+**First-time setup** with the link from `noddanas setup-link` (the token is the URL fragment; send
+it only in request bodies):
+
+| Method & path | |
+|---|---|
+| `POST /api/v1/setup/view` | `{"token"}` → the sign-in settings, as in `GET /api/v1/admin/settings` |
+| `POST /api/v1/setup/save` | `{"token","revision","set","confirm"}`: change sign-in and access settings only |
+| `POST /api/v1/setup/login` | `{"token","method":"oidc"\|"saml"}` → `{"redirect"}` and the sign-in cookie. Completing that sign-in makes the person an administrator and spends the token. |
 
 ## Account and keys
 
@@ -67,7 +79,7 @@ IDs because they are bound into the encryption.
 | `DELETE /api/v1/spaces/{id}/members/{user}` | (manage, or yourself to leave) |
 | `GET /api/v1/spaces/{id}/groups` | Group mappings |
 | `PUT / DELETE /api/v1/spaces/{id}/groups/{group}` | (admin) `{"role"}` |
-| `PUT /api/v1/spaces/{id}/quota` | (admin) `{"bytes"}` |
+| `PUT /api/v1/spaces/{id}/quota` | (admin, recent sign-in) `{"bytes"}` |
 | `GET /api/v1/admin/spaces` | (admin) all team folders |
 | `GET / DELETE /api/v1/spaces/{id}/trash` | List (write) / empty (manage) |
 
@@ -98,7 +110,7 @@ IDs because they are bound into the encryption.
 | `GET /api/v1/shared-with-me` | Shares made with you, with sealed keys |
 | `GET /api/v1/shared-by-me` | Shares you created (`items[].share` with `status`: `active`, `expired`, `exhausted` or `locked`; `items[].node`, or null if you can no longer see the item), plus `truncated`. No key material. |
 | `POST /api/v1/links/revoke-all` | Kill switch: revoke every public link you created → `{"revoked": n}` (not with read-only credentials) |
-| `POST /api/v1/admin/links/revoke-all` | *session*, admin. Revoke every public link on the server → `{"revoked": n}` |
+| `POST /api/v1/admin/links/revoke-all` | *session*, admin, recent sign-in. Revoke every public link on the server → `{"revoked": n}` |
 
 ## Public links (anonymous; token in the body, key never sent)
 
@@ -112,6 +124,22 @@ IDs because they are bound into the encryption.
 
 `/dav/` with an app password: `/dav/<spaceId>/` contains `_noddanas-space.json`,
 `_noddanas-folder.json`, subfolders by ID and `<fileId>.ndne` containers. Write methods return 405.
+
+## Administration
+
+All *session* and administrators only. Changes need a recent sign-in (`reauth_required` otherwise).
+
+| Method & path | |
+|---|---|
+| `GET /api/v1/admin/session` | `{"recent": bool, "recentUntil", "window"}` |
+| `GET /api/v1/admin/settings` | `{"revision","readOnly","canStoreSecrets","setupMode","groups":[{"id","label","fromServer"}],"fields":[{"key","group","kind","label","help","default","value","isSet","source","locked","env"}],"signIn":{"oidcRedirectUri","samlMetadataUrl","samlAcsUrl"}}`. Secrets and the logo have an empty `value`; `isSet` says whether one is set. `source` is `server`, `web` or `default`. |
+| `PUT /api/v1/admin/settings` | `{"revision","set":{"KEY":"value"},"confirm":[]}`. An empty value returns a setting to its default (or clears a secret); keys left out are unchanged. The logo is base64 of a PNG or JPEG. Problems come back as `invalid` with `detail` mapping each key to a message; 412 if someone else saved first. Body limit 2 MiB. |
+| `GET /api/v1/admin/users?q=` | Up to 200 accounts: `{"users":[{"id","displayName","email","signIn","admin","adminGranted","keysSetUp","quotaBytes","usedBytes","createdAt"}]}` |
+| `PUT /api/v1/admin/users/{id}/admin` | `{"admin": bool}` appoints or removes an administrator (not yourself) |
+| `PUT /api/v1/admin/users/{id}/quota` | `{"size": "20GiB"}` sets personal storage |
+| `POST /api/v1/admin/users/{id}/revoke-access` | Ends the person's sessions and deletes their app passwords |
+| `POST /api/v1/admin/sessions/revoke-all` | Signs everyone out, including you |
+| `POST /api/v1/admin/links/revoke-all` | Revokes every public link |
 
 ## Theming (public)
 

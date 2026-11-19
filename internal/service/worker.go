@@ -17,7 +17,7 @@ const purgeLease = 10 * time.Minute
 // RunMaintenance expires old trash and purges scheduled nodes. It returns
 // how many nodes were purged.
 func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error) {
-	if n, err := s.store.ExpireTrash(ctx, s.now().Add(-s.cfg.TrashRetention)); err != nil {
+	if n, err := s.store.ExpireTrash(ctx, s.now().Add(-s.conf().TrashRetention)); err != nil {
 		return 0, err
 	} else if n > 0 {
 		s.log.InfoContext(ctx, "trash expired", "count", n)

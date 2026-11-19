@@ -141,10 +141,30 @@ Disk-level encryption (LUKS, encrypted ZFS) remains a good idea for metadata.
   emails as verified only when the operator says so.
 - Both feed the same **policy** (allowed groups / email domains) and refresh the user's groups and
   administrator flag at every sign-in. Accounts are keyed by (issuer, subject), never by email.
+- Administrative changes need a **recent sign-in**: `/auth/reauth` sends the person back to the
+  IdP with a forced authentication (OIDC `prompt=login`/`max_age=0`, SAML `ForceAuthn`), checks
+  `auth_time`/`AuthnInstant`, and starts a new session marked with that time.
+- Every request to an identity provider goes through one hardened HTTP client
+  (`auth.NewIdPClient`) that refuses link-local, metadata and loopback addresses and caps
+  responses, because administrators can enter IdP URLs on the web.
 
 Browsers then hold only an opaque, HttpOnly, `__Host-` session cookie. Non-browser clients use
 app passwords. Key setup and app-password management require an interactive session, so a
 leaked app password cannot replace keys or mint more credentials.
+
+## Settings
+
+Server-only settings (addresses, database, storage, TLS, proxies, keys) come from the
+environment. Settings an app owner decides are listed in `config.Registry` and can come from the
+environment or from the web admin area; `config.Merge` applies precedence (environment, then web,
+then default; each sign-in method as a whole) and `config.Build` validates and derives the runtime
+configuration, the same code for both sources. `internal/settings` stores web values as one
+revisioned document in PostgreSQL (secrets AES-GCM-encrypted under a key from the environment),
+checks changes (recent re-authentication, live identity-provider checks, lockout guards,
+confirmation before stranding accounts), and swaps the result into the running service, the
+sign-in manager and the theme atomically. Replicas notice a new revision within 15 seconds. With
+no sign-in method at all, the server runs in setup mode until the one-time setup link (`noddanas
+setup-link`) is used.
 
 ## Background work
 

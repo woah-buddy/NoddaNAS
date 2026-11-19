@@ -84,27 +84,33 @@ OIDC or SAML identity provider.
 
    ```sh
    cd deploy/compose
-   cp .env.example .env            # host, OIDC and/or SAML, allowed groups, admin groups
+   cp .env.example .env            # set NODDANAS_HOST; the rest can wait for the web
    sudo ../../scripts/init-secrets.sh
-   sudo sh -c 'read -r s && printf %s "$s" > secrets/oidc_client_secret'   # OIDC: paste the secret, then Enter
    docker compose up -d --build
+   docker compose exec noddanas /noddanas setup-link   # prints a one-time setup link
    ```
 
-3. Open `https://<host>`, sign in, choose an encryption passphrase, and **store the recovery code
-   somewhere safe**. Then, under Settings, **download your key backup** and keep it with your
-   backups (it is itself encrypted).
+3. Open the setup link, enter your identity provider's details (they are tried before they are
+   saved), and **sign in to finish**: you become the first administrator. Choose an encryption
+   passphrase and **store the recovery code somewhere safe**. Then, under Settings, **download your
+   key backup** and keep it with your backups (it is itself encrypted).
 
-To change a user's quota: `docker compose exec noddanas /noddanas set-quota alice@example.com 100GiB`
-(administrators can also set any space's quota through the API). Next steps: the
+Prefer configuration as code? Put the sign-in method, allowed groups and administrator groups in
+`.env` instead (and the OIDC client secret in `secrets/oidc_client_secret`); settings set there are
+locked in the web admin area. Next steps: the
 [administrator guide](docs/ADMIN_GUIDE.md#6-first-sign-in-and-day-one-tasks).
 
 ## Configuration
 
-All settings are environment variables, validated at startup (NoddaNAS refuses to start with an
+Settings are environment variables, validated at startup (NoddaNAS refuses to start with an
 unsafe or incomplete configuration and lists every problem). The required ones are
-`NODDANAS_PUBLIC_URL`, `NODDANAS_DATABASE_URL` (or `_FILE`) and a sign-in method
-(`NODDANAS_OIDC_ISSUER` and/or `NODDANAS_SAML_IDP_METADATA_URL`); you should also set
-`NODDANAS_ALLOWED_GROUPS` and `NODDANAS_ADMIN_GROUPS`.
+`NODDANAS_PUBLIC_URL` and `NODDANAS_DATABASE_URL` (or `_FILE`). Everything an app owner decides
+(sign-in method, who may sign in, administrators, quotas, link lifetimes, sessions, branding) can
+also be changed by administrators in the web app's **Admin** area, validated by the same code. A
+value set in the environment wins and is locked there. Changes on the web need a fresh
+re-authentication at the identity provider ("confirm it's you"), are tried against the identity
+provider before sign-in changes are saved, refuse anything that would lock out the person making
+them, and are audited.
 
 The complete reference, with defaults, is in the
 [administrator guide](docs/ADMIN_GUIDE.md#7-configuration-reference).

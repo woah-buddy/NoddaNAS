@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sync/atomic"
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/NoddaNAS/internal/settings"
 	"github.com/woah-buddy/NoddaNAS/internal/theme"
 )
 
@@ -27,8 +29,11 @@ type Config struct {
 	EnableWebDAV bool
 	// Per-IP rate limits (requests per minute). Zero means the default.
 	RateLimits RateLimits
-	// Theme is the validated branding and appearance; nil means the built-in theme.
+	// Theme is the validated branding and appearance; nil means the built-in
+	// theme. SetTheme replaces it while the server runs.
 	Theme *theme.Theme
+	// Settings serves the web admin area and the setup link (nil: neither).
+	Settings *settings.Manager
 }
 
 // RateLimits are per-client-IP request budgets per minute.
@@ -62,7 +67,8 @@ type Server struct {
 	loginLimit   *limiter
 	authFailures *limiter
 	dav          http.Handler
-	theme        *theme.Theme
+	themePtr     atomic.Pointer[theme.Theme]
+	settings     *settings.Manager
 }
 
 // New builds the server. ui holds the static web client (may be nil).
@@ -72,16 +78,24 @@ func New(svc *service.Service, am *auth.Manager, cfg Config, log *slog.Logger, u
 		publicLimit:  newLimiter(orDefault(cfg.RateLimits.Public, 120), 30),
 		loginLimit:   newLimiter(orDefault(cfg.RateLimits.Login, 20), 10),
 		authFailures: newLimiter(orDefault(cfg.RateLimits.AuthFailures, 30), 10),
-		theme:        cfg.Theme,
+		settings:     cfg.Settings,
 	}
-	if s.theme == nil {
-		s.theme = theme.Default()
-	}
+	s.SetTheme(cfg.Theme)
 	if cfg.EnableWebDAV {
 		s.dav = s.newDAV()
 	}
 	return s
 }
+
+// SetTheme replaces the branding (nil means the built-in theme).
+func (s *Server) SetTheme(t *theme.Theme) {
+	if t == nil {
+		t = theme.Default()
+	}
+	s.themePtr.Store(t)
+}
+
+func (s *Server) theme() *theme.Theme { return s.themePtr.Load() }
 
 // Handler returns the complete, middleware-wrapped HTTP handler.
 func (s *Server) Handler() http.Handler {
@@ -105,6 +119,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/saml/acs", s.rateLimited(s.loginLimit, s.handleSAMLACS))
 	mux.HandleFunc("GET /auth/saml/metadata", s.public(s.handleSAMLMetadata))
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
+	// "Confirm it's you": sign in again at the IdP before administrative changes.
+	mux.HandleFunc("GET /auth/reauth", s.rateLimited(s.loginLimit, s.sessionOnly(s.handleReauth)))
+
+	// First-time setup with the one-time link from `noddanas setup-link`.
+	// The token is 256 random bits, so the public budget is plenty against
+	// guessing, and setup does not use up the sign-in budget.
+	mux.HandleFunc("POST /api/v1/setup/view", s.public(s.handleSetupView))
+	mux.HandleFunc("POST /api/v1/setup/save", s.public(s.handleSetupSave))
+	mux.HandleFunc("POST /api/v1/setup/login", s.public(s.handleSetupLogin))
 
 	// Account, E2EE keys and the public-key directory.
 	mux.HandleFunc("GET /api/v1/me", s.authed(s.handleMe))
@@ -137,6 +160,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/spaces/{id}/trash", s.authed(s.handleListTrash))
 	mux.HandleFunc("DELETE /api/v1/spaces/{id}/trash", s.authed(s.handleEmptyTrash))
 	mux.HandleFunc("GET /api/v1/admin/spaces", s.authed(s.handleAdminListTeams))
+
+	// Admin area. Reading needs administrator rights; changing anything also
+	// needs a recent sign-in (enforced in the service and settings layers).
+	mux.HandleFunc("GET /api/v1/admin/session", s.sessionOnly(s.handleAdminSession))
+	mux.HandleFunc("GET /api/v1/admin/settings", s.sessionOnly(s.handleGetSettings))
+	mux.HandleFunc("PUT /api/v1/admin/settings", s.sessionOnly(s.handlePutSettings))
+	mux.HandleFunc("GET /api/v1/admin/users", s.sessionOnly(s.handleAdminListUsers))
+	mux.HandleFunc("PUT /api/v1/admin/users/{id}/admin", s.sessionOnly(s.handleAdminSetAdmin))
+	mux.HandleFunc("PUT /api/v1/admin/users/{id}/quota", s.sessionOnly(s.handleAdminSetUserQuota))
+	mux.HandleFunc("POST /api/v1/admin/users/{id}/revoke-access", s.sessionOnly(s.handleAdminRevokeAccess))
+	mux.HandleFunc("POST /api/v1/admin/sessions/revoke-all", s.sessionOnly(s.handleAdminEndAllSessions))
 
 	// Files and folders (names, keys and content are client-encrypted).
 	mux.HandleFunc("GET /api/v1/nodes/{id}", s.authed(s.handleGetNode))

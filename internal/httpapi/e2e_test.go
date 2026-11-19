@@ -57,6 +57,11 @@ type fakeOIDC struct {
 	users  map[string]idpUser
 	next   idpUser
 	signer jose.Signer
+	// authAge is how long ago the fake IdP claims the person authenticated
+	// (auth_time); noAuthTime leaves the claim out.
+	authAge    time.Duration
+	noAuthTime bool
+	prompts    []string // prompt parameters received, in order
 }
 
 func newFakeOIDC(t *testing.T) *fakeOIDC {
@@ -77,7 +82,8 @@ func newFakeOIDC(t *testing.T) *fakeOIDC {
 		code := e2ee.B64(randBytes(16))
 		f.mu.Lock()
 		f.users[code] = f.next
-		f.codes[code] = [4]string{q.Get("nonce"), q.Get("code_challenge"), q.Get("client_id")}
+		f.codes[code] = [4]string{q.Get("nonce"), q.Get("code_challenge"), q.Get("client_id"), q.Get("max_age")}
+		f.prompts = append(f.prompts, q.Get("prompt"))
 		f.mu.Unlock()
 		http.Redirect(w, r, q.Get("redirect_uri")+"?code="+code+"&state="+url.QueryEscape(q.Get("state")), http.StatusFound)
 	})
@@ -94,8 +100,14 @@ func newFakeOIDC(t *testing.T) *fakeOIDC {
 			http.Error(w, `{"error":"invalid_grant"}`, 400)
 			return
 		}
-		claims, _ := json.Marshal(map[string]any{"iss": f.srv.URL, "sub": u.sub, "aud": g[2], "exp": time.Now().Add(time.Hour).Unix(),
-			"iat": time.Now().Unix(), "nonce": g[0], "email": u.email, "email_verified": true, "name": u.sub, "groups": u.groups})
+		c := map[string]any{"iss": f.srv.URL, "sub": u.sub, "aud": g[2], "exp": time.Now().Add(time.Hour).Unix(),
+			"iat": time.Now().Unix(), "nonce": g[0], "email": u.email, "email_verified": true, "name": u.sub, "groups": u.groups}
+		f.mu.Lock()
+		if g[3] != "" && !f.noAuthTime {
+			c["auth_time"] = time.Now().Add(-f.authAge).Unix()
+		}
+		f.mu.Unlock()
+		claims, _ := json.Marshal(c)
 		jws, _ := f.signer.Sign(claims)
 		idt, _ := jws.CompactSerialize()
 		w.Header().Set("Content-Type", "application/json")
@@ -209,10 +221,10 @@ func newHarnessWith(t *testing.T, o harnessOpts) *harness {
 	pub, _ := url.Parse(h.base)
 	policy := auth.Policy{AllowedGroups: []string{"nas-users"}}
 	oidc := auth.NewOIDC(auth.OIDCConfig{Issuer: h.oidc.srv.URL, ClientID: "noddanas", ClientSecret: "s3cret",
-		RedirectURL: h.base + "/auth/callback", Policy: policy})
+		RedirectURL: h.base + "/auth/callback", Policy: policy, AllowLoopback: true})
 	idpMD, _ := xml.Marshal(h.saml.idp.Metadata())
 	samlSP := auth.NewSAML(auth.SAMLConfig{MetadataURL: h.base + "/auth/saml/metadata", ACSURL: h.base + "/auth/saml/acs",
-		IDPMetadata: idpMD, TrustEmail: true, Policy: policy})
+		IDPMetadata: idpMD, TrustEmail: true, Policy: policy, AllowLoopback: true})
 	am := auth.NewManager(store, svc, auth.Config{SessionIdle: time.Hour, SessionAbsolute: 24 * time.Hour}, oidc, samlSP)
 	h.am = am
 	handler = httpapi.New(svc, am, httpapi.Config{PublicURL: pub, EnableWebDAV: true,
@@ -252,6 +264,24 @@ func (h *harness) loginOIDC(u idpUser) *http.Client {
 		h.t.Fatalf("OIDC login for %s ended at %s", u.sub, resp.Request.URL)
 	}
 	return b
+}
+
+// reauth runs "confirm it's you" for a signed-in browser: the server sends
+// it back to the IdP with prompt=login, and the new session counts as a
+// recent sign-in.
+func (h *harness) reauth(b *http.Client, u idpUser) {
+	h.t.Helper()
+	h.oidc.mu.Lock()
+	h.oidc.next = u
+	h.oidc.mu.Unlock()
+	resp, err := b.Get(h.base + "/auth/reauth?return_to=/admin")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.Request.URL.Path != "/admin" {
+		h.t.Fatalf("re-authentication for %s ended at %s", u.sub, resp.Request.URL)
+	}
 }
 
 var samlRespRE = regexp.MustCompile(`name="SAMLResponse" value="([^"]+)"`)
@@ -317,7 +347,8 @@ func TestEndToEnd(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 
-	aliceB := h.loginOIDC(idpUser{sub: "alice", email: "alice@example.test", groups: []string{"nas-users", "nas-admins"}})
+	aliceID := idpUser{sub: "alice", email: "alice@example.test", groups: []string{"nas-users", "nas-admins"}}
+	aliceB := h.loginOIDC(aliceID)
 	alice := client.New(h.base, aliceB, "")
 	code := must[string](t)(alice.SetupKeys(ctx, pass))
 
@@ -741,6 +772,11 @@ func TestEndToEnd(t *testing.T) {
 		if _, body = call(aliceB, "GET", "/api/v1/shared-by-me", ""); strings.Contains(body, `"type":"link"`) {
 			t.Fatal("links still listed after revocation")
 		}
+		// The instance-wide switch needs a recent sign-in ("confirm it's you").
+		if code, body = call(aliceB, "POST", "/api/v1/admin/links/revoke-all", ""); code != 403 || !strings.Contains(body, `"reauth_required"`) {
+			t.Fatalf("admin revoke without a recent sign-in: %d %s", code, body)
+		}
+		h.reauth(aliceB, aliceID)
 		if code, body = call(aliceB, "POST", "/api/v1/admin/links/revoke-all", ""); code != 200 || !strings.Contains(body, `"revoked":`) {
 			t.Fatalf("admin revoke: %d %s", code, body)
 		}

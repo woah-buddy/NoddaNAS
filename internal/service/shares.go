@@ -89,12 +89,12 @@ func (s *Service) CreateLink(ctx context.Context, p Principal, nodeID string, op
 		return nil, "", domain.E(domain.CodeInvalid, "a space's root folder cannot be shared by link")
 	}
 	now := s.now()
-	expires := now.Add(s.cfg.LinkDefaultTTL) // every link expires, even if not asked
+	expires := now.Add(s.conf().LinkDefaultTTL) // every link expires, even if not asked
 	if opts.ExpiresAt != nil {
 		expires = opts.ExpiresAt.UTC()
 	}
-	if expires.Before(now.Add(time.Minute)) || expires.After(now.Add(s.cfg.LinkMaxTTL)) {
-		return nil, "", domain.E(domain.CodeInvalid, "expiry must be between one minute and %d days from now", int(s.cfg.LinkMaxTTL.Hours()/24))
+	if expires.Before(now.Add(time.Minute)) || expires.After(now.Add(s.conf().LinkMaxTTL)) {
+		return nil, "", domain.E(domain.CodeInvalid, "expiry must be between one minute and %d days from now", int(s.conf().LinkMaxTTL.Hours()/24))
 	}
 	if opts.MaxDownloads < 0 || opts.MaxDownloads > 1_000_000 {
 		return nil, "", domain.E(domain.CodeInvalid, "maxDownloads must be between 0 and 1000000")
@@ -238,7 +238,7 @@ func (s *Service) RevokeMyLinks(ctx context.Context, p Principal) (int64, error)
 // AdminRevokeAllLinks is the instance-wide kill switch: it revokes every
 // public link created by anyone. Administrators only.
 func (s *Service) AdminRevokeAllLinks(ctx context.Context, p Principal) (int64, error) {
-	if err := s.requireAdmin(ctx, p); err != nil {
+	if err := s.RequireFreshAdmin(ctx, p); err != nil {
 		return 0, err
 	}
 	n, err := s.store.DeleteAllLinks(ctx)

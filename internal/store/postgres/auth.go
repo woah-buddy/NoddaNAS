@@ -12,8 +12,8 @@ import (
 // bearer secrets are stored; see internal/secure.HashToken.
 
 func (s *Store) CreateLoginRequest(ctx context.Context, r *auth.LoginRequest) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO login_requests (token_hash, kind, state, nonce, pkce_verifier, return_to, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`, r.TokenHash, r.Kind, r.State, r.Nonce, r.Verifier, r.ReturnTo, r.ExpiresAt)
+	_, err := s.db.Exec(ctx, `INSERT INTO login_requests (token_hash, kind, state, nonce, pkce_verifier, return_to, reauth, setup_hash, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, r.TokenHash, r.Kind, r.State, r.Nonce, r.Verifier, r.ReturnTo, r.Reauth, nullable(r.Setup), r.ExpiresAt)
 	return mapErr(err)
 }
 
@@ -22,8 +22,8 @@ func (s *Store) CreateLoginRequest(ctx context.Context, r *auth.LoginRequest) er
 func (s *Store) ConsumeLoginRequest(ctx context.Context, tokenHash string, now time.Time) (*auth.LoginRequest, error) {
 	r := &auth.LoginRequest{}
 	err := s.db.QueryRow(ctx, `DELETE FROM login_requests WHERE token_hash=$1
-		RETURNING token_hash, kind, state, nonce, pkce_verifier, return_to, expires_at`, tokenHash).
-		Scan(&r.TokenHash, &r.Kind, &r.State, &r.Nonce, &r.Verifier, &r.ReturnTo, &r.ExpiresAt)
+		RETURNING token_hash, kind, state, nonce, pkce_verifier, return_to, reauth, coalesce(setup_hash, ''), expires_at`, tokenHash).
+		Scan(&r.TokenHash, &r.Kind, &r.State, &r.Nonce, &r.Verifier, &r.ReturnTo, &r.Reauth, &r.Setup, &r.ExpiresAt)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -34,16 +34,16 @@ func (s *Store) ConsumeLoginRequest(ctx context.Context, tokenHash string, now t
 }
 
 func (s *Store) CreateSession(ctx context.Context, ss *auth.Session) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at)
-		VALUES ($1,$2,$3,$4,$5)`, ss.TokenHash, ss.UserID, ss.CreatedAt, ss.LastSeenAt, ss.ExpiresAt)
+	_, err := s.db.Exec(ctx, `INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at, reauth_at)
+		VALUES ($1,$2,$3,$4,$5,$6)`, ss.TokenHash, ss.UserID, ss.CreatedAt, ss.LastSeenAt, ss.ExpiresAt, ss.ReauthAt)
 	return mapErr(err)
 }
 
 func (s *Store) GetSession(ctx context.Context, tokenHash string) (*auth.Session, error) {
 	ss := &auth.Session{}
-	err := s.db.QueryRow(ctx, `SELECT token_hash, user_id, created_at, last_seen_at, expires_at
+	err := s.db.QueryRow(ctx, `SELECT token_hash, user_id, created_at, last_seen_at, expires_at, reauth_at
 		FROM sessions WHERE token_hash=$1`, tokenHash).
-		Scan(&ss.TokenHash, &ss.UserID, &ss.CreatedAt, &ss.LastSeenAt, &ss.ExpiresAt)
+		Scan(&ss.TokenHash, &ss.UserID, &ss.CreatedAt, &ss.LastSeenAt, &ss.ExpiresAt, &ss.ReauthAt)
 	return ss, mapErr(err)
 }
 

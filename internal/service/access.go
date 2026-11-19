@@ -65,13 +65,13 @@ func (s *Service) loadChain(ctx context.Context, nodeID string) ([]*domain.Node,
 	if err := validate.ID(nodeID); err != nil {
 		return nil, nil, domain.ErrNotFound
 	}
-	chain, err := s.store.GetAncestry(ctx, nodeID, s.cfg.MaxDepth+1)
+	chain, err := s.store.GetAncestry(ctx, nodeID, s.conf().MaxDepth+1)
 	if err != nil {
 		return nil, nil, err
 	}
 	top := chain[len(chain)-1]
 	if !top.IsRoot() {
-		if len(chain) > s.cfg.MaxDepth {
+		if len(chain) > s.conf().MaxDepth {
 			return nil, nil, errTooDeep
 		}
 		return nil, nil, domain.ErrNotFound
@@ -247,7 +247,7 @@ func (s *Service) authorizeLink(ctx context.Context, cred LinkCredential, nodeID
 				Detail: map[string]string{"reason": "password_required"}}
 		}
 		if !secure.VerifyPassword(cred.Password, sh.PasswordHash) {
-			if err := s.store.RecordLinkFailure(ctx, sh.ID, s.cfg.LinkMaxFailures, now.Add(s.cfg.LinkLockout)); err != nil {
+			if err := s.store.RecordLinkFailure(ctx, sh.ID, s.conf().LinkMaxFailures, now.Add(s.conf().LinkLockout)); err != nil {
 				return nil, nil, err
 			}
 			s.log.WarnContext(ctx, "audit", "event", "link.password_failed", "share", sh.ID)

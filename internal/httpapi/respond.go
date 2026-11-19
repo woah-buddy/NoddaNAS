@@ -16,7 +16,12 @@ const maxJSONBody = 64 << 10
 // decodeJSON parses a small JSON object strictly: bounded size, unknown
 // fields rejected, exactly one value.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	return decodeJSONLimit(w, r, dst, maxJSONBody)
+}
+
+// decodeJSONLimit is decodeJSON with a different size bound.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -45,8 +50,10 @@ var statusOf = map[domain.Code]int{
 	domain.CodeInvalid:      http.StatusBadRequest,
 	domain.CodeUnauthorized: http.StatusUnauthorized,
 	domain.CodeForbidden:    http.StatusForbidden,
+	domain.CodeReauth:       http.StatusForbidden,
 	domain.CodeNotFound:     http.StatusNotFound,
 	domain.CodeConflict:     http.StatusConflict,
+	domain.CodeConfirm:      http.StatusConflict,
 	domain.CodeGone:         http.StatusGone,
 	domain.CodePrecondition: http.StatusPreconditionFailed,
 	domain.CodeTooLarge:     http.StatusRequestEntityTooLarge,

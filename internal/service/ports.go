@@ -38,6 +38,12 @@ type Store interface {
 	// team spaces the user no longer belongs to.
 	SyncGroups(ctx context.Context, userID string, groups []string) error
 	GetUserIDByEmail(ctx context.Context, email string) (string, error)
+	// Administration (see admin.go).
+	ListUsers(ctx context.Context, query string, limit int) ([]UserSummary, error)
+	SetAdminGranted(ctx context.Context, userID string, grant bool, adminGroups []string) error
+	RecomputeAdmins(ctx context.Context, adminGroups []string) (int64, error)
+	UserGroups(ctx context.Context, userID string) ([]string, error)
+	IssuerCounts(ctx context.Context) (map[string]int64, error)
 	// SetKeys stores a user's public keys and key bundle and their personal
 	// space's keys, atomically. ErrConflict if keys were already set.
 	SetKeys(ctx context.Context, userID string, keys domain.PublicKeys, bundle string, personal SpaceKeys) error

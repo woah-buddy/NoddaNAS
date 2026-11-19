@@ -155,13 +155,13 @@ var errChanged = domain.E(domain.CodePrecondition, "the item was changed by some
 
 // ---- users -------------------------------------------------------------------------
 
-const userCols = `id, issuer, subject, coalesce(email, ''), display_name, is_admin, personal_space_id,
+const userCols = `id, issuer, subject, coalesce(email, ''), display_name, is_admin, admin_granted, personal_space_id,
 	enc_pub, sig_pub, self_sig, coalesce(key_bundle, ''), created_at`
 
 func scanUser(row pgx.Row) (*domain.User, error) {
 	u := &domain.User{}
 	var enc, sig, self *string
-	err := row.Scan(&u.ID, &u.Issuer, &u.Subject, &u.Email, &u.DisplayName, &u.Admin, &u.PersonalSpaceID,
+	err := row.Scan(&u.ID, &u.Issuer, &u.Subject, &u.Email, &u.DisplayName, &u.Admin, &u.AdminGranted, &u.PersonalSpaceID,
 		&enc, &sig, &self, &u.KeyBundle, &u.CreatedAt)
 	if enc != nil {
 		u.Keys = &domain.PublicKeys{Enc: *enc, Sig: str(sig), SelfSig: str(self)}
