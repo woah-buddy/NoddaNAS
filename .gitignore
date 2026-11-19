@@ -1,0 +1,19 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Local runtime data and secrets: never commit these
+/data/
+/secrets/
+*.keyring
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
