@@ -189,8 +189,11 @@ chmod 600 .env
 ```
 
 Set at least `NODDANAS_HOST`, one sign-in method (`OIDC_ISSUER` + `OIDC_CLIENT_ID`, and/or
-`SAML_IDP_METADATA_URL`), `ALLOWED_GROUPS` and `ADMIN_GROUPS`. Each setting is explained in
-`.env.example` and in [§7](#7-configuration-reference).
+`SAML_IDP_METADATA_URL`), `ALLOWED_GROUPS` and `ADMIN_GROUPS`. Every other setting in
+[§7](#7-configuration-reference) can also go in `.env`, named without the `NODDANAS_` prefix
+(`NODDANAS_TEAM_CREATION` becomes `TEAM_CREATION`). `.env.example` lists them all, with defaults.
+If your IdP provides SAML metadata only as a file, or you use an SP key pair, put those files in
+`deploy/compose/saml/` (see the README there).
 
 **Step 3: create secrets.** The script generates a random database password and the database URL,
 creates an empty file for the OIDC client secret, and sets ownership so each container can read
@@ -280,7 +283,7 @@ kubectl -n noddanas create secret generic noddanas-secrets \
 ```
 
 For SAML with an SP key pair, add the key and certificate to the secret and set
-`NODDANAS_SAML_SP_KEY_FILE` / `_CERT_FILE` to their mounted paths.
+`NODDANAS_SAML_SP_KEY_FILE` and `NODDANAS_SAML_SP_CERT_FILE` to their mounted paths.
 
 **Step 5: configure.** Edit the ConfigMap in the manifest: `NODDANAS_PUBLIC_URL`, the sign-in
 settings, `NODDANAS_ALLOWED_GROUPS`, `NODDANAS_ADMIN_GROUPS`, and `NODDANAS_TRUSTED_PROXIES` (the
@@ -413,6 +416,24 @@ All settings are environment variables. NoddaNAS validates the whole configurati
 and **refuses to start** if anything is missing or unsafe, listing every problem. Changes take
 effect when NoddaNAS restarts.
 
+**With Docker Compose,** put each setting in `deploy/compose/.env` without the `NODDANAS_`
+prefix: `NODDANAS_TEAM_CREATION=false` becomes `TEAM_CREATION=false`. `.env.example` lists
+every one, with its default. Then run `docker compose up -d` to apply the change. A few settings
+are fixed by the Compose setup on purpose, and setting them in `.env` has no effect:
+
+| Setting | Fixed to | Why |
+|---|---|---|
+| `NODDANAS_PUBLIC_URL` | `https://` + `NODDANAS_HOST` | One hostname drives NoddaNAS and Caddy |
+| `NODDANAS_DATABASE_URL_FILE`, `NODDANAS_OIDC_CLIENT_SECRET_FILE` | Docker secrets from `secrets/` | Keeps credentials out of the environment |
+| `NODDANAS_TRUSTED_PROXIES` | Caddy's network, `172.30.0.0/24` | Only the proxy may set `X-Forwarded-For` |
+| `NODDANAS_LISTEN`, `NODDANAS_TLS_CERT_FILE`, `NODDANAS_TLS_KEY_FILE` | Port 8080, no TLS | Caddy terminates TLS and proxies to NoddaNAS |
+| `NODDANAS_DATA_DIR` | `/data` | The `noddanas-data` volume is mounted there |
+
+Settings that name a file point inside the container. Put SAML files (IdP metadata, the SP key
+pair) in `deploy/compose/saml/`, which is mounted read-only at `/etc/noddanas/saml`, and branding
+files in `deploy/compose/branding/`, mounted at `/etc/noddanas/branding`. The repository's tests
+check that every setting NoddaNAS reads can be set this way and is documented here.
+
 For values that are secrets, prefer the `_FILE` form: `NODDANAS_DATABASE_URL_FILE` and
 `NODDANAS_OIDC_CLIENT_SECRET_FILE` name a file whose contents are the value. File-based secrets
 stay out of `docker inspect`, process listings and crash dumps. Setting both forms is an error.
@@ -425,10 +446,10 @@ Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go
 | Variable | Default | Meaning |
 |---|---|---|
 | `NODDANAS_PUBLIC_URL` | *required* | The external origin, e.g. `https://files.example.com`. HTTPS is required except for `localhost`. Used for host checks, CSRF checks and IdP redirects. |
-| `NODDANAS_DATABASE_URL` / `_FILE` | *required* | PostgreSQL connection URL. Use `sslmode=verify-full` when the database is on another host. |
+| `NODDANAS_DATABASE_URL` or `NODDANAS_DATABASE_URL_FILE` | *required* | PostgreSQL connection URL. Use `sslmode=verify-full` when the database is on another host. |
 | `NODDANAS_DATA_DIR` | `/data` | Where encrypted file containers are stored |
 | `NODDANAS_LISTEN` | `:8080` | Listen address |
-| `NODDANAS_TLS_CERT_FILE` / `_KEY_FILE` | | Serve HTTPS directly (set both or neither) |
+| `NODDANAS_TLS_CERT_FILE` and `NODDANAS_TLS_KEY_FILE` | | Serve HTTPS directly (set both or neither) |
 | `NODDANAS_TRUSTED_PROXIES` | | IPs or CIDRs whose `X-Forwarded-For` header is believed. Set it to exactly your proxy's addresses. |
 | `NODDANAS_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `NODDANAS_AUTO_MIGRATE` | `true` | Apply database migrations at startup |
@@ -441,7 +462,7 @@ Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go
 |---|---|---|
 | `NODDANAS_OIDC_ISSUER` | | Issuer URL. Setting it enables OIDC. |
 | `NODDANAS_OIDC_CLIENT_ID` | *required with OIDC* | |
-| `NODDANAS_OIDC_CLIENT_SECRET` / `_FILE` | | Client secret |
+| `NODDANAS_OIDC_CLIENT_SECRET` or `NODDANAS_OIDC_CLIENT_SECRET_FILE` | | Client secret |
 | `NODDANAS_OIDC_SCOPES` | `openid,email,profile` | |
 | `NODDANAS_OIDC_GROUPS_CLAIM` | `groups` | ID-token claim holding group names |
 
@@ -449,9 +470,9 @@ Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_SAML_IDP_METADATA_URL` or `_FILE` | | IdP metadata (URL must be `https://`). Setting one enables SAML. |
+| `NODDANAS_SAML_IDP_METADATA_URL` or `NODDANAS_SAML_IDP_METADATA_FILE` | | IdP metadata (URL must be `https://`). Setting one enables SAML. |
 | `NODDANAS_SAML_ENTITY_ID` | `https://<host>/auth/saml/metadata` | SP entity ID |
-| `NODDANAS_SAML_SP_KEY_FILE` / `_CERT_FILE` | | Optional SP key pair (PEM) used to sign requests and decrypt encrypted assertions |
+| `NODDANAS_SAML_SP_KEY_FILE` and `NODDANAS_SAML_SP_CERT_FILE` | | Optional SP key pair (PEM) used to sign requests and decrypt encrypted assertions (set both or neither) |
 | `NODDANAS_SAML_TRUST_EMAIL` | `false` | Treat asserted emails as verified |
 | `NODDANAS_SAML_EMAIL_ATTRIBUTES` | `email`, `mail`, and the standard OID and claim URIs | Attribute names to read the email from, in order |
 | `NODDANAS_SAML_NAME_ATTRIBUTES` | `displayName`, `name`, `cn`, and standard URIs | Display name attributes |
