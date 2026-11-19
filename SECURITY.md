@@ -55,3 +55,7 @@ and an update to the threat model.
     settings that stop validating stop startup instead of being skipped.
 16. The server makes outbound requests only to identity providers, only through
     `auth.NewIdPClient`, and never shows what came back (only what failed).
+17. Code that releases plaintext before a whole file is read (streaming downloads, the local
+    drive) releases only AES-GCM-authenticated chunks and withholds the last until the signature
+    verifies (`e2ee.Verifier`, `openContainerStream`). Plaintext served locally stays on loopback,
+    behind a secret path, never to browsers.

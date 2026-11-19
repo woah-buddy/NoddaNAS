@@ -93,7 +93,10 @@ events (identifiers only; never names, tokens or passwords).
 | Horizontal access | Single authorization point; whole-chain checks; 404 for invisible items | `TestTenantIsolation` |
 | Link leaks to servers or logs | Link secret only in the URL fragment; token only in POST bodies; `Referrer-Policy: no-referrer` | e2e "public link" |
 | Stored XSS via uploads | The server only serves opaque containers as sandboxed attachments; the browser decrypts into a download | `serveContainer` |
-| XSS in the web client (would expose in-memory keys) | CSP `script-src 'self'`, Trusted Types with no policies, DOM-only rendering, private keys non-extractable | `ui.go`, `app.js` |
+| XSS in the web client (would expose in-memory keys) | CSP `script-src 'self'`, Trusted Types enforced (one policy, `frontdir-sw`, that can only produce the download worker's constant URL), DOM-only rendering, private keys non-extractable | `ui.go`, `app.js`, `TestThemeEndpoints` |
+| Decrypted downloads rendered as a page in the app's origin | The download worker's responses are `attachment`, `application/octet-stream`, `nosniff`, `sandbox` CSP and `no-store`; the worker's scope is `/dl/` only, it fetches nothing, and each download id is random, single use and short-lived | `web/static/dl/sw.js`, browser test |
+| Streaming releases plaintext before the signature is checked | Each chunk is AES-GCM-authenticated before release; the last chunk is withheld until the signature verifies, and a failure aborts the download (the browser discards it) or fails the copy from the drive | `TestStreamingVerifier`, interop `container-stream-*`, `TestDecryptingGateway` |
+| The local drive (`frontdir-cli mount`) exposes plaintext to other users of the computer, to web pages, or to the network | Loopback only, with no option otherwise; a random 256-bit token in every path; loopback `Host` required (DNS rebinding) and browser requests (`Origin`, `Sec-Fetch-Site`) refused; inert response headers; upload buffers that spill to disk are encrypted under a key held in memory | `TestDecryptingGateway`, `TestListenIsLoopbackOnly`, `TestSpoolSpillsEncrypted` |
 | Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
 | Server-side request forgery through IdP URLs entered on the web (reaching cloud metadata or internal services, reading their responses) | All IdP traffic uses one client that refuses link-local, metadata, unspecified, multicast and (except on localhost deployments) loopback addresses, checked before sending and again on the address actually dialled (DNS rebinding); 1 MiB response cap, 20 s timeout, at most three redirects and never https→http; errors describe the failure and never echo the response | `TestIdPClientRefusesInternalAddresses`, `TestIdPChecksNeverEchoTheRemote` |
 | OIDC client secret in a database dump | Secrets saved on the web are AES-256-GCM encrypted under a key that lives only in the server's environment, bound to the setting name; never returned by the API or logged | `TestSecretBox`, `TestSignInChangesAreCheckedAndConfirmed` |
@@ -152,3 +155,7 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
 10. **Identity providers on private networks are reachable.** So that an IdP on the same Docker
    network works, administrators can make the server send GET requests to private addresses.
    The responses are never shown, only whether the check passed.
+11. **The local drive holds unlocked keys and serves plaintext for as long as it runs.** Anyone who
+   can act as the user on that computer can read what the drive shows (as they could read files
+   the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
+   secret; `--url-file` keeps it in a file readable only by the user.

@@ -525,3 +525,93 @@ export async function decryptFile(blob, nk, signerFor, onProgress) {
   await mustVerify(signer.sig, concat(label('container'), NUL, await sha256(c.prefix), await sha256(hashes)), trailer.subarray(4));
   return { blob: new Blob(parts, { type: 'application/octet-stream' }), meta, signer };
 }
+
+// ---- streaming decryption (very large downloads) ----------------------------------------
+
+// ByteSource reads exact byte counts from a ReadableStream (a fetch body).
+class ByteSource {
+  constructor(stream) { this.r = stream.getReader(); this.buf = new Uint8Array(0); this.eof = false; }
+  async fill(n) {
+    while (this.buf.length < n && !this.eof) {
+      const { value, done } = await this.r.read();
+      if (done) this.eof = true;
+      else this.buf = this.buf.length ? concat(this.buf, value) : value;
+    }
+  }
+  async read(n) {
+    await this.fill(n);
+    if (this.buf.length < n) throw new E2EEError('the file ended early');
+    const out = this.buf.slice(0, n);
+    this.buf = this.buf.subarray(n);
+    return out;
+  }
+  async atEnd() { await this.fill(1); return this.buf.length === 0; }
+  cancel() { this.r.cancel().catch(() => {}); }
+}
+
+// openContainerStream reads a container from a byte stream and returns its
+// metadata and a pull-based decryptor, so a file of any size can be saved
+// without holding it in memory. Every chunk next() returns has passed
+// AES-GCM under the file's committed key (nobody without the key, the
+// server included, can alter, reorder, drop or swap anything unnoticed).
+// The last chunk is returned only after the author's signature over all
+// chunks verified (E2EE.md §5): if it fails, next() rejects instead, and
+// the caller aborts the download so the partial file is discarded.
+// totalSize, if known (Content-Length), must match the header exactly.
+export async function openContainerStream(stream, nk, signerFor, totalSize) {
+  const src = new ByteSource(stream);
+  try {
+    const head = await src.read(12);
+    if (td.decode(head.subarray(0, 8)) !== MAGIC) throw new E2EEError('not a FrontDir encrypted file');
+    const hl = new DataView(head.buffer, head.byteOffset).getUint32(8);
+    if (hl === 0 || hl > 65536) throw new E2EEError('malformed container');
+    const prefix = concat(head, await src.read(hl));
+    const h = JSON.parse(td.decode(prefix.subarray(12)));
+    if (h.v !== 1 || h.alg !== ALG || !Number.isSafeInteger(h.size) || h.size < 0) throw new E2EEError('unsupported container');
+    const n = chunkCount(h.size);
+    if (totalSize !== undefined && totalSize !== 12 + hl + h.size + TAG * n + TRAILER) {
+      throw new E2EEError('container is truncated or has trailing data');
+    }
+    const fk = await fileKeys(nk, unb64u(h.salt));
+    if (!ctEqual(fk.commit, unb64u(h.commit))) throw authFail(); // key commitment
+    const meta = JSON.parse(td.decode(await gcmOpen(fk.meta, unb64u(h.meta), label('file/meta'))));
+    const signer = await signerFor(h.signer.user);
+    if (signer.fp !== h.signer.fp) throw new E2EEError('the file claims a signer key that does not match the directory');
+    const key = await aesKey(fk.content, 'decrypt');
+    const hashes = new Uint8Array(32 * n);
+    let i = 0, failed = null;
+    return {
+      meta, signer, size: h.size,
+      async next() {
+        if (failed) throw failed;
+        if (i === n) return { done: true, value: undefined };
+        try {
+          const plain = Math.min(CHUNK, h.size - i * CHUNK);
+          const ct = await src.read(plain + TAG);
+          hashes.set(await sha256(ct), 32 * i);
+          let pt;
+          try {
+            pt = new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: chunkNonce(i, i === n - 1) }, key, ct));
+          } catch {
+            throw authFail();
+          }
+          i++;
+          if (i === n) { // hold the last chunk back until the signature verifies
+            const trailer = await src.read(TRAILER);
+            if (td.decode(trailer.subarray(0, 4)) !== 'SIG1' || !(await src.atEnd())) throw authFail();
+            await mustVerify(signer.sig, concat(label('container'), NUL, await sha256(prefix), await sha256(hashes)), trailer.subarray(4));
+          }
+          return { done: false, value: pt };
+        } catch (e) {
+          failed = e;
+          src.cancel();
+          throw e;
+        }
+      },
+      cancel() { failed = failed || new E2EEError('cancelled'); src.cancel(); },
+    };
+  } catch (e) {
+    src.cancel();
+    throw e;
+  }
+}

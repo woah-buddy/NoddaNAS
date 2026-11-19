@@ -308,6 +308,10 @@ type Reader struct {
 	chunk   []byte
 	cur     int64
 	checked bool
+
+	// OnChunk, if set, receives each encrypted chunk after it decrypted
+	// successfully (for a Verifier). ct is only valid during the call.
+	OnChunk func(idx int64, ct []byte)
 }
 
 // NewReader returns a seekable plaintext reader. src holds the complete
@@ -358,6 +362,9 @@ func (r *Reader) load(idx int64) error {
 		return ErrAuth
 	}
 	r.chunk, r.cur = pt, idx
+	if r.OnChunk != nil {
+		r.OnChunk(idx, ct)
+	}
 	return nil
 }
 
@@ -383,11 +390,11 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 // just after the prefix), writes the plaintext to dst, and finally checks
 // the signer's signature. Callers must discard dst's output on error.
 func DecryptVerify(src io.Reader, dst io.Writer, p *Prefix, k *FileKeys, signer *PublicUser) error {
-	if signer.ID != p.Signer.User || signer.Finger != p.Signer.FP {
-		return fmt.Errorf("e2ee: container claims signer %s, verifying against %s", p.Signer.User, signer.ID)
+	v, err := p.NewVerifier(signer)
+	if err != nil {
+		return err
 	}
 	aead := gcmFor(k.fk.content)
-	bh := sha256.New()
 	n := Chunks(p.Size)
 	buf := make([]byte, ChunkSize+tagSize)
 	for i := int64(0); i < n; i++ {
@@ -396,7 +403,7 @@ func DecryptVerify(src io.Reader, dst io.Writer, p *Prefix, k *FileKeys, signer 
 		if _, err := io.ReadFull(src, ct); err != nil {
 			return ErrAuth
 		}
-		bh.Write(sum(ct))
+		v.Chunk(i, ct)
 		pt, err := aead.Open(nil, chunkNonce(i, i == n-1), ct, nil)
 		if err != nil {
 			return ErrAuth
@@ -406,13 +413,67 @@ func DecryptVerify(src io.Reader, dst io.Writer, p *Prefix, k *FileKeys, signer 
 		}
 	}
 	var tr [TrailerSize]byte
-	if _, err := io.ReadFull(src, tr[:]); err != nil || string(tr[:4]) != trailerMagic {
+	if _, err := io.ReadFull(src, tr[:]); err != nil {
 		return ErrAuth
 	}
 	if extra, _ := io.ReadFull(src, make([]byte, 1)); extra != 0 {
 		return ErrMalformed
 	}
-	msg := append(append(join("container"), 0), sum(p.raw)...)
-	msg = append(msg, bh.Sum(nil)...)
-	return verify(signer.Sig, msg, tr[4:])
+	return v.Finish(tr[:])
+}
+
+// ---- verifying while streaming --------------------------------------------------
+
+// Verifier checks a container's signature from its encrypted chunks as a
+// reader hands them out, for readers that cannot hold a whole file before
+// releasing plaintext (the local WebDAV gateway, streaming downloads).
+//
+// Each chunk is authenticated by AES-GCM before any of its plaintext is
+// released, so nobody without the file's key (the server included) can
+// change, reorder, drop or swap anything unnoticed. What the Verifier adds
+// at the end is attribution: the signature of the user named in the header
+// over every chunk. A reader that reaches the end must fail its last read
+// if Finish fails, so a copy or download of a forged file never completes.
+type Verifier struct {
+	p      *Prefix
+	signer *PublicUser
+	bh     hash.Hash
+	next   int64
+}
+
+// NewVerifier starts verifying the container against signer, who must be
+// the user its header names.
+func (p *Prefix) NewVerifier(signer *PublicUser) (*Verifier, error) {
+	if signer.ID != p.Signer.User || signer.Finger != p.Signer.FP {
+		return nil, fmt.Errorf("e2ee: container claims signer %s, verifying against %s", p.Signer.User, signer.ID)
+	}
+	return &Verifier{p: p, signer: signer, bh: sha256.New()}, nil
+}
+
+// Chunk records encrypted chunk idx. Chunks count only in order; anything
+// else (a repeat after seeking back, a jump ahead) is ignored and returns
+// false, after which Complete stays false.
+func (v *Verifier) Chunk(idx int64, ct []byte) bool {
+	if idx != v.next {
+		return false
+	}
+	v.bh.Write(sum(ct))
+	v.next++
+	return true
+}
+
+// Complete reports whether every chunk has been recorded in order.
+func (v *Verifier) Complete() bool { return v.next == Chunks(v.p.Size) }
+
+// Finish checks the trailer: the container's last TrailerSize bytes.
+func (v *Verifier) Finish(trailer []byte) error {
+	if !v.Complete() {
+		return errors.New("e2ee: cannot verify a container that was not read in order")
+	}
+	if len(trailer) != TrailerSize || string(trailer[:4]) != trailerMagic {
+		return ErrAuth
+	}
+	msg := append(append(join("container"), 0), sum(v.p.raw)...)
+	msg = append(msg, v.bh.Sum(nil)...)
+	return verify(v.signer.Sig, msg, trailer[4:])
 }

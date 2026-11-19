@@ -14,6 +14,9 @@
 //	frontdir-cli backup <dir>               save your personal space, still encrypted
 //	frontdir-cli restore <file.fdenc> [folder]  restore one backed-up file
 //	frontdir-cli export-keys <file>         save your (encrypted) key backup
+//	frontdir-cli mount [--listen 127.0.0.1:8484] [--read-only] [--url-file FILE]
+//	                                        show your files, decrypted, as a local
+//	                                        network drive (WebDAV on this computer only)
 //
 // Offline (no server, no network):
 //
@@ -62,6 +65,8 @@ func main() {
 		err = offline(cmd, args)
 	case "ls", "get", "put", "mkdir", "teams", "backup", "restore", "export-keys":
 		err = online(ctx, cmd, args)
+	case "mount":
+		err = mount(ctx, args)
 	default:
 		usage()
 	}
@@ -76,6 +81,7 @@ func usage() {
 
 online:   ls [path] | get <path> [local] | put <local> [folder] | mkdir <path> | teams
           backup <dir> | restore <file.fdenc> [folder] | export-keys <file>
+          mount [--listen 127.0.0.1:8484] [--read-only] [--url-file FILE] [-v]
 offline:  decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
           decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
 
@@ -99,28 +105,37 @@ func secret(fileEnv, prompt string) (string, error) {
 	return strings.TrimSpace(line), err
 }
 
-func online(ctx context.Context, cmd string, args []string) error {
+// connect signs in with the app password and unlocks the user's keys.
+func connect(ctx context.Context) (*client.Client, error) {
 	base := os.Getenv("FRONTDIR_URL")
 	if base == "" {
-		return errors.New("set FRONTDIR_URL (e.g. https://files.example.com)")
+		return nil, errors.New("set FRONTDIR_URL (e.g. https://files.example.com)")
 	}
 	token := os.Getenv("FRONTDIR_TOKEN")
 	if f := os.Getenv("FRONTDIR_TOKEN_FILE"); f != "" {
 		b, err := os.ReadFile(f) // #nosec G304 G703 -- the user's own CLI configuration
 		if err != nil {
-			return err
+			return nil, err
 		}
 		token = strings.TrimSpace(string(b))
 	}
 	if token == "" {
-		return errors.New("set FRONTDIR_TOKEN or FRONTDIR_TOKEN_FILE to an app password (create one under Settings)")
+		return nil, errors.New("set FRONTDIR_TOKEN or FRONTDIR_TOKEN_FILE to an app password (create one under Settings)")
 	}
 	c := client.New(base, &http.Client{}, token)
 	pass, err := secret("FRONTDIR_PASSPHRASE_FILE", "Encryption passphrase: ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := c.Unlock(ctx, pass, false); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func online(ctx context.Context, cmd string, args []string) error {
+	c, err := connect(ctx)
+	if err != nil {
 		return err
 	}
 	arg := func(i int, def string) string {

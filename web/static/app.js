@@ -662,12 +662,126 @@ async function uploadMany(ctx, files) {
 }
 
 async function downloadFile(c, versionId) {
-  const b = busy(`Downloading and decrypting ${c.name}…`);
+  const path = `/api/v1/nodes/${c.id}/content${versionId ? `?version=${versionId}` : ''}`;
+  await decryptAndSave(c.name, c.plainSize, () => fetch(path, { credentials: 'same-origin' }), await nodeKey(c.id), signerFor);
+}
+
+// ---- saving decrypted files --------------------------------------------------------------------------------
+// Small files are decrypted in memory and verified completely before they
+// are offered. Large ones are streamed to disk through the download worker
+// (/dl/sw.js): each chunk is released once AES-GCM authenticates it, and
+// the last only after the author's signature over every chunk verifies;
+// if anything fails the download is aborted and the browser discards the
+// partial file. Without the worker (private windows in some browsers),
+// large files fall back to memory.
+const STREAM_FROM = 64 * 1024 * 1024;
+const MEMORY_WARNING = 1536 * 1024 * 1024;
+
+async function decryptAndSave(name, size, fetchContainer, nk, signerFn) {
+  if (size >= STREAM_FROM && await streamToDisk(name, fetchContainer, nk, signerFn)) return;
+  if (size >= MEMORY_WARNING && !(await confirmBox('Large file', `${name} is ${fmtSize(size)}. This browser cannot save it as a stream, ` +
+    'so it has to fit in memory and may fail. frontdir-cli (get, or mount) handles files of any size.', 'Try anyway'))) return;
+  const b = busy(`Downloading and decrypting ${name}…`);
   try {
-    const blob = await apiBlob(`/api/v1/nodes/${c.id}/content${versionId ? `?version=${versionId}` : ''}`);
-    const res = await E.decryptFile(blob, await nodeKey(c.id), signerFor, (f) => b.set(f));
-    saveBlob(res.blob, c.name);
-  } catch (e) { toast(`${c.name}: ${e.message}`); } finally { b.close(); }
+    const r = await fetchContainer();
+    if (!r.ok) throw new ApiError(r.status, await r.json().catch(() => null));
+    const res = await E.decryptFile(await r.blob(), nk, signerFn, (f) => b.set(f));
+    saveBlob(res.blob, name);
+  } catch (e) { toast(`${name}: ${e.message}`); } finally { b.close(); }
+}
+
+// The one Trusted Types policy the page's CSP allows ("frontdir-sw"):
+// registering a service worker needs a TrustedScriptURL, and this policy
+// can only ever produce the download worker's constant URL. It makes no
+// HTML, no script and no other URL, and it can be created only once.
+const SW_URL = '/dl/sw.js';
+let swPolicy;
+function workerScriptURL() {
+  if (!window.trustedTypes) return SW_URL;
+  swPolicy = swPolicy || window.trustedTypes.createPolicy('frontdir-sw', {
+    createScriptURL: (u) => { if (u !== SW_URL) throw new TypeError('only the download worker may be loaded'); return u; },
+  });
+  return swPolicy.createScriptURL(SW_URL);
+}
+
+let dlWorker = null;
+function downloadWorker() {
+  if (!dlWorker) {
+    dlWorker = (async () => {
+      if (!('serviceWorker' in navigator) || !window.isSecureContext) return null;
+      const reg = await navigator.serviceWorker.register(workerScriptURL(), { scope: '/dl/', updateViaCache: 'none' });
+      const w = reg.active || reg.waiting || reg.installing;
+      if (w && w.state !== 'activated') {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error('download worker did not start')), 10000);
+          w.addEventListener('statechange', () => {
+            if (w.state === 'activated') { clearTimeout(t); resolve(); }
+            if (w.state === 'redundant') { clearTimeout(t); reject(new Error('download worker failed')); }
+          });
+        });
+      }
+      return reg.active;
+    })().catch(() => null);
+  }
+  return dlWorker;
+}
+
+// streamToDisk returns false if streaming is unavailable (nothing was
+// saved), and true once it has handled the download, successfully or not.
+async function streamToDisk(name, fetchContainer, nk, signerFn) {
+  const sw = await downloadWorker();
+  if (!sw) return false;
+  const b = busy(`Decrypting ${name} to your downloads… keep this tab open until it finishes.`);
+  let dec;
+  try {
+    const r = await fetchContainer();
+    if (!r.ok) throw new ApiError(r.status, await r.json().catch(() => null));
+    const total = Number(r.headers.get('Content-Length')) || undefined;
+    dec = await E.openContainerStream(r.body, nk, signerFn, total);
+  } catch (e) {
+    b.close();
+    toast(`${name}: ${e.message}`);
+    return true;
+  }
+  const id = E.newId();
+  const { port1, port2 } = new MessageChannel();
+  let sent = 0, started = false;
+  const outcome = new Promise((resolve) => {
+    const startTimer = setTimeout(() => { if (!started) { dec.cancel(); resolve('not-started'); } }, 15000);
+    port1.onmessage = async ({ data }) => {
+      if (data.ready) { // the worker holds the stream: let the browser fetch it as a download
+        const a = h('a', { href: `/dl/${id}`, hidden: true });
+        document.body.append(a);
+        a.click();
+        a.remove();
+      } else if (data.started) {
+        started = true;
+        clearTimeout(startTimer);
+      } else if (data.pull) {
+        try {
+          const r = await dec.next();
+          if (r.done) { port1.postMessage({ done: true }); resolve('done'); return; }
+          sent += r.value.length;
+          b.set(dec.size ? sent / dec.size : 1);
+          port1.postMessage({ chunk: r.value }, [r.value.buffer]);
+        } catch (e) {
+          port1.postMessage({ error: e.message });
+          resolve(e);
+        }
+      } else if (data.cancel || data.expired) {
+        dec.cancel();
+        resolve('cancelled');
+      }
+    };
+  });
+  sw.postMessage({ type: 'download', id, name, size: dec.size }, [port2]);
+  const result = await outcome;
+  b.close();
+  port1.close();
+  if (result === 'not-started') return false;
+  if (result instanceof Error) toast(`${name}: download stopped, ${result.message}. The browser discards the partial file.`);
+  else if (result === 'cancelled') toast(`${name}: download cancelled`);
+  return true;
 }
 
 async function backupFile(c) {
@@ -1516,17 +1630,13 @@ async function publicLink(nodeId = '', password = '') {
       }
       return signerCache.get(uid);
     };
-    const download = async (id, fileKey, fileName) => {
-      const b = busy(`Downloading and decrypting ${fileName}…`);
-      try {
-        const blob = await apiBlob('/api/v1/public/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, password, nodeId: id }) });
-        saveBlob((await E.decryptFile(blob, fileKey, signerFn, (f) => b.set(f))).blob, fileName);
-      } catch (e) { toast(e.message); } finally { b.close(); }
-    };
+    const download = (id, fileKey, fileName, size) => decryptAndSave(fileName, size, () => fetch('/api/v1/public/download', {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, password, nodeId: id }),
+    }), fileKey, signerFn);
     let body;
     if (target.kind === 'file') {
       body = h('div', { class: 'center' }, h('h1', {}, name), h('p', { class: 'note' }, fmtSize(target.plainSize)),
-        h('button', { class: 'primary', onclick: () => download(target.id, key, name) }, 'Download'));
+        h('button', { class: 'primary', onclick: () => download(target.id, key, name, target.plainSize) }, 'Download'));
     } else {
       const rows = [];
       for (const c of data.children) {
@@ -1534,7 +1644,7 @@ async function publicLink(nodeId = '', password = '') {
         const ck = await key.unwrapChild(c.id, c.wrappedKey);
         rows.push(h('tr', {}, h('td', {}, h('div', { class: 'name' }, h('span', { class: 'icon' }, c.kind === 'folder' ? '📁' : '📄'),
           c.kind === 'folder' ? h('button', { class: 'link', onclick: () => publicLink(c.id, password) }, cname)
-            : h('button', { class: 'link', onclick: () => download(c.id, ck, cname) }, cname))),
+            : h('button', { class: 'link', onclick: () => download(c.id, ck, cname, c.plainSize) }, cname))),
           h('td', { class: 'num' }, c.kind === 'file' ? fmtSize(c.plainSize) : '')));
       }
       body = h('div', {}, h('div', { class: 'toolbar' }, h('h1', { class: 'crumbs' }, name),
