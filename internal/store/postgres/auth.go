@@ -57,6 +57,15 @@ func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
 	return mapErr(err)
 }
 
+// DeleteAllSessions ends every browser session on the instance.
+func (s *Store) DeleteAllSessions(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM sessions")
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (s *Store) DeleteUserSessions(ctx context.Context, userID string) error {
 	_, err := s.db.Exec(ctx, "DELETE FROM sessions WHERE user_id=$1", userID)
 	return mapErr(err)

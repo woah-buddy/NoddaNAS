@@ -516,7 +516,8 @@ user appears to come from the proxy and shares one rate-limit budget.
 | Weekly | Review audit events: `link.password_failed`, `admin.links.revoke_all`, `operator.*`, `team.group_map` | [§11](#11-monitoring-and-logs) |
 | Monthly | Apply NoddaNAS and base-image updates | [§10](#10-upgrades) |
 | Monthly | Check disk usage against the sum of quotas | [§11](#11-monitoring-and-logs) |
-| Quarterly | Restore a backup to a scratch environment and decrypt a file from it | [§9](#9-backups-and-restore) |
+| Monthly | `restic check --read-data-subset=5%` (or your tool's equivalent) | [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#6-checking-backups-without-reading-them) |
+| Quarterly | Full restore drill on a scratch machine: `verify-storage --hash`, then open the canary file | [DISASTER_RECOVERY.md](DISASTER_RECOVERY.md#7-restoring-after-losing-the-server) |
 | Quarterly | Review who is in the admin and allowed groups at the IdP | [§12](#12-managing-users) |
 | Yearly, or when staff leave | Rotate the database password, OIDC client secret and SAML SP key | [§14](#14-rotating-secrets) |
 
@@ -527,7 +528,11 @@ team folders, and removes expired sessions and login requests.
 
 ## 9. Backups and restore
 
-There are two independent kinds of backup. Use both.
+There are two independent kinds of backup. Use both. For backing up the whole server at the
+operating-system level and rebuilding it on new hardware (fire, theft, ransomware), follow
+**[DISASTER_RECOVERY.md](DISASTER_RECOVERY.md)**. It covers off-site repositories, verifying
+backups without being able to read them, and a step-by-step rebuild runbook. This section covers
+the basic mechanics.
 
 ### Server backups (you)
 
@@ -564,10 +569,17 @@ docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner < 
 docker run --rm -v noddanas_noddanas-data:/data -v "$PWD":/backup:ro alpine \
   sh -c 'find /data -mindepth 1 -delete && tar -C /data -xpf /backup/noddanas-data-<date>.tar'
 docker compose start noddanas
+docker compose exec noddanas /noddanas verify-storage --hash    # every file present and intact
+docker compose exec noddanas /noddanas revoke-sessions --all    # see "restores bring back the past"
 ```
 
 No keys are involved: the server never had any. Users sign in and unlock their files with their
 own passphrases as before.
+
+**Restores bring back the past:** sessions, app passwords and links revoked after the backup was
+taken, removed team members and deleted files all come back. After any restore, end all sessions
+and re-apply later revocations (see [DISASTER_RECOVERY.md §7](DISASTER_RECOVERY.md#7-restoring-after-losing-the-server),
+step 7).
 
 On Kubernetes, use your database's backup tooling (for example CloudNativePG's scheduled
 backups) and volume snapshots or a file-level backup of the data volume, in the same order.
@@ -657,7 +669,7 @@ NoddaNAS writes one JSON object per line to standard output (`docker compose log
 | Files | `file.upload`, `file.download`, `file.version_restore`, `folder.create`, `node.update`, `node.trash`, `node.restore`, `node.purge_requested`, `node.purged`, `trash.empty` |
 | Sharing | `share.user.create`, `share.link.create`, `share.delete`, `link.download`, `link.password_failed`, `share.link.revoke_all` |
 | Team folders | `team.create`, `team.delete`, `team.member_role`, `team.member_remove`, `team.key_grant`, `team.group_map`, `team.group_unmap`, `space.quota`, `space.purged` |
-| Emergency actions | `admin.links.revoke_all` (web), `operator.links.revoke_user`, `operator.links.revoke_all`, `operator.access.revoke` (server shell) |
+| Emergency and maintenance actions | `admin.links.revoke_all` (web), `operator.links.revoke_user`, `operator.links.revoke_all`, `operator.access.revoke`, `operator.sessions.revoke_all`, `operator.storage.verify` (server shell) |
 
 Audit events never contain file names, file contents or keys. The server does not have them.
 
@@ -803,7 +815,8 @@ at the IdP.
 4. End every session and app password:
 
    ```sh
-   docker compose exec postgres psql -U noddanas -d noddanas -c "DELETE FROM sessions; DELETE FROM app_passwords;"
+   docker compose exec noddanas /noddanas revoke-sessions --all
+   docker compose exec postgres psql -U noddanas -d noddanas -c "DELETE FROM app_passwords;"
    ```
 
 5. Tell users what happened. If the attacker could have changed the JavaScript the server

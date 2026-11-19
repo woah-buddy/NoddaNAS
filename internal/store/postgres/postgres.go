@@ -681,6 +681,16 @@ const subtreeCTE = `WITH RECURSIVE sub AS (
 
 const versionCols = `id, node_id, space_id, blob_key, size, sha256, created_at, created_by`
 
+// ListVersionBlobs pages through every stored file version in blob-key
+// order (for storage verification).
+func (s *Store) ListVersionBlobs(ctx context.Context, after string, limit int) ([]*domain.Version, error) {
+	rows, err := s.db.Query(ctx, "SELECT "+versionCols+" FROM versions WHERE blob_key > $1 ORDER BY blob_key LIMIT $2", after, limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return scanVersions(rows)
+}
+
 func scanVersions(rows pgx.Rows) ([]*domain.Version, error) {
 	defer rows.Close()
 	var out []*domain.Version

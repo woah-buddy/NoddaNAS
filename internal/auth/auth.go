@@ -57,6 +57,7 @@ type Store interface {
 	TouchSession(ctx context.Context, tokenHash string, now time.Time) error
 	DeleteSession(ctx context.Context, tokenHash string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
+	DeleteAllSessions(ctx context.Context) (int64, error)
 	CreateAppPassword(ctx context.Context, ap *domain.AppPassword) error
 	GetAppPassword(ctx context.Context, tokenHash string) (*domain.AppPassword, error)
 	TouchAppPassword(ctx context.Context, id string, now time.Time) error
@@ -249,6 +250,14 @@ func (m *Manager) RevokeUserCredentials(ctx context.Context, userID string) (app
 		return 0, err
 	}
 	return m.store.DeleteUserAppPasswords(ctx, userID)
+}
+
+// EndEverySession signs every user out of every browser (for example after
+// restoring a backup, which brings back sessions that had since ended).
+// Users sign in again through the identity provider, which applies its
+// current rules. App passwords are not affected.
+func (m *Manager) EndEverySession(ctx context.Context) (int64, error) {
+	return m.store.DeleteAllSessions(ctx)
 }
 
 // CreateAppPassword mints an app password. The token is returned once.

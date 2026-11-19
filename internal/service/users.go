@@ -201,8 +201,16 @@ func parseBundle(userID, raw string) (*e2ee.Bundle, *domain.PublicKeys, error) {
 	if b.V != 1 || b.UserID != userID || len(b.Unlock) < 2 || len(b.Unlock) > 8 || b.Private == "" {
 		return nil, nil, domain.E(domain.CodeInvalid, "key bundle must be v1, for this user, with passphrase and recovery unlockers")
 	}
+	// Every copy of this bundle (database, backups, offsite copies) is only
+	// as strong as its weakest unlocker, so the server refuses weak ones
+	// even from a buggy or non-standard client: a passphrase unlocker must
+	// use the full PBKDF2 work factor, and every unlocker must have the
+	// exact shape the E2EE spec defines.
 	types := map[string]bool{}
 	for _, u := range b.Unlock {
+		if err := checkUnlocker(u); err != nil {
+			return nil, nil, err
+		}
 		types[u.Type] = true
 	}
 	if !types["passphrase"] || !types["recovery"] {
@@ -217,6 +225,26 @@ func parseBundle(userID, raw string) (*e2ee.Bundle, *domain.PublicKeys, error) {
 		return nil, nil, err
 	}
 	return &b, &domain.PublicKeys{Enc: b.Pub.Enc, Sig: b.Pub.Sig, SelfSig: b.SelfSig}, nil
+}
+
+// MaxPBKDF2Iterations bounds the work clients are asked to do on unlock.
+const MaxPBKDF2Iterations = 10_000_000
+
+func checkUnlocker(u e2ee.Unlocker) error {
+	switch u.Type {
+	case "passphrase":
+		if u.KDF != "pbkdf2-sha256" || u.Iter < e2ee.PBKDF2Iterations || u.Iter > MaxPBKDF2Iterations {
+			return domain.E(domain.CodeInvalid, "passphrase unlocker must use pbkdf2-sha256 with at least %d iterations", e2ee.PBKDF2Iterations)
+		}
+	case "recovery":
+		if u.KDF != "" || u.Iter != 0 {
+			return domain.E(domain.CodeInvalid, "malformed recovery unlocker")
+		}
+	default:
+		return domain.E(domain.CodeInvalid, "unknown unlocker type")
+	}
+	return firstErr(validate.Opaque("unlock.salt", u.Salt, 16, 64),
+		validate.Opaque("unlock.mk", u.MK, validate.WrappedKeyLen, validate.WrappedKeyLen))
 }
 
 func checkSpaceKeys(spaceID string, k SpaceKeys, creator *e2ee.PublicUser) error {

@@ -7,6 +7,9 @@
 //	                               revoke public links (break-glass; works without the web UI)
 //	noddanas revoke-access --user EMAIL|ID
 //	                               offboard: end sessions, delete app passwords, revoke links
+//	noddanas revoke-sessions --all sign everyone out of every browser (e.g. after a restore)
+//	noddanas verify-storage [--hash]
+//	                               check every stored file is present and intact (no keys needed)
 //	noddanas healthcheck           probe the local server (for container HEALTHCHECK)
 //	noddanas version               print the version
 package main
@@ -54,12 +57,16 @@ func main() {
 		err = revokeLinks(os.Args[2:])
 	case "revoke-access":
 		err = revokeAccess(os.Args[2:])
+	case "revoke-sessions":
+		err = revokeSessions(os.Args[2:])
+	case "verify-storage":
+		err = verifyStorage(os.Args[2:])
 	case "healthcheck":
 		err = healthcheck()
 	case "version":
 		fmt.Println(version)
 	default:
-		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "noddanas:", err)
@@ -333,5 +340,75 @@ func revokeAccess(args []string) error {
 	op.log.Warn("audit", "event", "operator.access.revoke", "actor", "cli", "target", u.ID, "app_passwords", apps, "links", links)
 	fmt.Fprintf(os.Stderr, "%s (%s): all sessions ended, %d app password(s) and %d public link(s) revoked\n",
 		u.ID, u.DisplayName, apps, links)
+	return nil
+}
+
+// revokeSessions signs every user out. After restoring a backup, sessions
+// that had ended since the backup was taken exist again; this ends them all,
+// so everyone signs in afresh through the identity provider's current rules.
+func revokeSessions(args []string) error {
+	if len(args) != 1 || args[0] != "--all" {
+		return errors.New("usage: noddanas revoke-sessions --all")
+	}
+	op, closeFn, err := adminService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	n, err := op.auth.EndEverySession(context.Background())
+	if err != nil {
+		return err
+	}
+	op.log.Warn("audit", "event", "operator.sessions.revoke_all", "actor", "cli", "count", n)
+	fmt.Fprintf(os.Stderr, "ended %d browser session(s); app passwords are unchanged\n", n)
+	return nil
+}
+
+// verifyStorage checks that every file version recorded in the database has
+// its encrypted container in storage, with the right size and, with --hash,
+// the right SHA-256. It reads only ciphertext and needs no keys.
+func verifyStorage(args []string) error {
+	hash := false
+	switch {
+	case len(args) == 0:
+	case len(args) == 1 && args[0] == "--hash":
+		hash = true
+	default:
+		return errors.New("usage: noddanas verify-storage [--hash]")
+	}
+	op, closeFn, err := adminService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+	r, err := op.svc.OperatorVerifyStorage(context.Background(), hash)
+	if err != nil {
+		return err
+	}
+	how := "sizes checked"
+	if hash {
+		how = "sizes and SHA-256 checked"
+	}
+	fmt.Printf("%d file versions, %d bytes of ciphertext (%s)\n", r.Versions, r.Bytes, how)
+	for _, g := range []struct {
+		label string
+		list  []service.StorageProblem
+	}{{"missing", r.Missing}, {"wrong size", r.WrongSize}, {"wrong SHA-256", r.WrongHash}} {
+		fmt.Printf("%-14s %d\n", g.label+":", len(g.list))
+		for i, p := range g.list {
+			if i == 100 {
+				fmt.Printf("  ... and %d more\n", len(g.list)-100)
+				break
+			}
+			fmt.Printf("  space %s  node %s  version %s\n", p.SpaceID, p.NodeID, p.VersionID)
+		}
+	}
+	if r.Orphans >= 0 {
+		fmt.Printf("%-14s %d (stored but not referenced; harmless ciphertext)\n", "unreferenced:", r.Orphans)
+	}
+	if !r.OK() {
+		return errors.New("storage verification failed")
+	}
+	fmt.Println("OK")
 	return nil
 }

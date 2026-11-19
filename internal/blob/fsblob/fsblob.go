@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -146,6 +147,23 @@ func (s *Store) Ping(context.Context) error {
 		return err
 	}
 	return s.root.Remove(name)
+}
+
+// Keys calls fn with the key of every blob in the store, for consistency
+// checks. Files that are not well-formed blob keys are ignored.
+func (s *Store) Keys(ctx context.Context, fn func(key string) error) error {
+	return fs.WalkDir(s.root.FS(), blobsDir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.IsDir() || validate.ID(d.Name()) != nil {
+			return nil
+		}
+		return fn(d.Name())
+	})
 }
 
 // syncDir makes a directory entry durable. Best effort: not every

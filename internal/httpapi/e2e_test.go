@@ -35,6 +35,7 @@ import (
 	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
 	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
 	"github.com/woah-buddy/NoddaNAS/internal/testutil"
 	"github.com/woah-buddy/NoddaNAS/web"
 )
@@ -165,18 +166,41 @@ type harness struct {
 	base string
 }
 
-func newHarness(t *testing.T) *harness {
+// harnessOpts lets a test start a server on existing state, e.g. a
+// restored backup, with the same identity provider as before.
+type harnessOpts struct {
+	store   *postgres.Store
+	dataDir string
+	oidc    *fakeOIDC
+	logs    io.Writer // the server's JSON log stream
+}
+
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, harnessOpts{}) }
+
+func newHarnessWith(t *testing.T, o harnessOpts) *harness {
 	t.Helper()
-	store := testutil.Postgres(t)
-	blobs, err := fsblob.New(t.TempDir())
+	if o.store == nil {
+		o.store = testutil.Postgres(t)
+	}
+	if o.dataDir == "" {
+		o.dataDir = t.TempDir()
+	}
+	if o.oidc == nil {
+		o.oidc = newFakeOIDC(t)
+	}
+	if o.logs == nil {
+		o.logs = io.Discard
+	}
+	store := o.store
+	blobs, err := fsblob.New(o.dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := slog.New(slog.NewJSONHandler(o.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	cfg := service.DefaultConfig()
 	cfg.AdminGroups = []string{"nas-admins"}
 	svc := service.New(store, blobs, cfg, log)
-	h := &harness{t: t, svc: svc, oidc: newFakeOIDC(t), saml: newSAMLIdP(t)}
+	h := &harness{t: t, svc: svc, oidc: o.oidc, saml: newSAMLIdP(t)}
 	var handler http.Handler
 	h.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
 	t.Cleanup(h.srv.Close)

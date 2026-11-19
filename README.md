@@ -28,6 +28,7 @@ in the browser.
 |---|---|
 | Files & folders | Upload, download, folders, rename, move, versions (restore any), trash with automatic purge |
 | Backups | Download any file as an encrypted `.ndne` container and restore it later, anywhere in the same space; `noddanas-cli backup`; read-only WebDAV for rclone/restic mirrors |
+| Disaster recovery | Whole-server backups stay end-to-end encrypted; `noddanas verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
 | Offline recovery | `noddanas-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
 | Personal spaces | Every user has one, with a per-user quota |
 | Team folders | Direct members (read / write / manage), IdP group mappings (admin), separate quota, signed key grants |
@@ -181,7 +182,7 @@ internal/blob/         blob storage adapter (filesystem)
 web/static/            web client; e2ee.js is the browser E2EE implementation
 test/interop/          browser side of the Go <-> WebCrypto interoperability test
 deploy/                Docker Compose and Kubernetes reference deployments
-docs/                  administrator guide, E2EE spec, architecture, threat model, API, theming
+docs/                  administrator guide, disaster recovery, E2EE spec, architecture, threat model, API, theming
 ```
 
 ## Roadmap

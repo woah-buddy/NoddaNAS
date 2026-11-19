@@ -878,3 +878,84 @@ func TestSharedByMeAndLinkKillSwitches(t *testing.T) {
 		t.Fatalf("revoking the hidden link: %d", n)
 	}
 }
+
+// Every key bundle the server stores (and so every backup of it) must meet
+// the full passphrase work factor, whatever client produced it.
+func TestWeakKeyBundlesRefused(t *testing.T) {
+	e := newEnv(t)
+	a := e.user("alice")
+	stored := must[string](t)(e.svc.KeyBundle(e.ctx, a.p))
+	mutate := func(f func(*e2ee.Bundle)) string {
+		var b e2ee.Bundle
+		if err := json.Unmarshal([]byte(stored), &b); err != nil {
+			t.Fatal(err)
+		}
+		f(&b)
+		raw, _ := json.Marshal(b)
+		return string(raw)
+	}
+	passIdx := func(b *e2ee.Bundle, typ string) int {
+		for i, u := range b.Unlock {
+			if u.Type == typ {
+				return i
+			}
+		}
+		t.Fatalf("no %s unlocker", typ)
+		return -1
+	}
+	for name, f := range map[string]func(*e2ee.Bundle){
+		"low PBKDF2 work factor": func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "passphrase")].Iter = 1000 },
+		"other KDF":              func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "passphrase")].KDF = "sha256" },
+		"absurd work factor":     func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "passphrase")].Iter = 1 << 30 },
+		"short salt":             func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "passphrase")].Salt = e2ee.B64(make([]byte, 4)) },
+		"truncated wrapped key":  func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "recovery")].MK = e2ee.B64(make([]byte, 20)) },
+		"recovery with a KDF":    func(b *e2ee.Bundle) { b.Unlock[passIdx(b, "recovery")].Iter = 1 },
+		"unknown unlocker":       func(b *e2ee.Bundle) { b.Unlock = append(b.Unlock, e2ee.Unlocker{Type: "pin"}) },
+	} {
+		if err := e.svc.UpdateKeyBundle(e.ctx, a.p, mutate(f)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The genuine bundle is still accepted.
+	if err := e.svc.UpdateKeyBundle(e.ctx, a.p, stored); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The administrator can prove storage is complete and intact without any
+// keys: sizes and SHA-256 are of the ciphertext.
+func TestVerifyStorage(t *testing.T) {
+	e := newEnv(t)
+	a := e.user("alice")
+	f1 := must[*domain.Node](t)(a.put(a.root, "one.txt", "first file"))
+	must[*domain.Node](t)(a.putVersion(f1.ID, "one.txt", "first file, second version"))
+	must[*domain.Node](t)(a.put(a.root, "two.txt", "second file"))
+	must[*domain.Node](t)(a.put(a.root, "three.txt", "third file"))
+
+	r := must[*service.StorageReport](t)(e.svc.OperatorVerifyStorage(e.ctx, true))
+	if !r.OK() || r.Versions != 4 || r.Orphans != 0 || r.Bytes == 0 {
+		t.Fatalf("clean storage: %+v", r)
+	}
+	files := e.blobFiles()
+	if len(files) != 4 {
+		t.Fatalf("%d blob files", len(files))
+	}
+	// Damage three containers in three ways, and plant a stray file.
+	os.Remove(files[0])
+	raw, _ := os.ReadFile(files[1])
+	os.WriteFile(files[1], raw[:len(raw)-1], 0o600) // truncated
+	raw, _ = os.ReadFile(files[2])
+	raw[len(raw)/2] ^= 0x01 // one flipped bit, same size
+	os.WriteFile(files[2], raw, 0o600)
+	stray := filepath.Join(filepath.Dir(files[3]), "ffffffffffffffffffffffffffffffff")
+	os.WriteFile(stray, []byte("x"), 0o600)
+
+	quick := must[*service.StorageReport](t)(e.svc.OperatorVerifyStorage(e.ctx, false))
+	if quick.OK() || len(quick.Missing) != 1 || len(quick.WrongSize) != 1 || len(quick.WrongHash) != 0 || quick.Orphans != 1 {
+		t.Fatalf("size check: %+v", quick)
+	}
+	full := must[*service.StorageReport](t)(e.svc.OperatorVerifyStorage(e.ctx, true))
+	if len(full.Missing) != 1 || len(full.WrongSize) != 1 || len(full.WrongHash) != 1 {
+		t.Fatalf("hash check: %+v", full)
+	}
+}
