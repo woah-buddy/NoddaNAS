@@ -1,0 +1,12 @@
+{
+  "name": "Acme Files",
+  "defaultAccent": "acme",
+  "light": { "bg": "#fafafa" },
+  "accents": {
+    "acme": {
+      "label": "Acme red",
+      "light": { "accent": "#b3261e", "accentText": "#ffffff" },
+      "dark": { "accent": "#ff8a80", "accentText": "#1a1a1a" }
+    }
+  }
+}

@@ -108,6 +108,14 @@ IDs because they are bound into the encryption.
 `/dav/` with an app password: `/dav/<spaceId>/` contains `_noddanas-space.json`,
 `_noddanas-folder.json`, subfolders by ID and `<fileId>.ndne` containers. Write methods return 405.
 
+## Theming (public)
+
+| Method & path | |
+|---|---|
+| `GET /api/v1/branding` | `{"name","logo": bool,"defaultAccent","accents":[{"id","label"}]}` |
+| `GET /theme.css` | Generated stylesheet (`ETag`, revalidated) |
+| `GET /branding/logo` | Re-encoded PNG logo, or 404 |
+
 ## Health
 
 `GET /healthz` (204) and `GET /readyz` (204 or 503).

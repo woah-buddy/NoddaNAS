@@ -165,3 +165,9 @@ It uses only DOM APIs, so it can run under a CSP that enforces Trusted Types wit
 Keys are held in memory for the tab's lifetime (WebCrypto private keys are imported
 non-extractable); reloading asks for the passphrase again. Large browser downloads are assembled
 in memory or disk-backed Blob storage; `noddanas-cli` streams with constant memory.
+
+Colors are CSS custom properties defined only in `/theme.css`, which `internal/theme` generates at
+startup from validated tokens. It uses cascade layers (mode, then accent, then high contrast), so
+precedence is explicit rather than a specificity contest. The page picks a mode and accent with
+`data-theme` / `data-accent` attributes on `<html>`, set from an allowlisted `localStorage` value
+by `theme-init.js` before first paint. See [THEMING.md](THEMING.md).

@@ -34,6 +34,7 @@ in the browser.
 | Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links |
 | Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
 | Clients | Web app (no build step, no npm dependencies) and `noddanas-cli` (Go) |
+| Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
 
 Not included (yet): calendar/contacts, document editing, the Nextcloud sync protocol, a plaintext
 WebDAV gateway (see [Roadmap](#roadmap)).
@@ -109,6 +110,8 @@ name with a `_FILE` suffix (preferred).
 | `NODDANAS_ALLOWED_EMAIL_DOMAINS` | | Sign-in requires a verified email in one of these domains |
 | `NODDANAS_ADMIN_GROUPS` | | Members administer group mappings and quotas |
 | `NODDANAS_TEAM_CREATION` | `true` | Whether any user may create team folders |
+| `NODDANAS_BRAND_NAME` / `_LOGO_FILE` | `NoddaNAS` / | Instance name; PNG/JPEG logo (re-encoded) |
+| `NODDANAS_THEME_FILE` | | Color tokens and accents; validated, contrast-checked ([THEMING.md](docs/THEMING.md)) |
 | `NODDANAS_DEFAULT_QUOTA` / `_TEAM_QUOTA` | `10GiB` / `50GiB` | Quotas for new personal / team spaces |
 | `NODDANAS_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file |
 | `NODDANAS_MAX_VERSIONS` | `10` | Versions kept per file (all count towards quota) |
@@ -188,12 +191,13 @@ internal/secure/       IDs, tokens, hashing, argon2id
 internal/service/      use cases and the single authorization decision point
 internal/auth/         OIDC, SAML, sessions, app passwords
 internal/httpapi/      JSON API, read-only ciphertext WebDAV, public links, static UI
+internal/theme/        theme validation, contrast checks, stylesheet generation, logo sanitizing
 internal/store/        PostgreSQL adapter and migrations
 internal/blob/         blob storage adapter (filesystem)
 web/static/            web client; e2ee.js is the browser E2EE implementation
 test/interop/          browser side of the Go <-> WebCrypto interoperability test
 deploy/                Docker Compose and Kubernetes reference deployments
-docs/                  E2EE spec, architecture, threat model, operations, API
+docs/                  E2EE spec, architecture, threat model, operations, API, theming
 ```
 
 ## Roadmap

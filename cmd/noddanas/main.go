@@ -109,7 +109,7 @@ func serve() error {
 			"(set NODDANAS_ALLOWED_GROUPS or NODDANAS_ALLOWED_EMAIL_DOMAINS)")
 	}
 	api := httpapi.New(svc, am, httpapi.Config{
-		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV,
+		PublicURL: cfg.PublicURL, TrustedProxies: cfg.TrustedProxies, EnableWebDAV: cfg.WebDAV, Theme: cfg.Theme,
 	}, log, web.Static(), store, blobs)
 
 	srv := &http.Server{

@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/NoddaNAS/internal/theme"
 )
 
 // Config is the complete runtime configuration.
@@ -41,6 +43,7 @@ type Config struct {
 	Policy         auth.Policy
 	Auth           auth.Config
 	Service        service.Config
+	Theme          *theme.Theme // validated branding and appearance (never nil after Load)
 }
 
 // Load reads the configuration, failing closed on anything missing or unsafe.
@@ -152,7 +155,55 @@ func Load() (*Config, error) {
 	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
 		errs = append(errs, errors.New("set both NODDANAS_TLS_CERT_FILE and NODDANAS_TLS_KEY_FILE, or neither"))
 	}
+
+	th, err := loadTheme()
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.Theme = th
 	return c, errors.Join(errs...)
+}
+
+// loadTheme reads optional branding: a theme file of color tokens, a display
+// name and a logo. An invalid theme stops startup with every problem listed;
+// it never silently falls back, so what users see is what the operator
+// reviewed.
+func loadTheme() (*theme.Theme, error) {
+	o := theme.Options{Name: os.Getenv("NODDANAS_BRAND_NAME")}
+	var err error
+	if f := os.Getenv("NODDANAS_THEME_FILE"); f != "" {
+		if o.ThemeJSON, err = readLimited(f, 64<<10); err != nil {
+			return nil, fmt.Errorf("NODDANAS_THEME_FILE: %w", err)
+		}
+	}
+	if f := os.Getenv("NODDANAS_BRAND_LOGO_FILE"); f != "" {
+		if o.Logo, err = readLimited(f, 512<<10); err != nil {
+			return nil, fmt.Errorf("NODDANAS_BRAND_LOGO_FILE: %w", err)
+		}
+	}
+	th, err := theme.Load(o)
+	if err != nil {
+		return nil, fmt.Errorf("theme:\n%w", err)
+	}
+	return th, nil
+}
+
+// readLimited reads a whole file but refuses anything over max bytes, so a
+// misconfigured path (a huge file, /dev/zero) cannot exhaust memory.
+func readLimited(name string, max int64) ([]byte, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("file is larger than %d KiB", max>>10)
+	}
+	return b, nil
 }
 
 func loadSAML(c *Config, mdURL, mdFile string) (*auth.SAMLConfig, error) {

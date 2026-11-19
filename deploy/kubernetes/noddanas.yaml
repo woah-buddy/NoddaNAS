@@ -36,6 +36,10 @@ data:
   NODDANAS_ADMIN_GROUPS: noddanas-admins
   NODDANAS_DEFAULT_QUOTA: 10GiB
   NODDANAS_DEFAULT_TEAM_QUOTA: 50GiB
+  # Branding (docs/THEMING.md): mount a ConfigMap holding theme.json and/or
+  # logo.png read-only and point NODDANAS_THEME_FILE / NODDANAS_BRAND_LOGO_FILE
+  # at it. An invalid theme stops startup with a list of problems.
+  # NODDANAS_BRAND_NAME: Acme Files
   # Pod CIDR of your ingress controller, so client IPs are logged and rate
   # limited correctly. Adjust to your cluster.
   NODDANAS_TRUSTED_PROXIES: 10.0.0.0/8

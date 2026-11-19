@@ -12,6 +12,7 @@ import (
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/NoddaNAS/internal/theme"
 )
 
 // Config configures the HTTP layer.
@@ -26,6 +27,8 @@ type Config struct {
 	EnableWebDAV bool
 	// Per-IP rate limits (requests per minute). Zero means the default.
 	RateLimits RateLimits
+	// Theme is the validated branding and appearance; nil means the built-in theme.
+	Theme *theme.Theme
 }
 
 // RateLimits are per-client-IP request budgets per minute.
@@ -59,6 +62,7 @@ type Server struct {
 	loginLimit   *limiter
 	authFailures *limiter
 	dav          http.Handler
+	theme        *theme.Theme
 }
 
 // New builds the server. ui holds the static web client (may be nil).
@@ -68,6 +72,10 @@ func New(svc *service.Service, am *auth.Manager, cfg Config, log *slog.Logger, u
 		publicLimit:  newLimiter(orDefault(cfg.RateLimits.Public, 120), 30),
 		loginLimit:   newLimiter(orDefault(cfg.RateLimits.Login, 20), 10),
 		authFailures: newLimiter(orDefault(cfg.RateLimits.AuthFailures, 30), 10),
+		theme:        cfg.Theme,
+	}
+	if s.theme == nil {
+		s.theme = theme.Default()
 	}
 	if cfg.EnableWebDAV {
 		s.dav = s.newDAV()
@@ -83,6 +91,11 @@ func (s *Server) Handler() http.Handler {
 	// are reachable". Neither reveals details to the caller.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("GET /readyz", s.handleReady)
+
+	// Theming: generated stylesheet, branding metadata, sanitized logo.
+	mux.HandleFunc("GET /theme.css", s.handleThemeCSS)
+	mux.HandleFunc("GET /api/v1/branding", s.handleBranding)
+	mux.HandleFunc("GET /branding/logo", s.handleLogo)
 
 	// Sign-in: OIDC and/or SAML, then a server-side session.
 	mux.HandleFunc("GET /api/v1/auth/methods", s.public(s.handleAuthMethods))

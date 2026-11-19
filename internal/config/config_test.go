@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestParseSize(t *testing.T) {
 	for in, want := range map[string]int64{"0": 0, "1024": 1024, "10GiB": 10 << 30, "5 MiB": 5 << 20, "2TiB": 2 << 40} {
@@ -48,5 +53,36 @@ func TestLoadRequiresASignInMethod(t *testing.T) {
 	c, err := Load()
 	if err != nil || c.SAML == nil || c.OIDC != nil || c.SAML.ACSURL != "https://files.example.com/auth/saml/acs" {
 		t.Fatalf("SAML-only config: %+v %v", c, err)
+	}
+}
+
+func TestLoadTheme(t *testing.T) {
+	t.Setenv("NODDANAS_DATABASE_URL", "postgres://x")
+	t.Setenv("NODDANAS_PUBLIC_URL", "https://files.example.com")
+	t.Setenv("NODDANAS_OIDC_ISSUER", "https://idp")
+	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "c")
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.json")
+	bad := filepath.Join(dir, "bad.json")
+	os.WriteFile(good, []byte(`{"name": "Acme Files", "light": {"bg": "#fafafa"}}`), 0o600)
+	os.WriteFile(bad, []byte(`{"light": {"text": "#fafafa"}}`), 0o600) // unreadable text
+
+	c, err := Load()
+	if err != nil || c.Theme == nil || c.Theme.Name != "NoddaNAS" {
+		t.Fatalf("default theme: %v", err)
+	}
+	t.Setenv("NODDANAS_THEME_FILE", good)
+	t.Setenv("NODDANAS_BRAND_NAME", "Acme Cloud")
+	if c, err = Load(); err != nil || c.Theme.Name != "Acme Cloud" {
+		t.Fatalf("custom theme: %v", err)
+	}
+	t.Setenv("NODDANAS_THEME_FILE", bad)
+	if _, err = Load(); err == nil || !strings.Contains(err.Error(), "contrast") {
+		t.Fatalf("low-contrast theme accepted: %v", err)
+	}
+	t.Setenv("NODDANAS_THEME_FILE", good)
+	t.Setenv("NODDANAS_BRAND_LOGO_FILE", good) // not an image
+	if _, err = Load(); err == nil {
+		t.Fatal("non-image logo accepted")
 	}
 }

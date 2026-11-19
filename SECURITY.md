@@ -34,3 +34,6 @@ and an update to the threat model.
    space, a key commitment, or a signature from the user who granted it.
 10. SAML changes keep: signatures required, SP-initiated only, single-use request binding,
     HTTP-POST binding only.
+11. Theming stays data, not code: allowlisted tokens with strict value grammars, stylesheets
+    generated server-side, no CSP exceptions, contrast checked, images re-encoded
+    ([docs/THEMING.md](docs/THEMING.md)).

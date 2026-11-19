@@ -61,6 +61,10 @@ Migrations run at startup, serialized across replicas by an advisory lock. To co
   for group-based team access immediately on the next sync), revoke their sessions and app
   passwords, and remove direct team memberships. Already-downloaded data cannot be recalled.
 
+- **Branding**: set `NODDANAS_BRAND_NAME`, `NODDANAS_BRAND_LOGO_FILE` and `NODDANAS_THEME_FILE`
+  (see [THEMING.md](THEMING.md)). Changes apply on restart. An invalid theme stops startup with a
+  list of problems, so check the logs after changing it.
+
 ## Monitoring
 
 - `GET /healthz` (liveness) and `GET /readyz` (database and storage reachable).

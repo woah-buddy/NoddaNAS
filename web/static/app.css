@@ -1,12 +1,7 @@
 :root {
-  --bg: #f7f7f8; --panel: #ffffff; --text: #1d1d20; --muted: #6b6b76; --line: #e3e3e8;
-  --accent: #2f6fde; --accent-text: #ffffff; --danger: #c33a3a; --row-hover: #f0f3fa;
+  /* Colors are design tokens defined in /theme.css, which the server
+     generates from a validated theme. This file only consumes them. */
   font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  :root { --bg: #151518; --panel: #1e1e22; --text: #ececf1; --muted: #9a9aa6; --line: #2e2e35;
-          --accent: #6b9bff; --accent-text: #0d0d10; --danger: #ff7b7b; --row-hover: #26262d; }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -15,7 +10,8 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 .top { display: flex; align-items: center; gap: 24px; padding: 12px 20px; background: var(--panel);
        border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-.brand { font-weight: 700; font-size: 18px; color: var(--text); }
+.brand { font-weight: 700; font-size: 18px; color: var(--text); display: inline-flex; align-items: center; gap: 8px; }
+.brand img { height: 28px; width: auto; max-width: 160px; object-fit: contain; }
 nav { display: flex; gap: 16px; }
 nav a.active { color: var(--text); font-weight: 600; }
 .quota { margin-left: auto; color: var(--muted); font-size: 13px; }
@@ -64,3 +60,13 @@ code { font-family: ui-monospace, monospace; background: var(--bg); padding: 2px
          color: var(--bg); padding: 10px 16px; border-radius: 8px; max-width: 90vw; }
 .center { text-align: center; padding: 48px 16px; }
 h1 { font-size: 22px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 0 0 12px; }
+legend { color: var(--muted); font-size: 13px; padding: 0 4px; }
+.choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.choices label { display: inline-flex; gap: 6px; align-items: center; padding: 6px 10px; border: 1px solid var(--line);
+                 border-radius: 7px; cursor: pointer; }
+.choices label:has(input:checked) { border-color: var(--accent); font-weight: 600; }
+.swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--line); flex: none; }
+fieldset:disabled .choices label { cursor: default; opacity: .6; }
+input[type=radio], input[type=checkbox] { accent-color: var(--accent); }

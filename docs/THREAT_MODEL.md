@@ -61,6 +61,7 @@ server is still responsible for (access control, integrity of structure, availab
 | Planted backup file | Restore verifies the uploader's signature and shows who signed | client `RestoreContainer`; web restore |
 | Concurrency races, quota overshoot | Same-statement conditions in SQL | `TestQuotaIsAtomic` |
 | SQL injection | Parameterized queries; IDs format-validated | `store/postgres` |
+| Malicious or careless theme (CSS exfiltration, hidden warnings, fake UI, polyglot logo) | Themes are hex color tokens only, never CSS; stylesheet generated server-side; CSP unchanged; WCAG contrast enforced for every mode and accent; fail closed at startup; logos re-encoded to PNG, SVG refused, pixel bound checked before decode; operator-only (no web editing) | `TestThemeRejected`, `TestCSSIsInert`, `TestSanitizeLogo`, `TestThemeEndpoints` |
 | CSRF | Go `CrossOriginProtection`, `SameSite=Lax` sessions, Host validation; the SAML ACS is exempt because it is authenticated by signature plus single-use binding | e2e |
 
 ### Repudiation

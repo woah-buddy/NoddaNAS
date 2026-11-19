@@ -39,11 +39,16 @@ services:
       NODDANAS_ADMIN_GROUPS: ${ADMIN_GROUPS:-}
       NODDANAS_DEFAULT_QUOTA: ${DEFAULT_QUOTA:-10GiB}
       NODDANAS_DEFAULT_TEAM_QUOTA: ${DEFAULT_TEAM_QUOTA:-50GiB}
+      # Optional branding (docs/THEMING.md); files live in ./branding.
+      NODDANAS_BRAND_NAME: ${BRAND_NAME:-}
+      NODDANAS_THEME_FILE: ${THEME_FILE:-}
+      NODDANAS_BRAND_LOGO_FILE: ${BRAND_LOGO_FILE:-}
       # Only Caddy (on the frontend network) may set X-Forwarded-For.
       NODDANAS_TRUSTED_PROXIES: 172.30.0.0/24
     secrets: [database_url, oidc_client_secret]
     volumes:
       - noddanas-data:/data
+      - ./branding:/etc/noddanas/branding:ro
     networks: [frontend, backend]
     depends_on:
       postgres:

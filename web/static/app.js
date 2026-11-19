@@ -201,6 +201,91 @@ async function nodeKey(id) {
 }
 const signerFor = (id) => userKeys(id);
 
+// ---- branding and appearance ------------------------------------------------------------------------------
+// Colors come from /theme.css, which the server generates from validated
+// tokens. This code never builds CSS or markup from data: it shows the brand
+// name as text, points an <img> at the same-origin, re-encoded logo, and picks
+// a mode and accent by setting two allowlisted attributes on <html>.
+const APPEARANCE_KEY = 'noddanas.appearance';
+const MODES = { system: 'Match system', light: 'Light', dark: 'Dark', contrast: 'High contrast' };
+const ACCENT_RE = /^[a-z][a-z0-9-]{0,23}$/;
+let branding = { name: 'NoddaNAS', logo: false, defaultAccent: '', accents: [] };
+
+function loadAppearance() {
+  try {
+    const v = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || 'null') || {};
+    return {
+      mode: Object.hasOwn(MODES, v.mode) ? v.mode : 'system',
+      accent: typeof v.accent === 'string' && ACCENT_RE.test(v.accent) ? v.accent : '',
+    };
+  } catch { return { mode: 'system', accent: '' }; }
+}
+function applyAppearance(a) {
+  const root = document.documentElement;
+  if (a.mode === 'system') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', a.mode);
+  // An accent the operator has since removed falls back to the default.
+  if (a.accent && branding.accents.some((x) => x.id === a.accent)) root.setAttribute('data-accent', a.accent);
+  else root.removeAttribute('data-accent');
+}
+function saveAppearance(a) {
+  applyAppearance(a);
+  try {
+    if (a.mode === 'system' && !a.accent) localStorage.removeItem(APPEARANCE_KEY);
+    else localStorage.setItem(APPEARANCE_KEY, JSON.stringify({ mode: a.mode, accent: a.accent }));
+  } catch { toast('Applied for now, but this browser does not allow saving it.'); }
+}
+async function loadBranding() {
+  try {
+    const b = await api('GET', '/api/v1/branding');
+    branding = {
+      name: typeof b.name === 'string' && b.name ? b.name : 'NoddaNAS',
+      logo: b.logo === true,
+      defaultAccent: typeof b.defaultAccent === 'string' ? b.defaultAccent : '',
+      accents: (Array.isArray(b.accents) ? b.accents : [])
+        .filter((x) => x && typeof x.id === 'string' && ACCENT_RE.test(x.id))
+        .map((x) => ({ id: x.id, label: String(x.label || x.id) })),
+    };
+  } catch { return; } // keep the built-in name and whatever theme-init.js applied
+  document.getElementById('brand-name').textContent = branding.name;
+  document.title = branding.name;
+  if (branding.logo) {
+    const img = document.getElementById('brand-logo');
+    img.src = '/branding/logo';
+    img.hidden = false;
+  }
+  applyAppearance(loadAppearance());
+}
+
+function appearanceSection() {
+  const cur = loadAppearance();
+  const note = h('p', { class: 'note' }, 'High contrast uses its own fixed colors, so the accent cannot be changed.');
+  const accents = h('fieldset', {}, h('legend', {}, 'Accent color'), h('div', { class: 'choices' },
+    branding.accents.map((a) => h('label', {},
+      h('input', { type: 'radio', name: 'appearance-accent', value: a.id, checked: (cur.accent || branding.defaultAccent) === a.id }),
+      h('span', { class: 'swatch', 'data-accent': a.id, 'aria-hidden': 'true' }), a.label))), note);
+  const modes = h('fieldset', {}, h('legend', {}, 'Mode'), h('div', { class: 'choices' },
+    Object.entries(MODES).map(([id, label]) => h('label', {},
+      h('input', { type: 'radio', name: 'appearance-mode', value: id, checked: cur.mode === id }), label))));
+  const sync = () => {
+    const mode = modes.querySelector('input:checked')?.value || 'system';
+    accents.disabled = mode === 'contrast';
+    note.hidden = mode !== 'contrast';
+  };
+  const onChange = () => {
+    const mode = modes.querySelector('input:checked')?.value || 'system';
+    const picked = accents.querySelector('input:checked')?.value || '';
+    saveAppearance({ mode, accent: picked === branding.defaultAccent ? '' : picked });
+    sync();
+  };
+  modes.addEventListener('change', onChange);
+  accents.addEventListener('change', onChange);
+  sync();
+  return [h('h2', {}, 'Appearance'),
+    h('p', { class: 'note' }, 'Saved in this browser only.'),
+    modes, branding.accents.length ? accents : null,
+    h('div', { class: 'toolbar' }, h('button', { onclick: () => { saveAppearance({ mode: 'system', accent: '' }); settingsView(); } }, 'Reset to default'))];
+}
+
 // ---- routing ------------------------------------------------------------------------------------
 function navigate(path) { history.pushState(null, '', path); route(); }
 document.addEventListener('click', (e) => {
@@ -250,8 +335,8 @@ async function signIn() {
   const methods = await api('GET', '/api/v1/auth/methods').catch(() => ({ oidc: true }));
   const rt = encodeURIComponent(location.pathname === '/' ? '/' : location.pathname);
   main.replaceChildren(h('div', { class: 'panel center' },
-    h('h1', {}, 'NoddaNAS'), h('p', {}, 'Private, end-to-end encrypted file storage.'),
-    err && h('p', { class: 'error' }, err === 'not_allowed' ? 'Your account is not permitted to use this NoddaNAS.' : 'Sign-in failed. Please try again.'),
+    h('h1', {}, branding.name), h('p', {}, 'Private, end-to-end encrypted file storage.'),
+    err && h('p', { class: 'error' }, err === 'not_allowed' ? `Your account is not permitted to use ${branding.name}.` : 'Sign-in failed. Please try again.'),
     h('div', { class: 'toolbar centered' },
       methods.oidc && h('a', { class: 'button primary', href: `/auth/login?return_to=${rt}` }, 'Sign in'),
       methods.saml && h('a', { class: 'button' + (methods.oidc ? '' : ' primary'), href: `/auth/saml/login?return_to=${rt}` }, 'Sign in with SAML'))));
@@ -776,6 +861,7 @@ async function settingsView() {
   const ro = h('input', { type: 'checkbox' });
   main.replaceChildren(h('div', { class: 'panel' },
     h('h1', {}, 'Settings'),
+    appearanceSection(),
     h('h2', {}, 'Encryption'),
     h('p', {}, 'Your key fingerprint: ', h('code', {}, E.formatFingerprint(fp))),
     h('p', { class: 'note' }, 'When sharing something sensitive, compare fingerprints with the other person over another channel.'),
@@ -903,4 +989,4 @@ function passwordPrompt(nodeId, wrong) {
   pw.focus();
 }
 
-route();
+loadBranding().then(route);
