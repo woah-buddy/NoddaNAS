@@ -832,7 +832,16 @@ func TestSharedByMeAndLinkKillSwitches(t *testing.T) {
 	wantCode(t, err, domain.CodeForbidden)
 	_, err = e.svc.AdminRevokeAllLinks(e.ctx, service.Principal{UserID: admin.u.ID, ReadOnly: true})
 	wantCode(t, err, domain.CodeForbidden)
-	if n, err := e.svc.AdminRevokeAllLinks(e.ctx, admin.p); err != nil || n != 1 {
+	// ... and only after a recent sign-in.
+	_, err = e.svc.AdminRevokeAllLinks(e.ctx, admin.p)
+	wantCode(t, err, domain.CodeReauth)
+	stale := admin.p
+	stale.ReauthAt = time.Now().Add(-service.RecentSignIn - time.Minute)
+	_, err = e.svc.AdminRevokeAllLinks(e.ctx, stale)
+	wantCode(t, err, domain.CodeReauth)
+	fresh := admin.p
+	fresh.ReauthAt = time.Now()
+	if n, err := e.svc.AdminRevokeAllLinks(e.ctx, fresh); err != nil || n != 1 {
 		t.Fatalf("admin revoke = %d, %v", n, err)
 	}
 	_, err = e.svc.LinkNode(e.ctx, lb, "")

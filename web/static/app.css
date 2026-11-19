@@ -84,3 +84,20 @@ th.num { text-align: right; }
 .trust-wrap .error { font-size: 13px; margin-top: 4px; max-width: 46ch; white-space: normal; }
 .confirm-list { margin: 0 0 12px; padding-left: 20px; max-height: 40vh; overflow: auto; }
 .confirm-list li { margin: 4px 0; }
+
+/* Admin area and setup */
+.banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+          border: 1px solid var(--accent); border-radius: 10px; padding: 10px 14px; margin: 0 0 16px; }
+.banner.ok { border-color: var(--line); color: var(--muted); }
+form.settings fieldset { display: grid; gap: 14px; padding: 12px 16px 16px; }
+form.settings legend { font-size: 15px; color: var(--text); font-weight: 600; }
+.field { display: grid; gap: 4px; max-width: 64ch; }
+.field label { font-weight: 600; }
+.field .note { margin: 0; }
+.field .meta { display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline; }
+.field input:not([type=file]), .field select, .field textarea { width: 100%; }
+.field-error { margin: 0; font-size: 13px; }
+textarea { font: 13px/1.4 ui-monospace, monospace; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px;
+           background: var(--bg); color: var(--text); resize: vertical; }
+.logo-preview { display: block; max-height: 48px; max-width: 240px; margin: 4px 0; }
+.wrap-anywhere { overflow-wrap: anywhere; }

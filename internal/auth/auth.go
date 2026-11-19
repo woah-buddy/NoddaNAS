@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
@@ -28,7 +31,7 @@ import (
 	"github.com/woah-buddy/NoddaNAS/internal/service"
 )
 
-// LoginRequest is the server-side state of an in-progress OIDC login.
+// LoginRequest is the server-side state of an in-progress sign-in.
 type LoginRequest struct {
 	TokenHash string
 	Kind      string // "oidc" or "saml"
@@ -36,7 +39,34 @@ type LoginRequest struct {
 	Nonce     string
 	Verifier  string // PKCE code verifier
 	ReturnTo  string
+	Reauth    bool   // the IdP was asked for a fresh authentication
+	Setup     string // hash of the setup token this sign-in completes, if any
 	ExpiresAt time.Time
+}
+
+// loginTTL bounds how long a sign-in may take at the IdP.
+const loginTTL = 10 * time.Minute
+
+// Started is when the sign-in began.
+func (r *LoginRequest) Started() time.Time { return r.ExpiresAt.Add(-loginTTL) }
+
+// LoginOptions shape a sign-in.
+type LoginOptions struct {
+	ReturnTo string
+	// Reauth asks the IdP to authenticate the person again even if they
+	// have a session there (OIDC prompt=login and max_age=0, SAML
+	// ForceAuthn), and checks that it did. A session started this way
+	// counts as a recent sign-in, which sensitive actions require.
+	Reauth bool
+	Setup  string // hash of a setup token (see the settings package)
+}
+
+// LoginResult is a completed sign-in.
+type LoginResult struct {
+	User     *domain.User
+	ReturnTo string
+	ReauthAt time.Time // when the IdP confirmed a fresh authentication (zero if not asked)
+	Setup    string    // the setup token hash from LoginOptions
 }
 
 // Session is a browser session.
@@ -45,7 +75,8 @@ type Session struct {
 	UserID     string
 	CreatedAt  time.Time
 	LastSeenAt time.Time
-	ExpiresAt  time.Time // absolute expiry
+	ExpiresAt  time.Time  // absolute expiry
+	ReauthAt   *time.Time // when the person last re-authenticated at the IdP on request
 }
 
 // Store persists authentication state.
@@ -93,30 +124,84 @@ const (
 )
 
 // Manager authenticates requests and manages sessions and app passwords.
+//
+// Its configuration (session lifetimes, sign-in methods) can be replaced
+// while the server runs; each request works with one consistent snapshot.
 type Manager struct {
 	store Store
 	svc   *service.Service
-	cfg   Config
-	oidc  *OIDC
-	saml  *SAML
+	log   *slog.Logger
 	now   func() time.Time
+	state atomic.Pointer[authState]
 }
 
-// NewManager wires a Manager. Either sign-in method may be nil, but a
-// deployment needs at least one.
+type authState struct {
+	cfg  Config
+	oidc *OIDC
+	saml *SAML
+}
+
+// NewManager wires a Manager. Either sign-in method may be nil; with
+// neither, the server is in setup mode.
 func NewManager(store Store, svc *service.Service, cfg Config, oidc *OIDC, saml *SAML) *Manager {
-	return &Manager{store: store, svc: svc, cfg: cfg, oidc: oidc, saml: saml, now: func() time.Time { return time.Now().UTC() }}
+	m := &Manager{store: store, svc: svc, log: slog.Default(), now: func() time.Time { return time.Now().UTC() }}
+	m.state.Store(&authState{cfg: cfg, oidc: oidc, saml: saml})
+	return m
+}
+
+func (m *Manager) st() *authState { return m.state.Load() }
+
+// Reconfigure replaces session lifetimes and sign-in methods. A method
+// whose configuration did not change keeps its client (and the IdP
+// metadata it has fetched). Sign-ins already under way with a method that
+// changed fail and can simply be started again.
+func (m *Manager) Reconfigure(cfg Config, oidc *OIDCConfig, saml *SAMLConfig) {
+	cur := m.st()
+	next := &authState{cfg: cfg}
+	if oidc != nil {
+		if cur.oidc != nil && reflect.DeepEqual(cur.oidc.raw, *oidc) {
+			next.oidc = cur.oidc
+		} else {
+			next.oidc = NewOIDC(*oidc)
+		}
+	}
+	if saml != nil {
+		if cur.saml != nil && reflect.DeepEqual(cur.saml.raw, *saml) {
+			next.saml = cur.saml
+		} else {
+			next.saml = NewSAML(*saml)
+		}
+	}
+	m.state.Store(next)
 }
 
 // Methods reports which sign-in methods are configured.
-func (m *Manager) Methods() (oidc, saml bool) { return m.oidc != nil, m.saml != nil }
+func (m *Manager) Methods() (oidc, saml bool) {
+	st := m.st()
+	return st.oidc != nil, st.saml != nil
+}
 
 // SAMLMetadata returns the SP metadata (nil, nil if SAML is not configured).
 func (m *Manager) SAMLMetadata(ctx context.Context) (any, error) {
-	if m.saml == nil {
+	st := m.st()
+	if st.saml == nil {
 		return nil, nil
 	}
-	return m.saml.Metadata(ctx)
+	return st.saml.Metadata(ctx)
+}
+
+// SAMLIdPEntityID returns the entity ID of the configured SAML IdP ("" if
+// SAML is off).
+func (m *Manager) SAMLIdPEntityID(ctx context.Context) (string, error) {
+	st := m.st()
+	if st.saml == nil {
+		return "", nil
+	}
+	sp, err := st.saml.provider(ctx)
+	if err != nil {
+		return "", err
+	}
+	return sp.IDPMetadata.EntityID, nil
 }
 
 // ErrBadCredentials is returned when presented credentials are invalid.
@@ -195,32 +280,44 @@ func (m *Manager) session(ctx context.Context, token string) (service.Principal,
 		return service.Principal{}, err
 	}
 	now := m.now()
-	if !now.Before(s.ExpiresAt) || now.Sub(s.LastSeenAt) > m.cfg.SessionIdle {
+	// Lifetimes are checked against the current settings, so shortening
+	// them takes effect for existing sessions too.
+	cfg := m.st().cfg
+	if !now.Before(s.ExpiresAt) || !now.Before(s.CreatedAt.Add(cfg.SessionAbsolute)) || now.Sub(s.LastSeenAt) > cfg.SessionIdle {
 		_ = m.store.DeleteSession(ctx, h)
 		return service.Principal{}, ErrBadCredentials
 	}
 	if now.Sub(s.LastSeenAt) > time.Minute {
 		_ = m.store.TouchSession(ctx, h, now)
 	}
-	return service.Principal{UserID: s.UserID}, nil
+	p := service.Principal{UserID: s.UserID}
+	if s.ReauthAt != nil {
+		p.ReauthAt = *s.ReauthAt
+	}
+	return p, nil
 }
 
-// StartSession creates a new session for userID and returns its cookie.
-// A fresh random token is minted on every login, which prevents session
-// fixation.
-func (m *Manager) StartSession(ctx context.Context, userID string) (*http.Cookie, error) {
+// StartSession creates a new session for a completed sign-in and returns
+// its cookie. A fresh random token is minted on every sign-in, which
+// prevents session fixation.
+func (m *Manager) StartSession(ctx context.Context, res *LoginResult) (*http.Cookie, error) {
 	token := secure.NewToken()
 	now := m.now()
+	cfg := m.st().cfg
 	s := &Session{
-		TokenHash: secure.HashToken(secure.PurposeSession, token), UserID: userID,
-		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(m.cfg.SessionAbsolute),
+		TokenHash: secure.HashToken(secure.PurposeSession, token), UserID: res.User.ID,
+		CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(cfg.SessionAbsolute),
+	}
+	if !res.ReauthAt.IsZero() {
+		at := res.ReauthAt
+		s.ReauthAt = &at
 	}
 	if err := m.store.CreateSession(ctx, s); err != nil {
 		return nil, err
 	}
 	return &http.Cookie{
 		Name: SessionCookie, Value: token, Path: "/", Secure: true, HttpOnly: true,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(m.cfg.SessionAbsolute.Seconds()),
+		SameSite: http.SameSiteLaxMode, MaxAge: int(cfg.SessionAbsolute.Seconds()),
 	}, nil
 }
 

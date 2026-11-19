@@ -123,7 +123,7 @@ func (s *Service) CreateFolder(ctx context.Context, p Principal, parentID, id st
 	if a.node.Kind != domain.KindFolder {
 		return nil, domain.E(domain.CodeInvalid, "parent is not a folder")
 	}
-	if len(a.chain) >= s.cfg.MaxDepth {
+	if len(a.chain) >= s.conf().MaxDepth {
 		return nil, errTooDeep
 	}
 	now := s.now()
@@ -191,7 +191,7 @@ func (s *Service) Update(ctx context.Context, p Principal, id string, req Update
 			return nil, domain.E(domain.CodeInvalid, "items cannot be moved between spaces; copy them instead")
 		case dest.contains(n.ID):
 			return nil, domain.E(domain.CodeInvalid, "a folder cannot be moved into itself")
-		case len(dest.chain) >= s.cfg.MaxDepth:
+		case len(dest.chain) >= s.conf().MaxDepth:
 			return nil, errTooDeep
 		}
 		n.ParentID, n.WrappedKey = dest.node.ID, req.Entry.WrappedKey
@@ -260,7 +260,7 @@ func (s *Service) ListTrash(ctx context.Context, p Principal, spaceID string) ([
 	}
 	out := make([]TrashEntry, len(nodes))
 	for i, n := range nodes {
-		out[i] = TrashEntry{Node: n, ExpiresAt: n.TrashedAt.Add(s.cfg.TrashRetention).Unix()}
+		out[i] = TrashEntry{Node: n, ExpiresAt: n.TrashedAt.Add(s.conf().TrashRetention).Unix()}
 	}
 	return out, nil
 }

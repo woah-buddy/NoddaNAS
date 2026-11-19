@@ -39,12 +39,20 @@ func TestLoadRejectsInsecurePublicURL(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresASignInMethod(t *testing.T) {
+func TestLoadWithoutSignInIsSetupMode(t *testing.T) {
 	t.Setenv("NODDANAS_DATABASE_URL", "postgres://x")
 	t.Setenv("NODDANAS_PUBLIC_URL", "https://files.example.com")
-	if _, err := Load(); err == nil {
-		t.Fatal("started with no sign-in method configured")
+	// No sign-in method: the server starts in setup mode (noddanas setup-link).
+	if c, err := Load(); err != nil || c.OIDC != nil || c.SAML != nil {
+		t.Fatalf("no sign-in method: %+v %v", c, err)
 	}
+	// A stray sign-in setting without the one that switches the method on
+	// is a mistake, not something to mix with web settings.
+	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "c")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "NODDANAS_OIDC_ISSUER") {
+		t.Fatalf("stray OIDC setting accepted: %v", err)
+	}
+	t.Setenv("NODDANAS_OIDC_CLIENT_ID", "")
 	t.Setenv("NODDANAS_SAML_IDP_METADATA_URL", "http://idp.example.com/metadata")
 	if _, err := Load(); err == nil {
 		t.Fatal("accepted SAML metadata over plain http")

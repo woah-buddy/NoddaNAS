@@ -16,7 +16,6 @@ import (
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
 	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
 )
@@ -57,6 +56,10 @@ type SAMLConfig struct {
 	TrustEmail      bool // treat asserted emails as verified
 
 	Policy Policy
+
+	// AllowLoopback lets the server fetch metadata from a loopback address
+	// (localhost deployments only; see NewIdPClient).
+	AllowLoopback bool
 }
 
 // Default attribute names cover common IdPs (Entra ID, Okta, Shibboleth, Keycloak).
@@ -76,13 +79,16 @@ const SAMLCookie = "__Host-ndn_saml"
 // SAML is a lazily-initialized service provider (IdP metadata is fetched
 // on first use, so NoddaNAS starts even if the IdP is down).
 type SAML struct {
-	cfg SAMLConfig
-	mu  sync.Mutex
-	sp  *saml.ServiceProvider
+	raw    SAMLConfig // as given, to detect changes
+	cfg    SAMLConfig // with defaults applied
+	client *http.Client
+	mu     sync.Mutex
+	sp     *saml.ServiceProvider
 }
 
 // NewSAML returns a SAML service provider for cfg.
 func NewSAML(cfg SAMLConfig) *SAML {
+	raw := cfg
 	if len(cfg.EmailAttributes) == 0 {
 		cfg.EmailAttributes = DefaultSAMLEmailAttrs
 	}
@@ -95,7 +101,7 @@ func NewSAML(cfg SAMLConfig) *SAML {
 	if cfg.EntityID == "" {
 		cfg.EntityID = cfg.MetadataURL
 	}
-	return &SAML{cfg: cfg}
+	return &SAML{raw: raw, cfg: cfg, client: NewIdPClient(cfg.AllowLoopback)}
 }
 
 func (s *SAML) provider(ctx context.Context) (*saml.ServiceProvider, error) {
@@ -113,10 +119,13 @@ func (s *SAML) provider(ctx context.Context) (*saml.ServiceProvider, error) {
 		var u *url.URL
 		u, err = url.Parse(s.cfg.IDPMetadataURL)
 		if err == nil {
-			md, err = samlsp.FetchMetadata(ctx, &http.Client{Timeout: 15 * time.Second}, *u)
+			md, err = samlsp.FetchMetadata(ctx, s.client, *u)
 		}
 	default:
 		err = errors.New("no IdP metadata configured")
+	}
+	if err == nil {
+		_, err = checkIdPMetadata(md)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("saml: IdP metadata: %w", err)
@@ -131,7 +140,7 @@ func (s *SAML) provider(ctx context.Context) (*saml.ServiceProvider, error) {
 		MetadataURL: *meta, AcsURL: *acs, IDPMetadata: md,
 		AuthnNameIDFormat: saml.PersistentNameIDFormat,
 		AllowIDPInitiated: false,
-		HTTPClient:        &http.Client{Timeout: 15 * time.Second},
+		HTTPClient:        s.client,
 	}
 	if s.cfg.Key != nil {
 		sp.SignatureMethod = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
@@ -151,11 +160,12 @@ func (s *SAML) Metadata(ctx context.Context) (*saml.EntityDescriptor, error) {
 
 // BeginSAMLLogin starts SP-initiated sign-in: it records the AuthnRequest
 // ID server-side and returns the IdP redirect plus the binding cookie.
-func (m *Manager) BeginSAMLLogin(ctx context.Context, returnTo string) (string, *http.Cookie, error) {
-	if m.saml == nil {
+func (m *Manager) BeginSAMLLogin(ctx context.Context, o LoginOptions) (string, *http.Cookie, error) {
+	sm := m.st().saml
+	if sm == nil {
 		return "", nil, errors.New("saml not configured")
 	}
-	sp, err := m.saml.provider(ctx)
+	sp, err := sm.provider(ctx)
 	if err != nil {
 		return "", nil, err
 	}
@@ -164,6 +174,10 @@ func (m *Manager) BeginSAMLLogin(ctx context.Context, returnTo string) (string, 
 	if err != nil {
 		return "", nil, err
 	}
+	if o.Reauth {
+		force := true
+		req.ForceAuthn = &force // checked against AuthnInstant on return
+	}
 	u, err := req.Redirect("", sp)
 	if err != nil {
 		return "", nil, err
@@ -171,7 +185,7 @@ func (m *Manager) BeginSAMLLogin(ctx context.Context, returnTo string) (string, 
 	token := secure.NewToken()
 	if err := m.store.CreateLoginRequest(ctx, &LoginRequest{
 		TokenHash: secure.HashToken(secure.PurposeLogin, token), Kind: "saml", State: req.ID,
-		ReturnTo: SafeReturnTo(returnTo), ExpiresAt: m.now().Add(10 * time.Minute),
+		ReturnTo: SafeReturnTo(o.ReturnTo), Reauth: o.Reauth, Setup: o.Setup, ExpiresAt: m.now().Add(loginTTL),
 	}); err != nil {
 		return "", nil, err
 	}
@@ -192,29 +206,30 @@ func ClearSAMLCookie() *http.Cookie {
 
 // CompleteSAMLLogin validates the IdP's POST to the assertion consumer
 // service and signs the user in.
-func (m *Manager) CompleteSAMLLogin(r *http.Request) (*domain.User, string, error) {
+func (m *Manager) CompleteSAMLLogin(r *http.Request) (*LoginResult, error) {
 	ctx := r.Context()
-	if m.saml == nil {
-		return nil, "", errors.New("saml not configured")
+	sm := m.st().saml
+	if sm == nil {
+		return nil, errors.New("saml not configured")
 	}
-	sp, err := m.saml.provider(ctx)
+	sp, err := sm.provider(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	c, err := r.Cookie(SAMLCookie)
 	if err != nil || !secure.ValidToken(c.Value) {
-		return nil, "", fmt.Errorf("%w (missing SAML login cookie; unsolicited responses are not accepted)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (missing SAML login cookie; unsolicited responses are not accepted)", ErrLoginFailed)
 	}
 	req, err := m.store.ConsumeLoginRequest(ctx, secure.HashToken(secure.PurposeLogin, c.Value), m.now())
 	if err != nil || req.Kind != "saml" {
-		return nil, "", fmt.Errorf("%w (unknown, used or expired SAML request)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (unknown, used or expired SAML request)", ErrLoginFailed)
 	}
 	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
 	if err := r.ParseForm(); err != nil {
-		return nil, "", fmt.Errorf("%w (bad form)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (bad form)", ErrLoginFailed)
 	}
 	if r.PostForm.Get("SAMLart") != "" || r.PostForm.Get("SAMLResponse") == "" {
-		return nil, "", fmt.Errorf("%w (only the HTTP-POST binding is accepted)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (only the HTTP-POST binding is accepted)", ErrLoginFailed)
 	}
 	assertion, err := sp.ParseResponse(r, []string{req.State})
 	if err != nil {
@@ -222,31 +237,43 @@ func (m *Manager) CompleteSAMLLogin(r *http.Request) (*domain.User, string, erro
 		if errors.As(err, &ire) {
 			err = ire.PrivateErr
 		}
-		return nil, "", fmt.Errorf("%w (assertion: %v)", ErrLoginFailed, err)
+		return nil, fmt.Errorf("%w (assertion: %v)", ErrLoginFailed, err)
 	}
 	if assertion.Subject == nil || assertion.Subject.NameID == nil || strings.TrimSpace(assertion.Subject.NameID.Value) == "" {
-		return nil, "", fmt.Errorf("%w (assertion has no NameID)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (assertion has no NameID)", ErrLoginFailed)
 	}
 	if assertion.Issuer.Value != sp.IDPMetadata.EntityID {
-		return nil, "", fmt.Errorf("%w (unexpected issuer)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (unexpected issuer)", ErrLoginFailed)
 	}
 	attrs := samlAttributes(assertion)
 	id := service.Identity{
 		Issuer:  "saml:" + assertion.Issuer.Value,
 		Subject: assertion.Subject.NameID.Value,
-		Email:   first(attrs, m.saml.cfg.EmailAttributes),
-		Name:    first(attrs, m.saml.cfg.NameAttributes),
-		Groups:  all(attrs, m.saml.cfg.GroupAttributes),
+		Email:   first(attrs, sm.cfg.EmailAttributes),
+		Name:    first(attrs, sm.cfg.NameAttributes),
+		Groups:  all(attrs, sm.cfg.GroupAttributes),
 	}
-	id.EmailVerified = m.saml.cfg.TrustEmail && id.Email != ""
-	if err := m.saml.cfg.Policy.Check(id); err != nil {
-		return nil, "", err
+	id.EmailVerified = sm.cfg.TrustEmail && id.Email != ""
+	res := &LoginResult{ReturnTo: req.ReturnTo, Setup: req.Setup}
+	if req.Reauth {
+		// We sent ForceAuthn; the assertion must record an authentication
+		// that happened after this sign-in started.
+		fresh := false
+		for _, st := range assertion.AuthnStatements {
+			fresh = fresh || !st.AuthnInstant.Before(req.Started().Add(-time.Minute))
+		}
+		if !fresh {
+			return nil, fmt.Errorf("%w (the identity provider did not authenticate again: AuthnInstant is before the request)", ErrLoginFailed)
+		}
+		res.ReauthAt = m.now()
 	}
-	res, err := m.svc.LoginUser(ctx, id)
-	if err != nil {
-		return nil, "", err
+	if err := sm.cfg.Policy.Check(id); err != nil {
+		return nil, err
 	}
-	return res, req.ReturnTo, nil
+	if res.User, err = m.svc.LoginUser(ctx, id); err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func samlAttributes(a *saml.Assertion) map[string][]string {

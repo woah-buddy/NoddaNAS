@@ -32,6 +32,10 @@ type OIDCConfig struct {
 	Policy      Policy
 
 	PostLogoutRedirectURL string
+
+	// AllowLoopback lets the server reach an IdP on a loopback address
+	// (localhost deployments only; see NewIdPClient).
+	AllowLoopback bool
 }
 
 // Policy restricts who may sign in. If both lists are empty, anyone the IdP
@@ -63,7 +67,8 @@ func (p Policy) Check(id service.Identity) error {
 // so NoddaNAS starts (and passes health checks) even if the IdP container is
 // still booting.
 type OIDC struct {
-	cfg    OIDCConfig
+	raw    OIDCConfig // as given, to detect changes
+	cfg    OIDCConfig // with defaults applied
 	client *http.Client
 
 	mu         sync.Mutex
@@ -74,13 +79,14 @@ type OIDC struct {
 
 // NewOIDC returns a client for cfg.
 func NewOIDC(cfg OIDCConfig) *OIDC {
+	raw := cfg
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{oidc.ScopeOpenID, "email", "profile"}
 	}
 	if cfg.GroupsClaim == "" {
 		cfg.GroupsClaim = "groups"
 	}
-	return &OIDC{cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}}
+	return &OIDC{raw: raw, cfg: cfg, client: NewIdPClient(cfg.AllowLoopback)}
 }
 
 func (o *OIDC) init(ctx context.Context) (*oidc.IDTokenVerifier, *oauth2.Config, error) {
@@ -122,11 +128,12 @@ func SafeReturnTo(s string) string {
 
 // BeginLogin starts an OIDC authorization-code flow. It returns the IdP URL
 // to redirect to and a short-lived cookie binding the flow to this browser.
-func (m *Manager) BeginLogin(ctx context.Context, returnTo string) (string, *http.Cookie, error) {
-	if m.oidc == nil {
+func (m *Manager) BeginLogin(ctx context.Context, o LoginOptions) (string, *http.Cookie, error) {
+	op := m.st().oidc
+	if op == nil {
 		return "", nil, errors.New("oidc not configured")
 	}
-	_, oc, err := m.oidc.init(ctx)
+	_, oc, err := op.init(ctx)
 	if err != nil {
 		return "", nil, err
 	}
@@ -137,13 +144,21 @@ func (m *Manager) BeginLogin(ctx context.Context, returnTo string) (string, *htt
 		State:     secure.NewToken(), // CSRF protection for the callback
 		Nonce:     secure.NewToken(), // binds the ID token to this flow (replay protection)
 		Verifier:  oauth2.GenerateVerifier(),
-		ReturnTo:  SafeReturnTo(returnTo),
-		ExpiresAt: m.now().Add(10 * time.Minute),
+		ReturnTo:  SafeReturnTo(o.ReturnTo),
+		Reauth:    o.Reauth,
+		Setup:     o.Setup,
+		ExpiresAt: m.now().Add(loginTTL),
 	}
 	if err := m.store.CreateLoginRequest(ctx, req); err != nil {
 		return "", nil, err
 	}
-	u := oc.AuthCodeURL(req.State, oidc.Nonce(req.Nonce), oauth2.S256ChallengeOption(req.Verifier))
+	opts := []oauth2.AuthCodeOption{oidc.Nonce(req.Nonce), oauth2.S256ChallengeOption(req.Verifier)}
+	if o.Reauth {
+		// Ask for a fresh authentication; the ID token's auth_time
+		// (required by the spec when max_age is sent) is checked on return.
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+	}
+	u := oc.AuthCodeURL(req.State, opts...)
 	// SameSite=Lax: the cookie must accompany the top-level GET redirect back
 	// from the IdP, which is a cross-site navigation.
 	c := &http.Cookie{Name: LoginCookie, Value: token, Path: "/", Secure: true, HttpOnly: true,
@@ -162,52 +177,53 @@ var ErrLoginFailed = domain.E(domain.CodeUnauthorized, "sign-in failed; please t
 
 // CompleteLogin handles the IdP's redirect back, returning the signed-in
 // user and where to send them.
-func (m *Manager) CompleteLogin(r *http.Request) (*domain.User, string, error) {
+func (m *Manager) CompleteLogin(r *http.Request) (*LoginResult, error) {
 	ctx := r.Context()
-	if m.oidc == nil {
-		return nil, "", errors.New("oidc not configured")
+	op := m.st().oidc
+	if op == nil {
+		return nil, errors.New("oidc not configured")
 	}
-	verifier, oc, err := m.oidc.init(ctx)
+	verifier, oc, err := op.init(ctx)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	c, err := r.Cookie(LoginCookie)
 	if err != nil || !secure.ValidToken(c.Value) {
-		return nil, "", fmt.Errorf("%w (missing login cookie)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (missing login cookie)", ErrLoginFailed)
 	}
 	// Consumed atomically: a login request can complete at most once.
 	req, err := m.store.ConsumeLoginRequest(ctx, secure.HashToken(secure.PurposeLogin, c.Value), m.now())
 	if err != nil || req.Kind != "oidc" {
-		return nil, "", fmt.Errorf("%w (unknown or expired login request)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (unknown or expired login request)", ErrLoginFailed)
 	}
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
-		return nil, "", fmt.Errorf("%w (idp error %.64q)", ErrLoginFailed, e)
+		return nil, fmt.Errorf("%w (idp error %.64q)", ErrLoginFailed, e)
 	}
 	if !secure.Equal(q.Get("state"), req.State) {
-		return nil, "", fmt.Errorf("%w (state mismatch)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (state mismatch)", ErrLoginFailed)
 	}
-	ctx = oidc.ClientContext(ctx, m.oidc.client)
+	ctx = oidc.ClientContext(ctx, op.client)
 	tok, err := oc.Exchange(ctx, q.Get("code"), oauth2.VerifierOption(req.Verifier))
 	if err != nil {
-		return nil, "", fmt.Errorf("%w (code exchange: %v)", ErrLoginFailed, err)
+		return nil, fmt.Errorf("%w (code exchange: %v)", ErrLoginFailed, err)
 	}
 	raw, ok := tok.Extra("id_token").(string)
 	if !ok {
-		return nil, "", fmt.Errorf("%w (no id_token)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (no id_token)", ErrLoginFailed)
 	}
 	// Verifies signature (against the IdP's published keys), issuer,
 	// audience and expiry.
 	idt, err := verifier.Verify(ctx, raw)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w (id_token: %v)", ErrLoginFailed, err)
+		return nil, fmt.Errorf("%w (id_token: %v)", ErrLoginFailed, err)
 	}
 	if !secure.Equal(idt.Nonce, req.Nonce) {
-		return nil, "", fmt.Errorf("%w (nonce mismatch)", ErrLoginFailed)
+		return nil, fmt.Errorf("%w (nonce mismatch)", ErrLoginFailed)
 	}
 	var claims map[string]json.RawMessage
 	if err := idt.Claims(&claims); err != nil {
-		return nil, "", fmt.Errorf("%w (claims: %v)", ErrLoginFailed, err)
+		return nil, fmt.Errorf("%w (claims: %v)", ErrLoginFailed, err)
 	}
 	id := service.Identity{
 		Issuer:        idt.Issuer,
@@ -215,16 +231,43 @@ func (m *Manager) CompleteLogin(r *http.Request) (*domain.User, string, error) {
 		Email:         claimString(claims, "email"),
 		EmailVerified: claimBool(claims, "email_verified"),
 		Name:          firstNonEmpty(claimString(claims, "name"), claimString(claims, "preferred_username")),
-		Groups:        claimStrings(claims, m.oidc.cfg.GroupsClaim),
+		Groups:        claimStrings(claims, op.cfg.GroupsClaim),
 	}
-	if err := m.oidc.cfg.Policy.Check(id); err != nil {
-		return nil, "", err
+	res := &LoginResult{ReturnTo: req.ReturnTo, Setup: req.Setup}
+	if req.Reauth {
+		// The spec requires auth_time when max_age was requested. If the
+		// IdP sends it, it must show an authentication after this sign-in
+		// started. Some IdPs omit it; then the confirmation rests on the
+		// IdP honouring prompt=login, which is logged.
+		if at, ok := claimTime(claims, "auth_time"); ok {
+			if at.Before(req.Started().Add(-time.Minute)) {
+				return nil, fmt.Errorf("%w (the identity provider did not authenticate again: auth_time is before the request)", ErrLoginFailed)
+			}
+		} else {
+			m.log.WarnContext(ctx, "identity provider sent no auth_time for a re-authentication; relying on it honouring prompt=login")
+		}
+		res.ReauthAt = m.now()
 	}
-	u, err := m.svc.LoginUser(ctx, id)
-	if err != nil {
-		return nil, "", err
+	if err := op.cfg.Policy.Check(id); err != nil {
+		return nil, err
 	}
-	return u, req.ReturnTo, nil
+	if res.User, err = m.svc.LoginUser(ctx, id); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// claimTime reads a NumericDate claim.
+func claimTime(c map[string]json.RawMessage, k string) (time.Time, bool) {
+	var n json.Number
+	if json.Unmarshal(c[k], &n) != nil {
+		return time.Time{}, false
+	}
+	f, err := n.Float64()
+	if err != nil || f <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(f), 0).UTC(), true
 }
 
 // ErrNotAllowed is shown when the IdP authenticated someone who is not
@@ -234,20 +277,21 @@ var ErrNotAllowed = domain.E(domain.CodeForbidden, "your account is not permitte
 // LogoutURL returns the IdP's RP-initiated logout URL, or "" if the IdP
 // does not support it.
 func (m *Manager) LogoutURL(ctx context.Context) string {
-	if m.oidc == nil {
+	op := m.st().oidc
+	if op == nil {
 		return ""
 	}
-	if _, _, err := m.oidc.init(ctx); err != nil || m.oidc.endSession == "" {
+	if _, _, err := op.init(ctx); err != nil || op.endSession == "" {
 		return ""
 	}
-	u, err := url.Parse(m.oidc.endSession)
+	u, err := url.Parse(op.endSession)
 	if err != nil {
 		return ""
 	}
 	q := u.Query()
-	q.Set("client_id", m.oidc.cfg.ClientID)
-	if m.oidc.cfg.PostLogoutRedirectURL != "" {
-		q.Set("post_logout_redirect_uri", m.oidc.cfg.PostLogoutRedirectURL)
+	q.Set("client_id", op.cfg.ClientID)
+	if op.cfg.PostLogoutRedirectURL != "" {
+		q.Set("post_logout_redirect_uri", op.cfg.PostLogoutRedirectURL)
 	}
 	u.RawQuery = q.Encode()
 	return u.String()

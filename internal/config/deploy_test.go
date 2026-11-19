@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -29,12 +30,18 @@ func readFile(t *testing.T, path string) string {
 }
 
 // settingsRead returns every NODDANAS_* variable this package reads (each
-// appears as a whole string literal in config.go).
+// appears as a whole string literal in its non-test source files).
 func settingsRead(t *testing.T) []string {
 	t.Helper()
 	seen := map[string]bool{}
-	for _, m := range regexp.MustCompile(`"(NODDANAS_[A-Z0-9_]+)"`).FindAllStringSubmatch(readFile(t, "config.go"), -1) {
-		seen[m[1]] = true
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		for _, m := range regexp.MustCompile(`"(NODDANAS_[A-Z0-9_]+)"`).FindAllStringSubmatch(readFile(t, f), -1) {
+			seen[m[1]] = true
+		}
 	}
 	var out []string
 	for v := range seen {
@@ -42,7 +49,7 @@ func settingsRead(t *testing.T) []string {
 	}
 	sort.Strings(out)
 	if len(out) < 30 {
-		t.Fatalf("found only %d settings in config.go; the pattern is out of date", len(out))
+		t.Fatalf("found only %d settings in the config package; the pattern is out of date", len(out))
 	}
 	return out
 }

@@ -11,16 +11,18 @@ import (
 type Code string
 
 const (
-	CodeInvalid      Code = "invalid"        // 400
-	CodeUnauthorized Code = "unauthorized"   // 401
-	CodeForbidden    Code = "forbidden"      // 403
-	CodeNotFound     Code = "not_found"      // 404
-	CodeConflict     Code = "conflict"       // 409
-	CodeGone         Code = "gone"           // 410
-	CodePrecondition Code = "precondition"   // 412
-	CodeTooLarge     Code = "too_large"      // 413
-	CodeRateLimited  Code = "rate_limited"   // 429
-	CodeQuota        Code = "quota_exceeded" // 507
+	CodeInvalid      Code = "invalid"          // 400
+	CodeUnauthorized Code = "unauthorized"     // 401
+	CodeForbidden    Code = "forbidden"        // 403
+	CodeReauth       Code = "reauth_required"  // 403: sign in again first
+	CodeNotFound     Code = "not_found"        // 404
+	CodeConflict     Code = "conflict"         // 409
+	CodeConfirm      Code = "confirm_required" // 409: repeat with confirmation
+	CodeGone         Code = "gone"             // 410
+	CodePrecondition Code = "precondition"     // 412
+	CodeTooLarge     Code = "too_large"        // 413
+	CodeRateLimited  Code = "rate_limited"     // 429
+	CodeQuota        Code = "quota_exceeded"   // 507
 )
 
 // Error is a client-safe error: Message may be shown to the caller.

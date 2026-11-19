@@ -8,9 +8,10 @@ import (
 
 // Theming endpoints. They are public because the sign-in page is themed
 // too, and they are not rate limited because, like the other static assets,
-// they serve constant in-memory bytes: the stylesheet the theme package
-// generated from validated tokens and the logo it re-encoded at startup.
-// Nothing here reflects request input.
+// they serve in-memory bytes: the stylesheet the theme package generated
+// from validated tokens and the logo it re-encoded. Both are replaced as a
+// whole when an administrator changes the branding. Nothing here reflects
+// request input.
 
 type accentView struct {
 	ID    string `json:"id"`
@@ -25,29 +26,31 @@ type brandingView struct {
 }
 
 func (s *Server) handleBranding(w http.ResponseWriter, r *http.Request) {
-	v := brandingView{Name: s.theme.Name, Logo: s.theme.Logo != nil, DefaultAccent: s.theme.DefaultAccent}
-	for _, a := range s.theme.Accents {
+	t := s.theme()
+	v := brandingView{Name: t.Name, Logo: t.Logo != nil, DefaultAccent: t.DefaultAccent}
+	for _, a := range t.Accents {
 		v.Accents = append(v.Accents, accentView{ID: a.ID, Label: a.Label})
 	}
 	writeJSON(w, http.StatusOK, v)
 }
 
 func (s *Server) handleThemeCSS(w http.ResponseWriter, r *http.Request) {
-	css, etag := s.theme.CSS()
+	css, etag := s.theme().CSS()
 	serveConstant(w, r, "text/css; charset=utf-8", etag, css)
 }
 
 func (s *Server) handleLogo(w http.ResponseWriter, r *http.Request) {
-	if s.theme.Logo == nil {
+	t := s.theme()
+	if t.Logo == nil {
 		writeJSON(w, http.StatusNotFound, map[string]errorBody{"error": {Code: "not_found", Message: "no logo configured"}})
 		return
 	}
 	// Defense in depth: even opened directly, the logo is an inert image.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
-	serveConstant(w, r, "image/png", s.theme.LogoETag, s.theme.Logo)
+	serveConstant(w, r, "image/png", t.LogoETag, t.Logo)
 }
 
-// serveConstant serves bytes fixed at startup. Browsers revalidate with the
+// serveConstant serves fixed in-memory bytes. Browsers revalidate with the
 // ETag (a hash of the bytes), so a theme change shows up on the next load.
 func serveConstant(w http.ResponseWriter, r *http.Request, ctype, etag string, body []byte) {
 	h := w.Header()

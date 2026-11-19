@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/woah-buddy/NoddaNAS/internal/auth"
@@ -15,17 +16,37 @@ import (
 
 func (s *Server) handleAuthMethods(w http.ResponseWriter, r *http.Request) {
 	oidc, saml := s.auth.Methods()
-	writeJSON(w, http.StatusOK, map[string]bool{"oidc": oidc, "saml": saml})
+	writeJSON(w, http.StatusOK, map[string]bool{"oidc": oidc, "saml": saml, "setup": !oidc && !saml})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	u, cookie, err := s.auth.BeginLogin(r.Context(), r.URL.Query().Get("return_to"))
+	u, cookie, err := s.auth.BeginLogin(r.Context(), auth.LoginOptions{ReturnTo: r.URL.Query().Get("return_to")})
 	s.redirectToIdP(w, r, u, cookie, err)
 }
 
 func (s *Server) handleSAMLLogin(w http.ResponseWriter, r *http.Request) {
-	u, cookie, err := s.auth.BeginSAMLLogin(r.Context(), r.URL.Query().Get("return_to"))
+	u, cookie, err := s.auth.BeginSAMLLogin(r.Context(), auth.LoginOptions{ReturnTo: r.URL.Query().Get("return_to")})
 	s.redirectToIdP(w, r, u, cookie, err)
+}
+
+// handleReauth sends a signed-in person back to their identity provider to
+// authenticate again ("confirm it's you"), through the method their account
+// came from.
+func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	u, err := s.svc.UserByID(r.Context(), p.UserID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	o := auth.LoginOptions{ReturnTo: r.URL.Query().Get("return_to"), Reauth: true}
+	var to string
+	var cookie *http.Cookie
+	if strings.HasPrefix(u.Issuer, "saml:") {
+		to, cookie, err = s.auth.BeginSAMLLogin(r.Context(), o)
+	} else {
+		to, cookie, err = s.auth.BeginLogin(r.Context(), o)
+	}
+	s.redirectToIdP(w, r, to, cookie, err)
 }
 
 func (s *Server) redirectToIdP(w http.ResponseWriter, r *http.Request, u string, cookie *http.Cookie, err error) {
@@ -43,17 +64,17 @@ func (s *Server) redirectToIdP(w http.ResponseWriter, r *http.Request, u string,
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, auth.ClearLoginCookie())
-	user, returnTo, err := s.auth.CompleteLogin(r)
-	s.finishLogin(w, r, user, returnTo, err, "oidc")
+	res, err := s.auth.CompleteLogin(r)
+	s.finishLogin(w, r, res, err, "oidc")
 }
 
 func (s *Server) handleSAMLACS(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, auth.ClearSAMLCookie())
-	user, returnTo, err := s.auth.CompleteSAMLLogin(r)
-	s.finishLogin(w, r, user, returnTo, err, "saml")
+	res, err := s.auth.CompleteSAMLLogin(r)
+	s.finishLogin(w, r, res, err, "saml")
 }
 
-func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, user *domain.User, returnTo string, err error, method string) {
+func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, res *auth.LoginResult, err error, method string) {
 	if err != nil {
 		s.log.WarnContext(r.Context(), "audit", "event", "login.failed", "method", method, "err", err,
 			"request_id", requestID(r.Context()), "ip", s.clientIP(r).String())
@@ -64,16 +85,28 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, user *domai
 		http.Redirect(w, r, "/?error="+reason, http.StatusSeeOther)
 		return
 	}
+	if res.Setup != "" && s.settings != nil {
+		// Signed in through the setup link: this person becomes the first
+		// administrator (if nobody beat them to it).
+		if _, err := s.settings.ClaimSetup(r.Context(), res.Setup, res.User.ID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if res.User, err = s.svc.UserByID(r.Context(), res.User.ID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	_ = s.auth.EndSession(r) // never reuse a pre-existing session
-	cookie, err := s.auth.StartSession(r.Context(), user.ID)
+	cookie, err := s.auth.StartSession(r.Context(), res)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	s.log.InfoContext(r.Context(), "audit", "event", "login.success", "method", method, "user", user.ID,
-		"ip", s.clientIP(r).String())
+	s.log.InfoContext(r.Context(), "audit", "event", "login.success", "method", method, "user", res.User.ID,
+		"reauth", !res.ReauthAt.IsZero(), "ip", s.clientIP(r).String())
 	http.SetCookie(w, cookie)
-	http.Redirect(w, r, returnTo, http.StatusSeeOther)
+	http.Redirect(w, r, res.ReturnTo, http.StatusSeeOther)
 }
 
 func (s *Server) handleSAMLMetadata(w http.ResponseWriter, r *http.Request) {

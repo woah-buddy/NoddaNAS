@@ -47,6 +47,7 @@ func (s *Service) LoginUser(ctx context.Context, id Identity) (*domain.User, err
 	u, err := s.store.GetUserByIdentity(ctx, id.Issuer, id.Subject)
 	switch {
 	case err == nil:
+		admin = admin || u.AdminGranted
 		if u.Email != email || u.DisplayName != name || u.Admin != admin {
 			if err := s.store.UpdateUserProfile(ctx, u.ID, email, name, admin); err != nil {
 				return nil, err
@@ -73,7 +74,7 @@ func (s *Service) provision(ctx context.Context, id Identity, email, name string
 	}
 	sp := &domain.Space{
 		ID: u.PersonalSpaceID, Kind: domain.SpacePersonal, OwnerUserID: u.ID, RootID: secure.NewID(),
-		QuotaBytes: s.cfg.DefaultQuota, CreatedAt: now, CreatedBy: u.ID,
+		QuotaBytes: s.conf().DefaultQuota, CreatedAt: now, CreatedBy: u.ID,
 	}
 	root := &domain.Node{
 		ID: sp.RootID, SpaceID: sp.ID, Kind: domain.KindFolder,

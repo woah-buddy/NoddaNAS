@@ -192,6 +192,13 @@ jobs:
         run: |
           docker compose exec -T noddanas /noddanas verify-storage --hash
           docker compose exec -T noddanas /noddanas revoke-sessions --all
+      - name: Web settings commands; settings from .env are locked, the rest default
+        run: |
+          docker compose exec -T noddanas /noddanas settings show | tee "$RUNNER_TEMP/settings.txt"
+          grep -Eq '^OIDC_ISSUER +server +https://idp.example.invalid' "$RUNNER_TEMP/settings.txt"
+          grep -Eq '^MAX_VERSIONS +server +5' "$RUNNER_TEMP/settings.txt"
+          grep -Eq '^DEFAULT_QUOTA +default ' "$RUNNER_TEMP/settings.txt"
+          docker compose exec -T noddanas /noddanas settings reset storage
       - name: Documented backup and restore commands work (DISASTER_RECOVERY.md)
         run: |
           docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > "$RUNNER_TEMP/noddanas-db.dump"
@@ -202,6 +209,21 @@ jobs:
           docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner < "$RUNNER_TEMP/noddanas-db.dump"
           docker compose up -d --wait --wait-timeout 180
           docker compose exec -T noddanas /noddanas verify-storage --hash
+      - name: Without a sign-in method the server starts in setup mode
+        run: |
+          sed -i '/^OIDC_/d' .env
+          docker compose up -d --wait --wait-timeout 180
+          curl -sk https://localhost/api/v1/auth/methods | grep -q '"setup":true'
+          link=$(docker compose exec -T noddanas /noddanas setup-link | grep -o 'https://localhost/setup#[A-Za-z0-9_-]*')
+          token=${link#*#}
+          test ${#token} -ge 40
+          if docker compose logs noddanas | grep -qF "$token"; then
+            echo "the setup token must never be logged"; exit 1
+          fi
+          curl -skf -X POST -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" \
+            https://localhost/api/v1/setup/view | grep -q '"setupMode":true'
+          test "$(curl -sk -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"token":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' https://localhost/api/v1/setup/view)" = 401
       - name: Logs on failure
         if: failure()
         run: docker compose logs --no-color

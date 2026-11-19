@@ -49,6 +49,7 @@ const (
 	PurposeSession     = "noddanas/session/v1"
 	PurposeAppPassword = "noddanas/app-password/v1" // #nosec G101 -- a domain-separation label, not a credential
 	PurposeLogin       = "noddanas/login-request/v1"
+	PurposeSetup       = "noddanas/setup-link/v1"
 )
 
 // HashToken returns the hex SHA-256 of a high-entropy bearer secret. Only

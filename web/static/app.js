@@ -389,16 +389,26 @@ window.addEventListener('popstate', route);
 async function route() {
   const path = location.pathname;
   if (path === '/s') return publicLink();
+  if (path === '/setup') return setupView();
   try {
     if (!S.me) {
       try { S.me = await api('GET', '/api/v1/me'); } catch (e) { if (e.status === 401) return signIn(); throw e; }
+    }
+    document.getElementById('nav-admin').hidden = !S.me.user.admin;
+    // The admin area needs no encryption keys: an administrator can
+    // configure the server before (or without) setting up their own files.
+    if (path === '/admin' || path.startsWith('/admin/')) {
+      if (!S.me.user.admin) return navigate('/');
+      document.getElementById('nav').hidden = false;
+      markNav(path);
+      return await adminView(path.split('/')[2] || 'people');
     }
     if (!S.me.user.keys) return setupKeys();
     if (!S.acct) return unlockScreen();
     if (!S.contacts) await loadContacts();
     document.getElementById('nav').hidden = false;
     renderQuota();
-    for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', path === a.getAttribute('href') || (a.getAttribute('href') !== '/' && path.startsWith(a.getAttribute('href'))));
+    markNav(path);
     if (path === '/shared') return await sharedWithMeView();
     if (path === '/shared/by-me') return await sharedByMeView();
     if (path === '/teams') return await teamsView();
@@ -411,6 +421,9 @@ async function route() {
     if (e.status === 401) { S.me = null; return signIn(); }
     main.replaceChildren(h('div', { class: 'panel center' }, h('p', { class: 'error' }, e.message)));
   }
+}
+function markNav(path) {
+  for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('active', path === a.getAttribute('href') || (a.getAttribute('href') !== '/' && path.startsWith(a.getAttribute('href'))));
 }
 async function refreshMe() {
   S.me = await api('GET', '/api/v1/me');
@@ -428,6 +441,13 @@ async function signIn() {
   const err = new URLSearchParams(location.search).get('error');
   const methods = await api('GET', '/api/v1/auth/methods').catch(() => ({ oidc: true }));
   const rt = encodeURIComponent(location.pathname === '/' ? '/' : location.pathname);
+  if (methods.setup) {
+    return main.replaceChildren(h('div', { class: 'panel center narrow' },
+      h('h1', {}, branding.name), h('p', {}, 'This server is not set up yet: no sign-in method is configured.'),
+      h('p', { class: 'note' }, 'The person who runs the server can create a one-time setup link by running ',
+        h('code', {}, 'noddanas setup-link'), ' on the server (for Docker Compose: ',
+        h('code', {}, 'docker compose exec noddanas noddanas setup-link'), ').')));
+  }
   main.replaceChildren(h('div', { class: 'panel center' },
     h('h1', {}, branding.name), h('p', {}, 'Private, end-to-end encrypted file storage.'),
     err && h('p', { class: 'error' }, err === 'not_allowed' ? `Your account is not permitted to use ${branding.name}.` : 'Sign-in failed. Please try again.'),
@@ -1149,18 +1169,7 @@ async function settingsView() {
 function adminSection() {
   if (!S.me.user.admin) return null;
   return [h('h2', {}, 'Administration'),
-    h('p', { class: 'note' }, 'Emergency switch: revoke every public link created by anyone on this server. Links stop working immediately and cannot be restored. ' +
-      'Shares with specific people and team folders are not affected. Server operators can do the same from the shell: noddanas revoke-links --all.'),
-    h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: adminRevokeAllLinks }, 'Revoke all public links (all users)'))];
-}
-async function adminRevokeAllLinks() {
-  const typed = await prompt('Revoke every public link on this server?', 'This affects all users and cannot be undone. Type REVOKE ALL to confirm.');
-  if (typed === null) return;
-  if (typed.trim() !== 'REVOKE ALL') return toast('Not confirmed. Nothing was revoked.');
-  try {
-    const { revoked } = await api('POST', '/api/v1/admin/links/revoke-all');
-    toast(`Revoked ${revoked} public link${revoked === 1 ? '' : 's'} across the server`);
-  } catch (e) { toast(e.message); }
+    h('p', {}, 'Server settings, people, quotas and emergency switches are in the ', h('a', { href: '/admin', 'data-nav': '' }, 'Admin area'), '.')];
 }
 
 async function exportKeys() {
@@ -1183,6 +1192,301 @@ async function signOut() {
     if (logoutUrl && /^https:\/\//.test(logoutUrl)) return location.assign(logoutUrl);
   } catch { /* fall through */ }
   location.assign('/');
+}
+
+// ---- admin area --------------------------------------------------------------------------------------------------
+// Every rule here is enforced by the server: administrators only, and every
+// change needs a recent sign-in ("confirm it's you", like sudo asking for
+// your password again). The page shows the rules so nobody is surprised.
+const ADMIN_TABS = [['people', 'People'], ['settings', 'Storage & sharing'], ['sign-in', 'Sign-in'], ['branding', 'Branding'], ['emergency', 'Emergency']];
+const TAB_GROUPS = { settings: ['storage', 'sharing', 'sessions'], 'sign-in': ['oidc', 'saml', 'access'], branding: ['branding'] };
+const reauthURL = () => `/auth/reauth?return_to=${encodeURIComponent(location.pathname)}`;
+
+async function adminView(tab) {
+  if (!ADMIN_TABS.some(([id]) => id === tab)) tab = 'people';
+  renderQuota();
+  const session = await api('GET', '/api/v1/admin/session');
+  const body = h('div');
+  main.replaceChildren(h('div', { class: 'panel' }, h('h1', {}, 'Admin'),
+    !S.me.user.keys && h('p', { class: 'note' }, 'You have not set up encryption for your own files yet. Open ', h('a', { href: '/', 'data-nav': '' }, 'Files'), ' when you are ready.'),
+    reauthBanner(session),
+    h('nav', { class: 'tabs', 'aria-label': 'Admin' }, ADMIN_TABS.map(([id, label]) => h('a',
+      { href: `/admin/${id}`, 'data-nav': '', class: tab === id ? 'active' : '', 'aria-current': tab === id ? 'page' : null }, label))),
+    body));
+  if (tab === 'people') return peopleTab(body);
+  if (tab === 'emergency') return emergencyTab(body);
+  const v = await api('GET', '/api/v1/admin/settings');
+  // A branding change restyles the whole page: reload it to fetch the new theme.
+  body.replaceChildren(settingsForm(v, TAB_GROUPS[tab],
+    (set, confirm) => api('PUT', '/api/v1/admin/settings', { revision: v.revision, set, confirm }),
+    tab === 'branding' ? () => location.reload() : () => adminView(tab)));
+}
+
+function reauthBanner(s) {
+  if (s.recent) return h('p', { class: 'banner ok' }, `Identity confirmed: you can make changes until ${new Date(s.recentUntil).toLocaleTimeString()}.`);
+  return h('div', { class: 'banner' },
+    h('span', {}, `You can look around. To change anything, confirm it’s you: your identity provider asks you to sign in again (even if you are signed in there), then brings you back. It lasts ${s.window.replace(/m0s$/, ' minutes')}.`),
+    h('button', { class: 'primary', onclick: () => location.assign(reauthURL()) }, 'Confirm it’s you'));
+}
+
+// adminChange runs a change and reports whether it worked. A change refused
+// for want of a recent sign-in offers to go and get one.
+async function adminChange(fn, ok) {
+  try {
+    await fn();
+    if (ok) toast(ok);
+    return true;
+  } catch (e) {
+    if (e.code === 'reauth_required') {
+      if (await confirmBox('Confirm it’s you', 'This change needs a recent sign-in. You will be sent to your identity provider and brought back here.', 'Continue')) location.assign(reauthURL());
+    } else toast(e.message);
+    return false;
+  }
+}
+
+function exactSize(n) {
+  for (const [u, m] of [['TiB', 2 ** 40], ['GiB', 2 ** 30], ['MiB', 2 ** 20], ['KiB', 2 ** 10]]) if (n >= m && n % m === 0) return `${n / m}${u}`;
+  return String(n);
+}
+
+async function peopleTab(body) {
+  const search = h('input', { type: 'search', placeholder: 'Search by name or email', 'aria-label': 'Search people' });
+  const rows = h('tbody');
+  const load = async () => {
+    const { users } = await api('GET', `/api/v1/admin/users?q=${encodeURIComponent(search.value)}`);
+    rows.replaceChildren(...(users.length ? users.map(row) : [h('tr', {}, h('td', { colspan: 5, class: 'note' }, 'Nobody found.'))]));
+  };
+  const row = (u) => {
+    const me = u.id === S.me.user.id;
+    const name = u.displayName || u.email || u.id.slice(0, 8);
+    const role = u.admin ? (u.adminGranted ? 'Administrator (appointed)' : 'Administrator (through a group)') : 'Member';
+    return h('tr', {},
+      h('td', {}, name, me ? ' (you)' : '', u.email && u.displayName ? h('div', { class: 'note' }, u.email) : null,
+        u.keysSetUp ? null : h('div', { class: 'note' }, 'Has not set up encryption yet')),
+      h('td', {}, u.signIn.toUpperCase()),
+      h('td', {}, role),
+      h('td', { class: 'num' }, `${fmtSize(u.usedBytes)} of ${fmtSize(u.quotaBytes)}`),
+      h('td', { class: 'actions' },
+        h('button', { class: 'link', onclick: async () => {
+          const size = await prompt(`Storage for ${name}`, 'Personal storage, e.g. 20GiB', exactSize(u.quotaBytes));
+          if (size !== null && await adminChange(() => api('PUT', `/api/v1/admin/users/${u.id}/quota`, { size }), 'Storage changed')) load();
+        } }, 'Storage…'),
+        !me && (u.adminGranted || !u.admin) && h('button', { class: 'link', onclick: async () => {
+          const make = !u.adminGranted;
+          const text = make ? `${name} will be able to change server settings, appoint administrators and use the emergency switches. Administrators cannot read anyone’s files: those stay end-to-end encrypted.`
+            : `${name} will no longer be an administrator (unless they are in an administrator group).`;
+          if (!(await confirmBox(make ? 'Make administrator' : 'Remove administrator', text, make ? 'Make administrator' : 'Remove'))) return;
+          if (await adminChange(() => api('PUT', `/api/v1/admin/users/${u.id}/admin`, { admin: make }), 'Done')) load();
+        } }, u.adminGranted ? 'Remove administrator' : 'Make administrator'),
+        !me && h('button', { class: 'link danger', onclick: async () => {
+          if (!(await confirmBox('Revoke access', `Sign ${name} out of every browser and delete their app passwords? Their files and shares stay. ` +
+            'They can sign in again unless you also remove them at your identity provider, so do that first.', 'Revoke access'))) return;
+          await adminChange(() => api('POST', `/api/v1/admin/users/${u.id}/revoke-access`), `${name} was signed out everywhere`);
+        } }, 'Revoke access')));
+  };
+  body.replaceChildren(
+    h('form', { class: 'toolbar', onsubmit: (e) => { e.preventDefault(); load().catch((err) => toast(err.message)); } }, search, h('button', {}, 'Search')),
+    h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Sign-in'), h('th', {}, 'Role'), h('th', { class: 'num' }, 'Storage'), h('th', {}))), rows),
+    h('p', { class: 'note' }, 'Administrators come from the administrator groups (Sign-in tab) or are appointed here. Nobody can change their own administrator rights, so the last administrator cannot lock everyone out by accident. ' +
+      'New people get the default storage from the Storage & sharing tab.'));
+  await load();
+}
+
+function emergencyTab(body) {
+  body.replaceChildren(
+    h('h2', {}, 'Revoke every public link'),
+    h('p', { class: 'note' }, 'Links stop working immediately and cannot be restored. Shares with specific people and team folders are not affected. ' +
+      'From the server’s shell: noddanas revoke-links --all.'),
+    h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: async () => {
+      const typed = await prompt('Revoke every public link on this server?', 'This affects all users and cannot be undone. Type REVOKE ALL to confirm.');
+      if (typed === null) return;
+      if (typed.trim() !== 'REVOKE ALL') return toast('Not confirmed. Nothing was revoked.');
+      await adminChange(async () => {
+        const { revoked } = await api('POST', '/api/v1/admin/links/revoke-all');
+        toast(`Revoked ${revoked} public link${revoked === 1 ? '' : 's'} across the server`);
+      });
+    } }, 'Revoke all public links')),
+    h('h2', {}, 'Sign everyone out'),
+    h('p', { class: 'note' }, 'Ends every browser session on the server, including yours. People sign in again through the identity provider, which applies its current rules. ' +
+      'App passwords keep working; revoke those per person under People. From the server’s shell: noddanas revoke-sessions --all.'),
+    h('div', { class: 'toolbar' }, h('button', { class: 'danger', onclick: async () => {
+      const typed = await prompt('Sign everyone out?', 'Everyone, including you, must sign in again. Type SIGN OUT EVERYONE to confirm.');
+      if (typed === null) return;
+      if (typed.trim() !== 'SIGN OUT EVERYONE') return toast('Not confirmed. Nobody was signed out.');
+      if (await adminChange(() => api('POST', '/api/v1/admin/sessions/revoke-all'))) location.assign('/');
+    } }, 'Sign everyone out')));
+}
+
+// settingsForm renders the settings of some groups as one form. Only fields
+// the administrator touched are sent; the server validates everything again.
+function settingsForm(v, groups, save, done) {
+  const editors = new Map();
+  const status = h('p', { class: 'error', hidden: true, role: 'alert' });
+  // Sections appear in the order the caller lists them.
+  const sections = groups.map((id) => v.groups.find((g) => g.id === id)).filter(Boolean).map((g) => h('fieldset', {}, h('legend', {}, g.label),
+    g.fromServer && h('p', { class: 'note' }, 'Configured on the server (environment variables). Change it there; it cannot be mixed with web settings.'),
+    g.id === 'oidc' && h('p', { class: 'note wrap-anywhere' }, 'At your identity provider, register NoddaNAS as a confidential client (authorization code flow with PKCE) with this redirect URI: ', h('code', {}, v.signIn.oidcRedirectUri)),
+    g.id === 'saml' && h('p', { class: 'note wrap-anywhere' }, 'Give your identity provider our metadata: ', h('code', {}, v.signIn.samlMetadataUrl), ' (assertion consumer service ', h('code', {}, v.signIn.samlAcsUrl), ').'),
+    v.fields.filter((f) => f.group === g.id).map((f) => fieldEditor(f, editors, v))));
+  return h('form', { class: 'settings', onsubmit: async (e) => {
+    e.preventDefault();
+    const set = {};
+    for (const [k, ed] of editors) { const val = ed.get(); if (val !== undefined) set[k] = val; }
+    if (!Object.keys(set).length) return toast('Nothing changed');
+    for (const ed of editors.values()) ed.error.hidden = true;
+    status.hidden = true;
+    const confirm = [];
+    for (;;) {
+      try {
+        await save(set, confirm);
+        toast('Saved');
+        return done();
+      } catch (err) {
+        if (err.code === 'confirm_required' && err.detail.confirm && !confirm.includes(err.detail.confirm)) {
+          if (!(await confirmBox('Please confirm', err.message, 'Save anyway'))) return;
+          confirm.push(err.detail.confirm);
+          continue;
+        }
+        if (err.code === 'reauth_required') {
+          if (await confirmBox('Confirm it’s you', 'Saving needs a recent sign-in. Your changes here are not kept: you will be sent to your identity provider and brought back to this page.', 'Continue')) location.assign(reauthURL());
+          return;
+        }
+        if (err.code === 'precondition') { toast(err.message); return done(); }
+        const fields = Object.entries(err.detail || {}).filter(([k]) => k !== 'confirm');
+        if (err.code === 'invalid' && fields.length) {
+          for (const [k, msg] of fields) {
+            const ed = editors.get(k);
+            if (ed) { ed.error.textContent = msg; ed.error.hidden = false; } else { status.textContent = `${k}: ${msg}`; status.hidden = false; }
+          }
+          return toast('Some settings need attention');
+        }
+        status.textContent = err.message;
+        status.hidden = false;
+        return;
+      }
+    }
+  } }, v.readOnly && h('p', { class: 'note' }, 'Settings are read-only on the web on this server (NODDANAS_WEB_SETTINGS=false).'),
+  sections, status, h('div', { class: 'toolbar' }, h('button', { class: 'primary', disabled: v.readOnly }, 'Save changes')));
+}
+
+const truthy = (s) => /^(1|t|true)$/i.test(s || '');
+
+function fieldEditor(f, editors, v) {
+  const id = `set-${f.key}`;
+  const error = h('p', { class: 'error field-error', hidden: true, id: `${id}-err`, role: 'alert' });
+  const meta = h('div', { class: 'meta' });
+  let control, get;
+  switch (f.kind) {
+    case 'bool': {
+      control = h('select', { id, disabled: f.locked },
+        h('option', { value: '' }, `Default (${truthy(f.default) ? 'on' : 'off'})`), h('option', { value: 'true' }, 'On'), h('option', { value: 'false' }, 'Off'));
+      control.value = f.source === 'default' ? '' : (truthy(f.value) ? 'true' : 'false');
+      const orig = control.value;
+      get = () => (control.value === orig ? undefined : control.value);
+      break;
+    }
+    case 'secret': {
+      let clear = false;
+      control = h('input', { id, type: 'password', autocomplete: 'new-password', spellcheck: 'false', disabled: f.locked || !v.canStoreSecrets,
+        placeholder: f.isSet ? 'Set (hidden). Type a new value to replace it.' : (v.canStoreSecrets || f.locked ? '' : 'Unavailable: the server has no settings key') });
+      const remove = h('button', { type: 'button', class: 'link danger', hidden: f.locked || !f.isSet, onclick: () => {
+        clear = true; control.value = ''; control.placeholder = 'Will be removed when you save'; remove.hidden = true;
+      } }, 'Remove');
+      meta.append(remove);
+      get = () => (control.value ? control.value : (clear ? '' : undefined));
+      break;
+    }
+    case 'json': case 'xml': {
+      control = h('textarea', { id, rows: f.kind === 'xml' ? 8 : 12, spellcheck: 'false', disabled: f.locked });
+      control.value = f.value;
+      get = () => (control.value.trim() === f.value.trim() ? undefined : control.value.trim());
+      break;
+    }
+    case 'image': {
+      let data;
+      const preview = h('img', { class: 'logo-preview', alt: 'Logo preview', hidden: !f.isSet, src: f.isSet ? `/branding/logo?v=${Date.now()}` : null });
+      const file = h('input', { id, type: 'file', accept: 'image/png,image/jpeg', disabled: f.locked, onchange: async () => {
+        const picked = file.files[0];
+        if (!picked) return;
+        if (picked.size > 512 * 1024) { error.textContent = 'The logo must be at most 512 KiB.'; error.hidden = false; file.value = ''; return; }
+        const bytes = new Uint8Array(await picked.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        data = btoa(bin);
+        preview.src = URL.createObjectURL(picked);
+        preview.hidden = false;
+        error.hidden = true;
+      } });
+      const remove = h('button', { type: 'button', class: 'link danger', hidden: f.locked || !f.isSet, onclick: () => {
+        data = ''; preview.hidden = true; remove.hidden = true;
+      } }, 'Remove logo');
+      meta.append(remove);
+      control = h('div', {}, preview, file);
+      get = () => data;
+      break;
+    }
+    default: {
+      control = h('input', { id, type: 'text', spellcheck: 'false', disabled: f.locked, placeholder: f.default || '',
+        inputmode: f.kind === 'url' ? 'url' : null, value: f.source === 'default' ? '' : f.value });
+      const orig = control.value;
+      get = () => (control.value.trim() === orig.trim() ? undefined : control.value.trim());
+    }
+  }
+  if (f.source === 'server') meta.append(h('span', { class: 'note' }, 'Set on the server: ', h('code', {}, f.env)));
+  else if (f.source === 'web' && !f.locked && f.kind !== 'secret' && f.kind !== 'image') {
+    const reset = h('button', { type: 'button', class: 'link', onclick: () => { control.value = ''; reset.hidden = true; } }, 'Use default');
+    meta.append(reset);
+  }
+  editors.set(f.key, { get: f.locked ? () => undefined : get, error });
+  control.setAttribute?.('aria-describedby', `${id}-help ${id}-err`);
+  return h('div', { class: 'field' },
+    h('label', { for: id }, f.label), control,
+    h('p', { class: 'note', id: `${id}-help` }, f.help, f.default && f.kind !== 'bool' ? ` Default: ${f.default}.` : ''),
+    meta.childNodes.length ? meta : null, error);
+}
+
+// ---- first-time setup --------------------------------------------------------------------------------------------
+// The link from `noddanas setup-link` carries its token in the fragment
+// (/setup#token), which browsers never send to the server. The page moves
+// it out of the address bar at once and keeps it in memory only.
+let setupToken = null;
+
+async function setupView() {
+  document.getElementById('nav').hidden = true;
+  if (location.hash.length > 1) {
+    setupToken = location.hash.slice(1);
+    history.replaceState(null, '', '/setup');
+  }
+  const panel = h('div', { class: 'panel narrow' }, h('h1', {}, `Set up ${branding.name}`));
+  main.replaceChildren(panel);
+  if (!setupToken) {
+    return panel.append(h('p', { class: 'error' }, 'Open the setup link exactly as noddanas setup-link printed it, including the part after #. ' +
+      'If you reloaded this page, open the link again: it keeps working until someone signs in through it.'));
+  }
+  let v;
+  try {
+    v = await api('POST', '/api/v1/setup/view', { token: setupToken });
+  } catch (e) {
+    return panel.append(h('p', { class: 'error' }, e.message));
+  }
+  const on = (k) => v.fields.some((f) => f.key === k && f.isSet);
+  const oidc = on('OIDC_ISSUER'), saml = on('SAML_IDP_METADATA_URL') || on('SAML_IDP_METADATA');
+  const finish = async (method) => {
+    try {
+      const { redirect } = await api('POST', '/api/v1/setup/login', { token: setupToken, method });
+      if (/^https?:\/\//.test(redirect)) location.assign(redirect);
+    } catch (e) { toast(e.message); }
+  };
+  panel.append(...[
+    h('p', {}, `${branding.name} never stores passwords: your identity provider (Keycloak, Authentik, Zitadel, Entra ID, Okta, Google and others) signs people in, with its own multi-factor authentication.`),
+    h('p', { class: 'note' }, 'Step 1: configure OpenID Connect or SAML below (or both); it is tried against your identity provider before it is saved. ' +
+      'Step 2: sign in through this page. You become the first administrator and this link stops working.'),
+    (oidc || saml) && h('div', { class: 'banner' }, h('span', {}, 'Sign-in is configured. Finish setup by signing in:'),
+      oidc && h('button', { class: 'primary', onclick: () => finish('oidc') }, 'Sign in to finish'),
+      saml && h('button', { class: oidc ? '' : 'primary', onclick: () => finish('saml') }, 'Sign in with SAML to finish')),
+    settingsForm(v, ['oidc', 'saml', 'access'],
+      (set, confirm) => api('POST', '/api/v1/setup/save', { token: setupToken, revision: v.revision, set, confirm }), () => setupView()),
+  ].filter(Boolean));
 }
 
 // ---- public links ------------------------------------------------------------------------------------------------

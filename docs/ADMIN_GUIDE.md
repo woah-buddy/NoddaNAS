@@ -188,14 +188,25 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Set at least `NODDANAS_HOST`, one sign-in method (`OIDC_ISSUER` + `OIDC_CLIENT_ID`, and/or
-`SAML_IDP_METADATA_URL`), `ALLOWED_GROUPS` and `ADMIN_GROUPS`. Every other setting in
-[§7](#7-configuration-reference) can also go in `.env`, named without the `NODDANAS_` prefix
+Set at least `NODDANAS_HOST`. Then decide where the rest of the configuration lives
+([§7](#the-web-admin-area-and-the-server-who-owns-which-setting)):
+
+- **On the web (simplest).** Leave the sign-in section of `.env` commented out. After the stack
+  is up, a one-time setup link (step 7) opens a page where you configure sign-in and become the
+  first administrator. Quotas, link lifetimes, who may sign in and branding are then changed in
+  the admin area.
+- **In `.env` (configuration as code).** Set a sign-in method (`OIDC_ISSUER` + `OIDC_CLIENT_ID`,
+  and/or `SAML_IDP_METADATA_URL`), `ALLOWED_GROUPS` and `ADMIN_GROUPS`. A setting set here wins
+  and is shown locked in the admin area.
+
+You can mix the two per setting (each sign-in method is configured entirely in one place). Every
+setting in [§7](#7-configuration-reference) can go in `.env`, named without the `NODDANAS_` prefix
 (`NODDANAS_TEAM_CREATION` becomes `TEAM_CREATION`). `.env.example` lists them all, with defaults.
 If your IdP provides SAML metadata only as a file, or you use an SP key pair, put those files in
 `deploy/compose/saml/` (see the README there).
 
 **Step 3: create secrets.** The script generates a random database password and the database URL,
+a settings key (which encrypts secrets saved in the admin area, such as the OIDC client secret),
 creates an empty file for the OIDC client secret, and sets ownership so each container can read
 only its own secrets. It never overwrites existing files.
 
@@ -203,7 +214,9 @@ only its own secrets. It never overwrites existing files.
 sudo ../../scripts/init-secrets.sh
 ```
 
-If you use OIDC, write the client secret into its file without leaving it in your shell history:
+If you configure OIDC in `.env`, write the client secret into its file without leaving it in
+your shell history (if you configure OIDC on the web, leave the file empty and enter the secret
+there):
 
 ```sh
 sudo sh -c 'read -r s && printf %s "$s" > secrets/oidc_client_secret'   # paste, then Enter
@@ -229,8 +242,24 @@ curl -fsS -o /dev/null -w '%{http_code}\n' https://<host>/readyz   # expect 204
 If NoddaNAS exits immediately, `docker compose logs noddanas` lists **every** configuration
 problem at once. Fix them all and run `docker compose up -d` again.
 
-**Step 7: SAML only.** If your IdP needs the SP metadata file, download it now from
-`https://<host>/auth/saml/metadata` and import it.
+**Step 7: sign-in on the web (if you left it out of `.env`).** The log says NoddaNAS is not set
+up yet. Create the one-time setup link:
+
+```sh
+docker compose exec noddanas /noddanas setup-link
+```
+
+It prints a link (`https://<host>/setup#…`) to your terminal only; it is never written to a log.
+Treat it like a password. Open it, enter your identity provider's details (the page shows the
+redirect URI or SAML metadata URL to register there), and save: NoddaNAS tries them against the
+identity provider before saving, so a typo is caught now. Then choose **Sign in to finish**. You
+sign in through your identity provider, become the first administrator, and the link stops
+working. Unused, it expires after 24 hours; running the command again replaces it.
+
+**Step 8: SAML only.** If your IdP needs the SP metadata file, download it now from
+`https://<host>/auth/saml/metadata` and import it. (With SAML configured on the web, the IdP's
+metadata must be saved first, so register NoddaNAS at the IdP with the metadata URL as soon as
+it is saved, then sign in to finish.)
 
 Continue with [§6 First sign-in](#6-first-sign-in-and-day-one-tasks).
 
@@ -381,23 +410,29 @@ read at startup, so restart NoddaNAS after renewing them.
 
 ## 6. First sign-in and day-one tasks
 
-1. Open `https://<host>` and sign in with an account in the admin group. NoddaNAS creates
+1. Open `https://<host>` and sign in with an account in the admin group (or finish the setup link,
+   [§3](#3-install-with-docker-compose) step 7, which makes you an administrator). NoddaNAS creates
    accounts automatically on first sign-in. There is nothing to pre-provision.
 2. Choose an **encryption passphrase** (at least 12 characters). It is separate from your IdP
    password and never leaves the browser.
 3. **Store the recovery code** shown once (print it, or save it to a password manager).
 4. Settings → **Download key backup**, and keep the file with your backups. It is itself encrypted
    and opens only with your passphrase or recovery code.
-5. Check that the header shows "admin" next to your quota. If not, your account's groups do not
-   include one in `NODDANAS_ADMIN_GROUPS` (see [Troubleshooting](#15-troubleshooting)).
-6. Create team folders (Team folders → **New team folder**) and, on each folder's **Members**
+5. Check that the header shows "admin" next to your quota and that **Admin** appears in the menu.
+   If not, your account's groups do not include one in the administrator groups (see
+   [Troubleshooting](#15-troubleshooting)), or use a setup link to appoint yourself.
+6. In **Admin**, review **Sign-in → Who can sign in** (restrict it to a group or email domain
+   unless your identity provider admits only the right people), **Storage & sharing** and
+   **Branding**. Changing anything asks you to **confirm it's you** first
+   ([§7](#confirm-its-you)).
+7. Create team folders (Team folders → **New team folder**) and, on each folder's **Members**
    page, map IdP groups under **Identity-provider groups**. Members of a mapped group get access
    immediately, but cannot open anything until a manager gives them the folder key: they appear
    under **Waiting for the team key** on the Members page, with their key fingerprint, and the
    manager approves each one (or everyone listed, after reviewing the list). Keys are never
    granted automatically, because the member list comes from the server, and anyone who
    controls the server could add a name to it.
-7. Send users a short notice. For example:
+8. Send users a short notice. For example:
 
    > Our new file storage is end-to-end encrypted: not even the administrators can read your
    > files. When you first sign in you will choose an encryption passphrase and receive a
@@ -412,9 +447,11 @@ read at startup, so restart NoddaNAS after renewing them.
 
 ## 7. Configuration reference
 
-All settings are environment variables. NoddaNAS validates the whole configuration at startup
-and **refuses to start** if anything is missing or unsafe, listing every problem. Changes take
-effect when NoddaNAS restarts.
+Settings are environment variables, and most can also be changed by administrators in the web
+admin area ([below](#the-web-admin-area-and-the-server-who-owns-which-setting)). NoddaNAS
+validates the whole configuration at startup and **refuses to start** if anything is missing or
+unsafe, listing every problem. Environment changes take effect when NoddaNAS restarts; changes
+in the admin area take effect immediately, on every replica within 15 seconds.
 
 **With Docker Compose,** put each setting in `deploy/compose/.env` without the `NODDANAS_`
 prefix: `NODDANAS_TEAM_CREATION=false` becomes `TEAM_CREATION=false`. `.env.example` lists
@@ -424,7 +461,7 @@ are fixed by the Compose setup on purpose, and setting them in `.env` has no eff
 | Setting | Fixed to | Why |
 |---|---|---|
 | `NODDANAS_PUBLIC_URL` | `https://` + `NODDANAS_HOST` | One hostname drives NoddaNAS and Caddy |
-| `NODDANAS_DATABASE_URL_FILE`, `NODDANAS_OIDC_CLIENT_SECRET_FILE` | Docker secrets from `secrets/` | Keeps credentials out of the environment |
+| `NODDANAS_DATABASE_URL_FILE`, `NODDANAS_OIDC_CLIENT_SECRET_FILE`, `NODDANAS_SETTINGS_KEY_FILE` | Docker secrets from `secrets/` | Keeps credentials out of the environment |
 | `NODDANAS_TRUSTED_PROXIES` | Caddy's network, `172.30.0.0/24` | Only the proxy may set `X-Forwarded-For` |
 | `NODDANAS_LISTEN`, `NODDANAS_TLS_CERT_FILE`, `NODDANAS_TLS_KEY_FILE` | Port 8080, no TLS | Caddy terminates TLS and proxies to NoddaNAS |
 | `NODDANAS_DATA_DIR` | `/data` | The `noddanas-data` volume is mounted there |
@@ -434,12 +471,89 @@ pair) in `deploy/compose/saml/`, which is mounted read-only at `/etc/noddanas/sa
 files in `deploy/compose/branding/`, mounted at `/etc/noddanas/branding`. The repository's tests
 check that every setting NoddaNAS reads can be set this way and is documented here.
 
-For values that are secrets, prefer the `_FILE` form: `NODDANAS_DATABASE_URL_FILE` and
-`NODDANAS_OIDC_CLIENT_SECRET_FILE` name a file whose contents are the value. File-based secrets
+For values that are secrets, prefer the `_FILE` form: `NODDANAS_DATABASE_URL_FILE`,
+`NODDANAS_OIDC_CLIENT_SECRET_FILE` and `NODDANAS_SETTINGS_KEY_FILE` name a file whose contents are
+the value. File-based secrets
 stay out of `docker inspect`, process listings and crash dumps. Setting both forms is an error.
 
 Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go syntax (`12h`,
-`90m`) or days (`30d`). Lists are comma-separated.
+`90m`) or days (`30d`). Lists are comma-separated. Booleans are `true` or `false`; anything else is
+an error rather than a silent default.
+
+### The web admin area and the server: who owns which setting
+
+Think of it like a building: the person who runs the server owns the foundations (where the
+database is, the address and port, TLS, proxies, the data directory, the keys), and administrators
+furnish the rooms (quotas, link lifetimes, who may sign in, which identity provider, branding).
+So the **Core** settings below are server-only, and everything in the other tables can also be
+changed under **Admin** in the web app:
+
+| Admin tab | Settings |
+|---|---|
+| People | Per-person storage, appointing administrators, revoking a person's access |
+| Storage & sharing | [Storage and limits](#storage-and-limits), [sharing and sessions](#sharing-and-sessions) |
+| Sign-in | [OIDC](#oidc), [SAML](#saml), [access policy](#access-policy) (who may sign in, administrator groups) |
+| Branding | [Name, theme and logo](#branding) |
+| Emergency | Revoke every public link; sign everyone out |
+
+**Precedence.** A non-empty environment variable wins and is shown **locked** in the admin area,
+with the variable's name; otherwise the value saved in the admin area; otherwise the default.
+With Compose, a commented-out or empty line in `.env` is "not set". `NODDANAS_WEB_SETTINGS=false`
+locks every setting (configuration as code only).
+
+**Sign-in methods are either/or.** OIDC is configured entirely in the environment (when
+`NODDANAS_OIDC_ISSUER` is set) or entirely on the web, and the same for SAML (anchored by
+`NODDANAS_SAML_IDP_METADATA_URL` or `_FILE`). A stray OIDC or SAML variable without its anchor is a
+startup error, so a deployment never runs on a mix nobody reviewed as a whole.
+
+**One set of rules.** Values from the admin area are parsed and validated by exactly the same code
+as environment variables. Sign-in changes are also tried against the identity provider before
+they are saved (OIDC discovery and signing keys; SAML metadata), and the error says what failed,
+never what the remote server answered.
+
+#### Confirm it's you
+
+Viewing the admin area needs administrator rights. **Changing** anything in it also needs a
+recent sign-in: your identity provider is asked to authenticate you again (OIDC `prompt=login`
+and `max_age=0`; SAML `ForceAuthn`), and NoddaNAS checks that it did (OIDC `auth_time`, SAML
+`AuthnInstant`). It lasts 15 minutes. It is the same idea as `sudo` asking for your password
+again: a session left open on an unattended computer can look but cannot change who may sign
+in, who administers, or where sign-in goes. App passwords never qualify. Some identity providers
+omit `auth_time`; NoddaNAS then relies on them honouring `prompt=login` and logs a warning.
+
+#### Guard rails
+
+- **No self-lockout.** A change to who may sign in that would exclude the administrator making it
+  is refused, as is a change to the administrator groups that would remove their own rights.
+  Nobody can change their own appointment.
+- **Sign-in cannot be switched off from the web.** At least one method must stay on.
+- **Replacing an identity provider asks for confirmation.** Accounts are tied to the issuer that
+  created them. Switching or removing a provider leaves its accounts unable to sign in (their
+  files stay, encrypted), and people get new, empty accounts through the new provider. NoddaNAS
+  counts the affected accounts, including yours, and asks before saving. Nobody can take over an
+  existing account by pointing NoddaNAS at another provider.
+- **Two administrators at once.** Saves carry a revision; the second of two conflicting saves is
+  refused rather than silently overwriting the first.
+- **Secrets** (the OIDC client secret) are stored encrypted with AES-256-GCM under
+  `NODDANAS_SETTINGS_KEY`, never shown again, and logged only as "set". Without a settings key,
+  the admin area cannot store secrets and says so.
+- **Outbound requests** to identity providers never go to link-local or cloud metadata addresses
+  (or loopback, except on a `localhost` deployment); responses are capped at 1 MiB. Private
+  network addresses are allowed, so an IdP on the same Docker network works.
+- Every change is audited as `settings.changed`, with the values of ordinary settings and
+  "(set)" or "(changed)" for secrets, documents and logos.
+
+#### From the server's shell
+
+| Command | Use |
+|---|---|
+| `docker compose exec noddanas /noddanas settings show` | Every setting, its source (`server`, `web`, `default`) and value; secrets hidden |
+| `docker compose exec noddanas /noddanas settings reset KEY…` | Clear settings saved on the web: a key (`OIDC_CLIENT_SECRET`), a group (`oidc`, `saml`, `access`, `branding`, `storage`, ...) or `all`. Running servers pick it up within 15 seconds. |
+| `docker compose exec noddanas /noddanas setup-link` | A one-time link to configure sign-in and become an administrator. Also the way back in when no administrator can sign in: reset the broken sign-in settings, then create a link. |
+
+Saved settings that no longer validate (for example after an upgrade tightened a rule) stop the
+server from starting with the list of problems and these commands as the fix. They are never
+skipped: skipping a broken "allowed groups" would open sign-in to everyone.
 
 ### Core
 
@@ -455,6 +569,8 @@ Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go
 | `NODDANAS_AUTO_MIGRATE` | `true` | Apply database migrations at startup |
 | `NODDANAS_WORKER` | `true` | Run background jobs (trash expiry, purging deleted data, cleaning up expired sessions) |
 | `NODDANAS_WEBDAV` | `true` | Serve the read-only, ciphertext-only WebDAV endpoint at `/dav/` for backups |
+| `NODDANAS_SETTINGS_KEY` or `NODDANAS_SETTINGS_KEY_FILE` | | 32 random bytes, base64 or hex (`scripts/init-secrets.sh` creates one). Encrypts secrets saved in the admin area. Without it the admin area cannot store secrets. Back it up separately from the database. |
+| `NODDANAS_WEB_SETTINGS` | `true` | `false` makes every setting read-only in the admin area |
 
 ### OIDC
 
@@ -478,7 +594,9 @@ Sizes accept `B`, `KiB`, `MiB`, `GiB`, `TiB` (e.g. `50GiB`). Durations accept Go
 | `NODDANAS_SAML_NAME_ATTRIBUTES` | `displayName`, `name`, `cn`, and standard URIs | Display name attributes |
 | `NODDANAS_SAML_GROUP_ATTRIBUTES` | `groups`, `memberOf`, `eduPersonAffiliation`, and standard URIs | Group attributes |
 
-At least one of OIDC or SAML must be configured.
+With neither OIDC nor SAML configured (here or on the web), NoddaNAS starts in **setup mode**:
+the sign-in page explains that the server is not set up, and `noddanas setup-link` creates the
+link to set it up ([§3](#3-install-with-docker-compose) step 7).
 
 ### Access policy
 
@@ -486,12 +604,13 @@ At least one of OIDC or SAML must be configured.
 |---|---|---|
 | `NODDANAS_ALLOWED_GROUPS` | | Sign-in requires membership in at least one of these groups |
 | `NODDANAS_ALLOWED_EMAIL_DOMAINS` | | Sign-in requires a **verified** email in one of these domains |
-| `NODDANAS_ADMIN_GROUPS` | | Members are NoddaNAS administrators |
+| `NODDANAS_ADMIN_GROUPS` | | Members are NoddaNAS administrators (as are people appointed under Admin → People, and whoever completes a setup link) |
 | `NODDANAS_TEAM_CREATION` | `true` | Whether every user may create team folders (`false`: administrators only) |
 
 If both allow-lists are set, a user must satisfy **both**. If neither is set, NoddaNAS logs a
-warning at startup and admits every account the IdP authenticates. Administrator status and
-group memberships are recomputed at every sign-in.
+warning at startup and admits every account the IdP authenticates. Group memberships are
+refreshed at every sign-in; a change to the administrator groups applies to everyone at once,
+based on the groups each person had at their last sign-in.
 
 ### Storage and limits
 
@@ -499,32 +618,37 @@ group memberships are recomputed at every sign-in.
 |---|---|---|
 | `NODDANAS_DEFAULT_QUOTA` | `10GiB` | Quota of each new personal space |
 | `NODDANAS_DEFAULT_TEAM_QUOTA` | `50GiB` | Quota of each new team folder |
-| `NODDANAS_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file |
+| `NODDANAS_MAX_FILE_SIZE` | `50GiB` | Largest single (encrypted) file (at least `1MiB`) |
 | `NODDANAS_MAX_VERSIONS` | `10` | Versions kept per file (1-1000). All count towards quota. |
-| `NODDANAS_TRASH_RETENTION` | `30d` | Trashed items are purged after this |
+| `NODDANAS_TRASH_RETENTION` | `30d` | Trashed items are purged after this (at least `1h`) |
 
 ### Sharing and sessions
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `NODDANAS_LINK_DEFAULT_TTL` | `30d` | Expiry of a public link when the user does not choose one. Every link expires. |
+| `NODDANAS_LINK_DEFAULT_TTL` | `30d` | Expiry of a public link when the user does not choose one (at least `1h`, at most the maximum). Every link expires. |
 | `NODDANAS_LINK_MAX_TTL` | `365d` | Longest expiry a user may choose |
-| `NODDANAS_SESSION_IDLE` | `12h` | Browser sessions end after this much inactivity |
-| `NODDANAS_SESSION_MAX_AGE` | `7d` | Browser sessions end after this long regardless of activity |
+| `NODDANAS_SESSION_IDLE` | `12h` | Browser sessions end after this much inactivity (`5m` to `30d`, at most the maximum age) |
+| `NODDANAS_SESSION_MAX_AGE` | `7d` | Browser sessions end after this long regardless of activity (`15m` to `365d`). Shortening it applies to existing sessions too. |
 
 ### Branding
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `NODDANAS_BRAND_NAME` | `NoddaNAS` | Name in the header, page title and sign-in page |
-| `NODDANAS_BRAND_LOGO_FILE` | | PNG or JPEG logo (re-encoded at startup) |
+| `NODDANAS_BRAND_LOGO_FILE` | | PNG or JPEG logo (re-encoded, so only pixels are served) |
 | `NODDANAS_THEME_FILE` | | Theme JSON. See [THEMING.md](THEMING.md). |
+
+In the admin area, the theme is edited as JSON and the logo uploaded; both are validated the same
+way (including contrast) before they are saved.
 
 ### Fixed limits
 
 These are built in, not configurable:
 
-- Sign-in attempts: 20 per minute per client IP.
+- Sign-in attempts (including "confirm it's you"): 20 per minute per client IP.
+- A recent sign-in for administrative changes lasts 15 minutes.
+- A setup link works once and expires after 24 hours.
 - Failed credential checks: 30 per minute per client IP.
 - Anonymous public-link requests: 120 per minute per client IP.
 - A password-protected link locks for 15 minutes after 10 wrong passwords.
@@ -567,7 +691,7 @@ the basic mechanics.
 |---|---|---|
 | PostgreSQL database | Users, folder tree, encrypted names, wrapped keys, shares, team memberships | Contains metadata in the clear. Encrypt and restrict the backups. |
 | Data volume (`NODDANAS_DATA_DIR`) | The encrypted file containers | Already ciphertext and does not compress, so skip compression. |
-| `deploy/compose/.env`, `secrets/`, `branding/` | Your configuration | Small; keep them separate from the data backups. |
+| `deploy/compose/.env`, `secrets/`, `branding/` | Your configuration, including `secrets/settings_key` | Small; keep them separate from the data backups. Settings changed in the admin area are in the database; the OIDC client secret among them is encrypted under the settings key, so a database backup alone does not reveal it, and is not enough to restore it either. |
 
 Back up the **database first, then the data volume**. Every file the database dump refers to will
 then be in the later volume backup. The only exception is items purged from the trash between the
@@ -730,7 +854,8 @@ and old versions use space until they expire.
 ### Finding a user's ID
 
 Operator commands accept either a verified email or the user's 32-character ID. IDs appear in
-logs (`"user":…`), and you can list users from the database:
+logs (`"user":…`), and Admin → **People** lists everyone with their sign-in method, role and storage. From the
+shell you can list users from the database:
 
 ```sh
 docker compose exec postgres psql -U noddanas -d noddanas -c \
@@ -740,11 +865,16 @@ docker compose exec postgres psql -U noddanas -d noddanas -c \
 ### Adding users and administrators
 
 Add people to the allowed group at your IdP. Their account is created the first time they sign
-in. To make someone an administrator, add them to an admin group. This takes effect at their next
-sign-in. Removing them from the group revokes admin rights at their next sign-in. To make it
-immediate, also run `revoke-access` (below) so they must sign in again.
+in. To make someone an administrator, either add them to an administrator group (effective at
+their next sign-in) or, once they have signed in, choose **Make administrator** next to them under
+Admin → People (effective immediately). Removing an administrator group from the settings takes
+effect immediately for everyone; removing a person from the group at the IdP takes effect at their
+next sign-in, so also revoke their access (below) to make it immediate. Administrators cannot read
+anyone's files: those stay end-to-end encrypted.
 
 ### Quotas
+
+Under Admin → People, choose **Storage…** next to the person. Or from the shell:
 
 ```sh
 docker compose exec noddanas /noddanas set-quota alice@example.com 100GiB   # personal space
@@ -767,7 +897,8 @@ Do these in order:
 
 1. **Disable or remove the user at the IdP,** or remove them from the allowed groups. This stops
    new sign-ins. Do it first, or they could simply sign in again.
-2. **Cut off existing access:**
+2. **Cut off existing access:** Admin → People → **Revoke access** (ends their sessions and deletes
+   their app passwords), or from the shell, which also revokes their public links:
 
    ```sh
    docker compose exec noddanas /noddanas revoke-access --user alice@example.com   # or --user <id>
@@ -800,15 +931,15 @@ JavaScript to the web app. That is the main residual risk of browser-based end-t
 | One link | The creator, or a manager of the folder | Shared → Shared by me → **Revoke**, or the item's Share dialog |
 | All of one user's links | That user | Shared → Shared by me → **Revoke all my public links** |
 | All of one user's links | Operator | `docker compose exec noddanas /noddanas revoke-links --user <email-or-id>` |
-| Every link on the server | Administrator | Settings → Administration → **Revoke all public links (all users)**, then type `REVOKE ALL` |
+| Every link on the server | Administrator | Admin → Emergency → **Revoke all public links**, then type `REVOKE ALL` |
 | Every link on the server | Operator | `docker compose exec noddanas /noddanas revoke-links --all` |
 
 Revocation is immediate and permanent. The server deletes the link's token and its wrapped key,
 so the secret in already-shared URLs no longer unlocks anything. People who need access again get
 a new link. Sharing with specific people and team folders is unaffected.
 
-The web switch for everyone requires an administrator with an interactive session (an app
-password cannot use it). The shell commands work even if the web app is down or every
+The web switch for everyone requires an administrator with an interactive session and a recent
+sign-in (an app password cannot use it). The shell commands work even if the web app is down or every
 administrator account is compromised.
 
 ### A user account is compromised
@@ -829,9 +960,13 @@ administrator account is compromised.
 
 ### An administrator account is compromised
 
-As above, and also review `team.group_map`, `team.group_unmap`, `space.quota`, `team.delete` and
-`admin.links.revoke_all` events, and undo unexpected changes. Check the admin group's membership
-at the IdP.
+As above, and also review `settings.changed`, `user.admin_granted`, `user.admin_removed`,
+`user.quota`, `user.access_revoked`, `sessions.revoke_everyone`, `team.group_map`,
+`team.group_unmap`, `space.quota`, `team.delete` and `admin.links.revoke_all` events, and undo
+unexpected changes (`noddanas settings show` lists where every setting now comes from;
+`noddanas settings reset` clears web settings). Check the admin group's membership at the IdP,
+and the appointed administrators under Admin → People. Because changes need a recent sign-in at
+the identity provider, look there too for the matching authentication.
 
 ### The server or its host is compromised
 
@@ -859,7 +994,8 @@ at the IdP.
 | Secret | Steps |
 |---|---|
 | Database password | `docker compose exec postgres psql -U noddanas -d noddanas -c "ALTER USER noddanas PASSWORD '<new>'"`, write the new password into `secrets/postgres_password` and update it inside `secrets/database_url`, then `docker compose up -d --force-recreate noddanas`. |
-| OIDC client secret | Create a second secret at the IdP, write it to `secrets/oidc_client_secret`, `docker compose up -d --force-recreate noddanas`, test a sign-in, then delete the old secret at the IdP. |
+| OIDC client secret | Create a second secret at the IdP. Configured in `.env`: write it to `secrets/oidc_client_secret`, `docker compose up -d --force-recreate noddanas`. Configured on the web: enter it under Admin → Sign-in. Test a sign-in, then delete the old secret at the IdP. |
+| Settings key | Only secrets saved in the admin area depend on it. Write a new key to `secrets/settings_key` (`openssl rand -base64 32`), run `docker compose run --rm noddanas settings reset OIDC_CLIENT_SECRET`, `docker compose up -d --force-recreate noddanas`, then enter the client secret again under Admin → Sign-in (sign in first with another method, or through a setup link). |
 | SAML SP key pair | Generate a new key and certificate, give the IdP the new certificate (many IdPs accept two during a transition), switch NoddaNAS's `_KEY_FILE`/`_CERT_FILE` and restart, then remove the old certificate at the IdP. |
 | TLS certificates | Caddy renews automatically. With `NODDANAS_TLS_*`, replace the files and restart. |
 | Users' app passwords | Users revoke and recreate them under Settings → App passwords. Operators can remove all of a user's with `revoke-access`. |
@@ -875,12 +1011,17 @@ mode `0400` and the right owner. Keep both if you replace a file by hand.
 |---|---|---|
 | NoddaNAS exits at startup with `configuration:` and a list | Missing or invalid settings | Fix every listed item. The list is complete. |
 | Startup fails with `theme:` | The theme file fails validation (often contrast) | The message names each failing color pair. See [THEMING.md](THEMING.md). |
+| Startup fails with `settings saved in the web admin area are not valid` or `restore the settings key` | A saved web setting no longer validates, or the settings key changed | Fix it in the environment, or clear it: `docker compose run --rm noddanas settings reset KEY`. |
+| The sign-in page says the server is not set up | No sign-in method is configured | Run `docker compose exec noddanas /noddanas setup-link` ([§3](#3-install-with-docker-compose) step 7). |
+| Nobody can sign in after a sign-in change | The identity provider changed, or a client secret is wrong | `docker compose exec noddanas /noddanas settings reset oidc` (or `saml`), then `setup-link` to configure it again. |
+| "Confirm it's you" sends you back with `?error=signin` | The identity provider reported an authentication older than the request | It did not ask for your password again. Check that it honours `prompt=login` (OIDC) or `ForceAuthn` (SAML). |
+| A setting is greyed out in the admin area | It is set in the environment (the field names the variable), or `NODDANAS_WEB_SETTINGS=false` | Change it there, or remove it from the environment to manage it on the web. |
 | Every request returns `421 Misdirected Request` | The `Host` reaching NoddaNAS differs from `NODDANAS_PUBLIC_URL` | Make the proxy forward the original `Host`; check the URL's hostname and port. |
 | Actions fail with `cross-origin request blocked` | `NODDANAS_PUBLIC_URL` differs from the address in the browser, or the proxy rewrites `Origin` | Use the exact public origin; stop the proxy from altering `Origin` and `Sec-Fetch-*`. |
 | Sign-in returns to the start page with "not permitted" (`?error=not_allowed`) | The user is not in `NODDANAS_ALLOWED_GROUPS`, or has no verified email in an allowed domain | Check the groups the IdP actually sends: the `login.failed` audit event shows the reason. With Entra ID, use group object IDs. |
 | Sign-in fails (`?error=signin`) with SAML | Wrong ACS URL or entity ID, unsigned assertion, clock skew, or an IdP-initiated sign-in | Compare the IdP settings with [§2](#saml-20); make sure the server's clock is synchronized (NTP); start sign-in at NoddaNAS, not at the IdP. |
 | Sign-in fails with OIDC | Wrong redirect URI, issuer or secret | The redirect URI must be exactly `https://<host>/auth/callback`. |
-| Logged-in user has no "admin" | Their admin group is not in the token or assertion | Check the groups claim or attribute and `NODDANAS_ADMIN_GROUPS`, then sign out and in again. |
+| Logged-in user has no "admin" | Their admin group is not in the token or assertion | Check the groups claim or attribute and the administrator groups, then sign out and in again. Or appoint them under Admin → People. |
 | Cannot share with someone by email | Their email is not verified, or they have not set up encryption yet | See [§2](#2-prepare-your-identity-provider) on verified emails. The recipient must sign in once and create keys. |
 | A team member sees "you have not been given this team folder's key yet" | No manager has approved them since they joined | A manager opens the folder's Members page and chooses **Give key** next to them under **Waiting for the team key**. |
 | Someone is shown with "⚠ Key changed" or "⚠ Possible impersonation" | The account's keys differ from the ones the user verified, or a different account imitates a verified person's name or email | Treat it as a security incident: published keys never change, so this means tampering or impersonation. Check the audit log and the `users` table, and see [§13](#13-incident-response). |

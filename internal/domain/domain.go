@@ -64,7 +64,8 @@ type User struct {
 	Subject         string // OIDC subject or SAML NameID
 	Email           string // set only if the IdP asserted it as verified
 	DisplayName     string
-	Admin           bool
+	Admin           bool // effective: AdminGranted or a member of an administrator group
+	AdminGranted    bool // appointed in NoddaNAS (setup link or another administrator)
 	PersonalSpaceID string
 	Keys            *PublicKeys // nil until the user sets up encryption
 	KeyBundle       string      // opaque client key bundle (JSON)

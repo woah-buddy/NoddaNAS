@@ -80,7 +80,7 @@ access to them, as defence in depth and to protect the metadata.
 |---|---|---|---|
 | Database | `postgres` service; back up as a `pg_dump` file | **Required** | The folder tree, encrypted names and keys, key bundles, shares, team memberships, users |
 | Encrypted files | Docker volume `noddanas_noddanas-data` | **Required** | Ciphertext containers, one per file version |
-| Deployment configuration | `/opt/NoddaNAS/deploy/compose` (`.env`, `secrets/`, `branding/`, and `compose.yaml` / `Caddyfile` if you changed them) | **Required** | `secrets/` holds credentials; the backup repository is encrypted |
+| Deployment configuration | `/opt/NoddaNAS/deploy/compose` (`.env`, `secrets/`, `branding/`, and `compose.yaml` / `Caddyfile` if you changed them) | **Required** | `secrets/` holds credentials, including `settings_key`; the backup repository is encrypted |
 | NoddaNAS version | The git commit you run | **Required** | Restore the same version, then upgrade |
 | SAML SP key pair, if you configured one | Wherever `NODDANAS_SAML_SP_KEY_FILE` / `_CERT_FILE` point | Recommended | Otherwise generate a new pair and give the IdP the new certificate |
 | TLS certificates | Docker volume `noddanas_caddy-data` | Optional | Caddy obtains new ones automatically |
@@ -360,6 +360,7 @@ confident, or keep them as root-only files.
 | **Identity provider rebuilt** | Accounts are matched by issuer and subject ID. Restore the IdP from its own backup so both stay the same. If they change, users get new, empty accounts and their encrypted files remain with the old ones. There is currently no tool to relink them. |
 | **PostgreSQL major version** | A `pg_dump` restores into a newer version. An offline volume copy does not. |
 | **Newer NoddaNAS** | Restore the backed-up version first, confirm it works, then upgrade normally (migrations only move forward). |
+| **Settings key lost** (`secrets/settings_key`) | Only secrets saved in the web admin area (the OIDC client secret) depend on it, and NoddaNAS refuses to start with a message naming them. Create a new key (`scripts/init-secrets.sh` makes one if the file is missing), run `docker compose run --rm noddanas settings reset OIDC_CLIENT_SECRET`, start, and enter the client secret again (through a setup link if nobody can sign in without it). Settings themselves are in the database and come back with it. |
 | **Database lost, files survived** | See "Things not to do" in [§5](#things-not-to-do): individual containers can be salvaged by their owners, but this is not a recovery path. |
 
 ---

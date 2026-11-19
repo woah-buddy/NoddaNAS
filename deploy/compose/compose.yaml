@@ -27,20 +27,23 @@ services:
     tmpfs: [/tmp]
     environment:
       # Fixed by this setup, on purpose: the public URL is built from
-      # NODDANAS_HOST; the database URL and OIDC client secret are Docker
-      # secrets (secrets/); only Caddy's network may set X-Forwarded-For.
+      # NODDANAS_HOST; the database URL, OIDC client secret and settings key
+      # are Docker secrets (secrets/); only Caddy's network may set
+      # X-Forwarded-For.
       # Also fixed by omission: NoddaNAS listens on :8080 behind Caddy, which
       # terminates TLS, and stores data in the noddanas-data volume at /data.
       NODDANAS_PUBLIC_URL: https://${NODDANAS_HOST:?set NODDANAS_HOST in .env}
       NODDANAS_DATABASE_URL_FILE: /run/secrets/database_url
       NODDANAS_OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      NODDANAS_SETTINGS_KEY_FILE: /run/secrets/settings_key
       NODDANAS_TRUSTED_PROXIES: 172.30.0.0/24
 
       # Every other setting comes from .env, named without the NODDANAS_
       # prefix (see .env.example and docs/ADMIN_GUIDE.md section 7). Empty
-      # means the built-in default. internal/config's tests fail if a setting
-      # the server reads is missing here.
-      # Sign-in: OIDC and/or SAML (configure at least one).
+      # means: not set here, so it can be changed in the web admin area (a
+      # value set here wins and is locked there). internal/config's tests
+      # fail if a setting the server reads is missing here.
+      # Sign-in: OIDC and/or SAML, here or on the web (noddanas setup-link).
       NODDANAS_OIDC_ISSUER: ${OIDC_ISSUER:-}
       NODDANAS_OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       NODDANAS_OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-}
@@ -50,7 +53,7 @@ services:
       NODDANAS_SAML_ENTITY_ID: ${SAML_ENTITY_ID:-}
       NODDANAS_SAML_SP_KEY_FILE: ${SAML_SP_KEY_FILE:-}
       NODDANAS_SAML_SP_CERT_FILE: ${SAML_SP_CERT_FILE:-}
-      NODDANAS_SAML_TRUST_EMAIL: ${SAML_TRUST_EMAIL:-false}
+      NODDANAS_SAML_TRUST_EMAIL: ${SAML_TRUST_EMAIL:-}
       NODDANAS_SAML_EMAIL_ATTRIBUTES: ${SAML_EMAIL_ATTRIBUTES:-}
       NODDANAS_SAML_NAME_ATTRIBUTES: ${SAML_NAME_ATTRIBUTES:-}
       NODDANAS_SAML_GROUP_ATTRIBUTES: ${SAML_GROUP_ATTRIBUTES:-}
@@ -60,8 +63,8 @@ services:
       NODDANAS_ADMIN_GROUPS: ${ADMIN_GROUPS:-}
       NODDANAS_TEAM_CREATION: ${TEAM_CREATION:-}
       # Storage and limits.
-      NODDANAS_DEFAULT_QUOTA: ${DEFAULT_QUOTA:-10GiB}
-      NODDANAS_DEFAULT_TEAM_QUOTA: ${DEFAULT_TEAM_QUOTA:-50GiB}
+      NODDANAS_DEFAULT_QUOTA: ${DEFAULT_QUOTA:-}
+      NODDANAS_DEFAULT_TEAM_QUOTA: ${DEFAULT_TEAM_QUOTA:-}
       NODDANAS_MAX_FILE_SIZE: ${MAX_FILE_SIZE:-}
       NODDANAS_MAX_VERSIONS: ${MAX_VERSIONS:-}
       NODDANAS_TRASH_RETENTION: ${TRASH_RETENTION:-}
@@ -75,11 +78,12 @@ services:
       NODDANAS_WEBDAV: ${WEBDAV:-}
       NODDANAS_WORKER: ${WORKER:-}
       NODDANAS_AUTO_MIGRATE: ${AUTO_MIGRATE:-}
+      NODDANAS_WEB_SETTINGS: ${WEB_SETTINGS:-}
       # Branding (docs/THEMING.md); files live in ./branding.
       NODDANAS_BRAND_NAME: ${BRAND_NAME:-}
       NODDANAS_THEME_FILE: ${THEME_FILE:-}
       NODDANAS_BRAND_LOGO_FILE: ${BRAND_LOGO_FILE:-}
-    secrets: [database_url, oidc_client_secret]
+    secrets: [database_url, oidc_client_secret, settings_key]
     volumes:
       - noddanas-data:/data
       - ./branding:/etc/noddanas/branding:ro
@@ -150,3 +154,5 @@ secrets:
     file: ./secrets/postgres_password
   oidc_client_secret:
     file: ./secrets/oidc_client_secret
+  settings_key:
+    file: ./secrets/settings_key

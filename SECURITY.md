@@ -48,3 +48,10 @@ and an update to the threat model.
     names and emails are the server's claims: a key grant needs an explicit decision by a person
     who has been shown the recipient's fingerprint, and identity comes only from fingerprints the
     user verified (E2EE.md §3 and §8).
+15. Settings have one validator (`config.Build`) for every source, environment or web. A setting
+    an administrator can change on the web is listed in `config.Registry`; what only the server's
+    operator should decide (addresses, storage, keys, TLS, proxies) stays out of it. Every change
+    in the admin area needs `service.RequireFreshAdmin` (a recent re-authentication), and saved
+    settings that stop validating stop startup instead of being skipped.
+16. The server makes outbound requests only to identity providers, only through
+    `auth.NewIdPClient`, and never shows what came back (only what failed).
