@@ -252,3 +252,29 @@ func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request,
 	http.SetCookie(w, s.auth.EndSession(r))
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (s *Server) handleGetContacts(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	sealed, rev, err := s.svc.Contacts(r.Context(), p)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"contacts": sealed, "revision": rev})
+}
+
+func (s *Server) handleSetContacts(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	var req struct {
+		Contacts string `json:"contacts"`
+		Revision int64  `json:"revision"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	rev, err := s.svc.SetContacts(r.Context(), p, req.Contacts, req.Revision)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"revision": rev})
+}

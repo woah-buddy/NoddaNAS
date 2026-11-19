@@ -40,6 +40,12 @@ func TestBrowserInterop(t *testing.T) {
 	hashKey := NewNodeKey()
 	hashNames := []string{"Report.PDF", "report.pdf", "İstanbul", "ΣΟΦΟΣ", "ΌΣΟΣ ΧΡΌΝΟΣ", "STRASSE", "straße", "ǅemal",
 		"ﬀ", "é", "é", "Ⅻ", "ΑΣ.txt", "日本語", "😀 emoji"}
+	contactID, contactFP := strings.Repeat("c", 32), strings.Repeat("f", 40)
+	sealedContacts, err := acct.SealContacts(&Contacts{V: 1, Contacts: map[string]Contact{
+		contactID: {FP: contactFP, Name: "Bob ✓", Email: "bob@example.test", VerifiedAt: 1700000000000}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	vectors := map[string]any{
 		"bundle": bundle, "passphrase": "go passphrase 1234", "recoveryCode": code, "fingerprint": acct.Fingerprint(),
 		"spaceId": spaceID, "spacePub": B64(space.PublicKey()), "rootId": rootID, "rootKey": space.WrapRoot(rootID, root),
@@ -47,6 +53,7 @@ func TestBrowserInterop(t *testing.T) {
 		"childName": "Résumé ✓.txt", "childNameEnc": root.EncryptName(childID, "Résumé ✓.txt"), "container": B64(container),
 		"plaintext": plain, "hashKeyRaw": B64(hashKey.Raw()), "hashNames": hashNames,
 		"jsSpaceId": strings.Repeat("8", 32), "teamId": strings.Repeat("9", 32), "shareId": strings.Repeat("a", 32),
+		"contacts": sealedContacts, "contactId": contactID, "contactFp": contactFP,
 	}
 	vjson, _ := json.Marshal(vectors)
 
@@ -117,6 +124,7 @@ func TestBrowserInterop(t *testing.T) {
 		LinkSecret   string            `json:"linkSecret"`
 		LinkKey      string            `json:"linkKey"`
 		Trash        map[string]string `json:"trash"`
+		Contacts     string            `json:"contacts"`
 	}
 	if err := json.Unmarshal(res.JS, &js); err != nil {
 		t.Fatal(err)
@@ -189,5 +197,12 @@ func TestBrowserInterop(t *testing.T) {
 	}
 	if nk, kn, err := OpenTrashKey(space, jsPub, js.ChildID, js.Trash["restoreKey"], js.Trash["restoreSig"]); err != nil || kn.Name != "trashed.txt" || B64(nk.Raw()) != js.ChildRaw {
 		t.Fatalf("trash key: %v", err)
+	}
+	c, err := jsAcct.OpenContacts(js.Contacts)
+	if err != nil || c.Contacts[strings.Repeat("d", 32)].Name != "From the browser ✓" || c.Contacts[strings.Repeat("d", 32)].FP != strings.Repeat("e", 40) {
+		t.Fatalf("Go cannot open the browser's contact list: %+v %v", c, err)
+	}
+	if _, err := acct.OpenContacts(js.Contacts); err == nil {
+		t.Fatal("a contact list opened under another account")
 	}
 }

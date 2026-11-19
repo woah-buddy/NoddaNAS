@@ -49,6 +49,8 @@ server is still responsible for (access control, integrity of structure, availab
 | Anyone the IdP knows signs in | Group / verified-email-domain policy for both OIDC and SAML; startup warning if open | e2e: policy test |
 | Capturing another user's shares via their email | Accounts keyed by (issuer, subject); emails recorded only if verified and unclaimed; SAML emails trusted only if configured | `service/users.go` |
 | Forged key grant (anyone can seal to a public key) | Every share, team grant and trash seal is signed by its granter; clients verify | `e2ee` tests: forged grant/share rejected |
+| Server inserts a team member to obtain the team key | Clients never grant keys automatically; a manager approves each pending member after seeing their fingerprint and verification status; the Go library requires an approval callback | Browser test: database-inserted member is not granted; `TestEndToEnd` (no blind or unapproved grants) |
+| Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
 ### Tampering

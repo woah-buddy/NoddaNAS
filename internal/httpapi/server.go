@@ -112,6 +112,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/keys", s.sessionOnly(s.handleSetupKeys))
 	mux.HandleFunc("PUT /api/v1/keys", s.sessionOnly(s.handleUpdateKeys))
 	mux.HandleFunc("GET /api/v1/users/lookup", s.authed(s.handleLookupUser))
+	// Verified contacts: sealed by the client under the user's own key (E2EE.md §8).
+	mux.HandleFunc("GET /api/v1/contacts", s.authed(s.handleGetContacts))
+	mux.HandleFunc("PUT /api/v1/contacts", s.authed(s.handleSetContacts))
 	mux.HandleFunc("GET /api/v1/users/{id}/keys", s.authed(s.handleUserKeys))
 	mux.HandleFunc("GET /api/v1/app-passwords", s.sessionOnly(s.handleListAppPasswords))
 	mux.HandleFunc("POST /api/v1/app-passwords", s.sessionOnly(s.handleCreateAppPassword))

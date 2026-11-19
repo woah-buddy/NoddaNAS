@@ -31,8 +31,9 @@ in the browser.
 | Disaster recovery | Whole-server backups stay end-to-end encrypted; `noddanas verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
 | Offline recovery | `noddanas-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
 | Personal spaces | Every user has one, with a per-user quota |
-| Team folders | Direct members (read / write / manage), IdP group mappings (admin), separate quota, signed key grants |
+| Team folders | Direct members (read / write / manage), IdP group mappings (admin), separate quota, signed key grants that a manager approves person by person (never automatic) |
 | Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links; one **Shared** page (with me / by me) |
+| Verified people | Compare key fingerprints once, out of band; NoddaNAS then marks that person ✔ everywhere and warns about swapped keys and look-alike accounts (encrypted list the server cannot read or forge) |
 | Kill switches | Revoke all of your own public links, or (administrators) every link on the server; shell commands for break-glass link revocation and user offboarding |
 | Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
 | Clients | Web app (no build step, no npm dependencies) and `noddanas-cli` (Go) |

@@ -387,3 +387,40 @@ func TestValidateName(t *testing.T) {
 		}
 	}
 }
+
+func TestContacts(t *testing.T) {
+	alice, _, _, _ := NewAccount(strings.Repeat("a", 32), "alice passphrase!")
+	bob, _, _, _ := NewAccount(strings.Repeat("b", 32), "bob passphrase!!")
+	list := &Contacts{V: 1, Contacts: map[string]Contact{
+		bob.UserID: {FP: bob.Fingerprint(), Name: "Bob", Email: "bob@example.test", VerifiedAt: 1700000000000},
+	}}
+	sealed, err := alice.SealContacts(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := alice.OpenContacts(sealed)
+	if err != nil || got.Contacts[bob.UserID].FP != bob.Fingerprint() {
+		t.Fatalf("round trip: %+v %v", got, err)
+	}
+	// Bound to its owner: another account cannot open it, and the server
+	// cannot hand Alice's list to Bob or alter it.
+	if _, err := bob.OpenContacts(sealed); err == nil {
+		t.Fatal("another user opened the contact list")
+	}
+	raw, _ := UnB64(sealed)
+	raw[len(raw)/2] ^= 1
+	if _, err := alice.OpenContacts(B64(raw)); err == nil {
+		t.Fatal("tampered contact list accepted")
+	}
+	for name, bad := range map[string]*Contacts{
+		"version":     {V: 2, Contacts: map[string]Contact{}},
+		"nil map":     {V: 1},
+		"bad user id": {V: 1, Contacts: map[string]Contact{"__proto__": {FP: bob.Fingerprint(), VerifiedAt: 1}}},
+		"bad fp":      {V: 1, Contacts: map[string]Contact{bob.UserID: {FP: "zz", VerifiedAt: 1}}},
+		"no time":     {V: 1, Contacts: map[string]Contact{bob.UserID: {FP: bob.Fingerprint()}}},
+	} {
+		if _, err := alice.SealContacts(bad); err == nil {
+			t.Errorf("%s: sealed", name)
+		}
+	}
+}

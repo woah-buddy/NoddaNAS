@@ -93,9 +93,17 @@ From `SS`:
   spaceId || \0 || memberId)`, `grantSig = Ed25519(granterSigPriv, "L/space-grant-sig" \0 ||
   spaceId || \0 || memberId || \0 || SHA-256(grant))`.
 
-Because the server can see who is in an identity-provider group but cannot create grants,
-members who join through a group mapping receive their key the next time a team manager's
-client is online (it lists pending members and grants them automatically).
+### Granting the key
+
+The server decides who is a *member* (direct memberships, identity-provider group mappings), but
+only a manager's client can create a grant. The member list is the server's claim, and whoever
+controls the server could add to it, so **clients never grant automatically**. A manager's client
+lists members who have access but no grant ("waiting for the team key"), with each person's name
+and email as the server reports them, how the server says they joined, their key fingerprint and
+their verification status (§8). It grants only after the manager confirms each person, or
+confirms a bulk grant that lists everyone it covers. A bulk grant always leaves out people
+flagged "key changed" or "look-alike". A key is never granted to a "key changed" user. The Go
+client's `GrantPending` requires an approval callback that is shown each fingerprint.
 
 ## 4. Node keys
 
@@ -190,14 +198,47 @@ Trashing a node attaches `restoreKey = Seal(spacePub, JSON{"nk","name","kind"}, 
 SHA-256(restoreKey))`. This lets the space owner restore the item (and see its name) even if
 its original folder has since been purged.
 
+## 8. Verified contacts
+
+Users compare key fingerprints out of band (in person or on a call) and mark the other person
+verified. The list of verified people is sealed so that the server stores it but cannot read,
+forge or swap it:
+
+- `K_contacts = HKDF(MK, info = "L/mk/contacts")`;
+- `contacts = GCM(K_contacts, JSON, aad = "L/contacts" \0 || userId)`, base64url, at most 46 KiB
+  (about 300 people);
+- `JSON = {"v":1,"contacts":{"<userId>":{"fp","name","email"?,"verifiedAt"}}}`: the fingerprint,
+  name and email as shown when verified, and the time in Unix milliseconds.
+
+The server keeps one sealed list per user with a revision number. A save must name the
+revision it replaces, so two devices cannot silently overwrite each other: on a conflict the
+client re-applies its change to the newer list. The server can withhold the list or serve an
+older copy. That leaves people "not verified" (or brings back a verification the user had
+removed), but it can never make an unverified person appear verified.
+
+Clients classify every person they show:
+
+| Level | Condition | Client behaviour |
+|---|---|---|
+| verified | The user ID is in the list, and its current fingerprint matches | ✔ badge |
+| changed | The user ID is in the list, but the fingerprint differs | Red warning; refuse to share with them or grant them a team key. Published keys never change, so this means tampering. |
+| look-alike | A different user ID whose name or email matches a verified contact's after folding case, accents, spacing, punctuation, invisible characters and common homoglyphs (Cyrillic and Greek look-alikes; `0`→`o`; `1`, `i` and `l` as one class) | Red "possible impersonation" warning; extra confirmation before sharing or granting |
+| unverified | Anything else | Neutral badge with a "Verify…" action |
+
+Name matching only produces warnings; it never grants anything. Only the fingerprint
+comparison establishes identity.
+
 ## Trust in the key directory
 
 Clients fetch other users' public keys from the server. A malicious server could substitute its
-own keys when Alice shares with Bob (a machine-in-the-middle on key distribution), the same
-limitation every E2EE system without key transparency has. Users can compare fingerprints
-out of band (shown in Settings and in the share dialog), as with Signal's safety numbers. All
-other server misbehaviour (swapping keys, names or content between nodes; truncating or
-reordering content; forging grants) is detected by the AADs, commitments and signatures above.
+own keys, or create a look-alike account, when Alice shares with Bob (a machine-in-the-middle on
+key distribution), the same limitation every E2EE system without key transparency has. Verified
+contacts (§8) turn a one-time out-of-band fingerprint comparison into lasting protection. After
+Bob verifies Alice, substituted keys show "key changed" and look-alike accounts show
+"possible impersonation", wherever Alice appears. Fingerprints are shown in Settings, in the
+verification dialog, and in every share and grant confirmation. All other server misbehaviour
+(swapping keys, names or content between nodes; truncating or reordering content; forging
+grants) is detected by the AADs, commitments and signatures above.
 
 ## What the server can still see
 

@@ -50,6 +50,8 @@ IDs because they are bound into the encryption.
 | `PUT /api/v1/keys` | *session*. Replace the bundle (e.g. new passphrase); public keys must be unchanged |
 | `GET /api/v1/users/{id}/keys` | A user's public keys and display name |
 | `GET /api/v1/users/lookup?email=` | Find a user by verified email |
+| `GET /api/v1/contacts` | Your sealed verified-contacts list (E2EE §8): `{"contacts": "<base64url or empty>", "revision": n}` |
+| `PUT /api/v1/contacts` | `{"contacts", "revision"}` replaces it if `revision` is still current, and returns `{"revision"}`; 412 if another device saved first. Not available to read-only credentials. |
 | `GET/POST /api/v1/app-passwords`, `DELETE /api/v1/app-passwords/{id}` | *session* |
 | `POST /api/v1/sessions/revoke-all` | *session* |
 
