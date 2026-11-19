@@ -521,14 +521,14 @@ func (s *Store) DeleteSpace(ctx context.Context, spaceID string) error {
 // ---- nodes ---------------------------------------------------------------------------
 
 const nodeCols = `id, space_id, coalesce(parent_id, ''), kind, name_enc, name_hash, coalesce(wrapped_key, ''),
-	size, sha256, coalesce(version_id, ''), created_at, created_by, modified_at, modified_by, revision,
+	size, plain_size, sha256, coalesce(version_id, ''), created_at, created_by, modified_at, modified_by, revision,
 	trashed_at, coalesce(trashed_by, ''), coalesce(restore_key, ''), coalesce(restore_sig, '')`
 
 func scanNode(row pgx.Row) (*domain.Node, error) {
 	n := &domain.Node{}
 	var kind string
 	err := row.Scan(&n.ID, &n.SpaceID, &n.ParentID, &kind, &n.NameEnc, &n.NameHash, &n.WrappedKey, &n.Size,
-		&n.SHA256, &n.VersionID, &n.CreatedAt, &n.CreatedBy, &n.ModifiedAt, &n.ModifiedBy, &n.Revision,
+		&n.PlainSize, &n.SHA256, &n.VersionID, &n.CreatedAt, &n.CreatedBy, &n.ModifiedAt, &n.ModifiedBy, &n.Revision,
 		&n.TrashedAt, &n.TrashedBy, &n.RestoreKey, &n.RestoreSig)
 	n.Kind = domain.Kind(kind)
 	return n, mapErr(err)
@@ -552,10 +552,10 @@ func scanNodes(rows pgx.Rows, err error) ([]*domain.Node, error) {
 
 func insertNode(ctx context.Context, tx pgx.Tx, n *domain.Node) error {
 	_, err := tx.Exec(ctx, `INSERT INTO nodes (id, space_id, parent_id, kind, name_enc, name_hash, wrapped_key, size,
-			sha256, version_id, created_at, created_by, modified_at, modified_by, revision)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			plain_size, sha256, version_id, created_at, created_by, modified_at, modified_by, revision)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		n.ID, n.SpaceID, nullable(n.ParentID), string(n.Kind), n.NameEnc, n.NameHash, nullable(n.WrappedKey), n.Size,
-		n.SHA256, nullable(n.VersionID), n.CreatedAt, n.CreatedBy, n.ModifiedAt, n.ModifiedBy, n.Revision)
+		n.PlainSize, n.SHA256, nullable(n.VersionID), n.CreatedAt, n.CreatedBy, n.ModifiedAt, n.ModifiedBy, n.Revision)
 	return err
 }
 
@@ -767,10 +767,10 @@ func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Ver
 				return err
 			}
 		} else {
-			tag, err := tx.Exec(ctx, `UPDATE nodes SET size=$2, sha256=$3, version_id=$4, modified_at=$5, modified_by=$6,
-					revision = revision + 1
-				WHERE id=$1 AND revision=$7 AND trashed_at IS NULL AND kind='file'`,
-				n.ID, n.Size, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy, expectedRev)
+			tag, err := tx.Exec(ctx, `UPDATE nodes SET size=$2, plain_size=$3, sha256=$4, version_id=$5, modified_at=$6,
+					modified_by=$7, revision = revision + 1
+				WHERE id=$1 AND revision=$8 AND trashed_at IS NULL AND kind='file'`,
+				n.ID, n.Size, n.PlainSize, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy, expectedRev)
 			if err != nil {
 				return err
 			}

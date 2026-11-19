@@ -510,7 +510,8 @@ type Node struct {
 	NameEnc    string    `json:"nameEnc"`
 	NameHash   string    `json:"nameHash"`
 	WrappedKey string    `json:"wrappedKey"`
-	Size       int64     `json:"size"`
+	Size       int64     `json:"size"`      // stored (encrypted) bytes
+	PlainSize  int64     `json:"plainSize"` // plaintext bytes
 	SHA256     string    `json:"sha256"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 	CreatedBy  string    `json:"createdBy"`

@@ -141,7 +141,7 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	now := s.now()
 	v := &domain.Version{ID: secure.NewID(), SpaceID: target.space.ID, BlobKey: blobKey, Size: total,
 		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID}
-	n, err := s.commit(ctx, p, target, &req, v)
+	n, err := s.commit(ctx, p, target, &req, v, prefix.Size)
 	if err != nil {
 		return fail(err)
 	}
@@ -150,7 +150,7 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	return n, nil
 }
 
-func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req *UploadRequest, v *domain.Version) (*domain.Node, error) {
+func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req *UploadRequest, v *domain.Version, plainSize int64) (*domain.Node, error) {
 	var n domain.Node
 	isNew := t.existing == nil
 	rev := req.Revision
@@ -165,7 +165,7 @@ func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req 
 		}
 	}
 	v.NodeID = n.ID
-	n.Size, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy = v.Size, v.SHA256, v.ID, v.CreatedAt, p.UserID
+	n.Size, n.PlainSize, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy = v.Size, plainSize, v.SHA256, v.ID, v.CreatedAt, p.UserID
 	if err := s.store.CommitContent(ctx, &n, v, isNew, rev); err != nil {
 		if isNew {
 			return nil, s.nameConflict(ctx, err, n.ParentID, n.NameHash)

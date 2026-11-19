@@ -9,6 +9,7 @@
           --accent: #6b9bff; --accent-text: #0d0d10; --danger: #ff7b7b; --row-hover: #26262d; }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
@@ -55,6 +56,10 @@ form.stack label { display: grid; gap: 4px; font-size: 13px; color: var(--muted)
 .error { color: var(--danger); }
 .progress { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 4px; }
 .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.panel.narrow { max-width: 520px; margin: 0 auto; }
+.toolbar.centered { justify-content: center; }
+dialog h3, .panel h2 { font-size: 16px; margin: 18px 0 8px; }
+code { font-family: ui-monospace, monospace; background: var(--bg); padding: 2px 6px; border-radius: 5px; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text);
          color: var(--bg); padding: 10px 16px; border-radius: 8px; max-width: 90vw; }
 .center { text-align: center; padding: 48px 16px; }

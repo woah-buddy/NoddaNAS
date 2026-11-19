@@ -23,7 +23,7 @@ func (c *Client) Resolve(ctx context.Context, path string) (*Node, error) {
 	}
 	cur := &Node{ID: me.PersonalSpace.RootID, Kind: "folder", SpaceID: me.PersonalSpace.ID}
 	for _, seg := range strings.Split(strings.Trim(path, "/"), "/") {
-		if seg == "" {
+		if seg == "" || seg == "." {
 			continue
 		}
 		kids, err := c.List(ctx, cur.ID)

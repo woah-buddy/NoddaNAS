@@ -90,7 +90,8 @@ CREATE TABLE nodes (
     name_enc    text NOT NULL,
     name_hash   text COLLATE "C" NOT NULL,
     wrapped_key text,
-    size        bigint NOT NULL DEFAULT 0 CHECK (size >= 0),
+    size        bigint NOT NULL DEFAULT 0 CHECK (size >= 0),  -- stored (encrypted) bytes
+    plain_size  bigint NOT NULL DEFAULT 0 CHECK (plain_size >= 0), -- from the container header
     sha256      text NOT NULL DEFAULT '',
     version_id  text,
     created_at  timestamptz NOT NULL,

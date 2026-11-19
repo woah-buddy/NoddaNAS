@@ -99,6 +99,7 @@ type nodeView struct {
 	NameHash   string     `json:"nameHash,omitempty"`
 	WrappedKey string     `json:"wrappedKey,omitempty"`
 	Size       int64      `json:"size"`
+	PlainSize  int64      `json:"plainSize"`
 	SHA256     string     `json:"sha256,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	CreatedBy  string     `json:"createdBy"`
@@ -116,7 +117,7 @@ type nodeView struct {
 func viewNode(n *domain.Node) nodeView {
 	return nodeView{
 		ID: n.ID, ParentID: n.ParentID, SpaceID: n.SpaceID, Kind: string(n.Kind), NameEnc: n.NameEnc,
-		NameHash: n.NameHash, WrappedKey: n.WrappedKey, Size: n.Size, SHA256: n.SHA256, CreatedAt: n.CreatedAt,
+		NameHash: n.NameHash, WrappedKey: n.WrappedKey, Size: n.Size, PlainSize: n.PlainSize, SHA256: n.SHA256, CreatedAt: n.CreatedAt,
 		CreatedBy: n.CreatedBy, ModifiedAt: n.ModifiedAt, ModifiedBy: n.ModifiedBy, Revision: n.Revision,
 		TrashedAt: n.TrashedAt, TrashedBy: n.TrashedBy, RestoreKey: n.RestoreKey, RestoreSig: n.RestoreSig,
 	}
@@ -145,12 +146,13 @@ type publicNodeView struct {
 	NameEnc    string    `json:"nameEnc,omitempty"`
 	WrappedKey string    `json:"wrappedKey,omitempty"`
 	Size       int64     `json:"size"`
+	PlainSize  int64     `json:"plainSize"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 }
 
 func viewPublic(n *domain.Node) publicNodeView {
 	return publicNodeView{ID: n.ID, ParentID: n.ParentID, Kind: string(n.Kind), NameEnc: n.NameEnc,
-		WrappedKey: n.WrappedKey, Size: n.Size, ModifiedAt: n.ModifiedAt}
+		WrappedKey: n.WrappedKey, Size: n.Size, PlainSize: n.PlainSize, ModifiedAt: n.ModifiedAt}
 }
 
 type keysView struct {

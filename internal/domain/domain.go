@@ -27,7 +27,8 @@ type Node struct {
 	NameEnc    string // client-encrypted name (empty for roots)
 	NameHash   string // client-computed keyed hash, unique per folder
 	WrappedKey string // node key wrapped under the parent's key (empty for roots)
-	Size       int64  // current container size (files)
+	Size       int64  // current container size in bytes (what quota counts)
+	PlainSize  int64  // plaintext size declared in the container header
 	SHA256     string // current container's SHA-256 (files)
 	VersionID  string
 	CreatedAt  time.Time
