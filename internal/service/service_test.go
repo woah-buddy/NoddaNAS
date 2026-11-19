@@ -17,14 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
 	"github.com/woah-buddy/NoddaNAS/internal/blobcrypt"
 	"github.com/woah-buddy/NoddaNAS/internal/domain"
 	"github.com/woah-buddy/NoddaNAS/internal/secure"
 	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/store/postgres"
+	"github.com/woah-buddy/NoddaNAS/internal/testutil"
 )
 
 // These tests run against a real PostgreSQL so the SQL that enforces
@@ -39,42 +37,9 @@ type env struct {
 
 func newEnv(t *testing.T, mutate ...func(*service.Config)) *env {
 	t.Helper()
-	dsn := os.Getenv("NODDANAS_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("NODDANAS_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	schema := "t_" + secure.NewID()[:16]
-	admin, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
-		admin.Close(context.Background())
-	})
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
-	}
-	st, err := postgres.Open(ctx, dsn+sep+"search_path="+schema)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(st.Close)
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
+	st := testutil.Postgres(t)
 	root := t.TempDir()
 	blobs, err := fsblob.New(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	line, _ := blobcrypt.GenerateKeyLine("test")
-	keys, err := blobcrypt.ParseKeyring([]byte(line))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +49,7 @@ func newEnv(t *testing.T, mutate ...func(*service.Config)) *env {
 		m(&cfg)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &env{svc: service.New(st, blobs, keys, cfg, log), blobRoot: root, ctx: ctx}
+	return &env{svc: service.New(st, blobs, testutil.Keyring(t), cfg, log), blobRoot: root, ctx: context.Background()}
 }
 
 type user struct {
@@ -224,7 +189,7 @@ func TestOwnerFileLifecycle(t *testing.T) {
 	must[*domain.Node](t)(e.svc.Update(e.ctx, a.p, f.ID, service.UpdateRequest{Name: &name}))
 
 	me := must[*domain.User](t)(e.svc.Me(e.ctx, a.p))
-	if want := int64(len("hello v1") * 2 + len("hello v2")); me.UsedBytes != want {
+	if want := int64(len("hello v1")*2 + len("hello v2")); me.UsedBytes != want {
 		t.Fatalf("used = %d, want %d (all versions count)", me.UsedBytes, want)
 	}
 }
