@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/client"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/testutil"
+	"github.com/woah-buddy/FrontDir/internal/client"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/testutil"
 )
 
 // TestDisasterRecovery is the "the building burned down" drill. It runs a
@@ -39,7 +39,7 @@ func TestDisasterRecovery(t *testing.T) {
 	store1, schema1 := testutil.PostgresSchema(t)
 	data1 := t.TempDir()
 	logs := &lockedBuffer{}
-	idp := newFakeOIDC(t) // the identity provider survives the fire; NoddaNAS does not
+	idp := newFakeOIDC(t) // the identity provider survives the fire; FrontDir does not
 	h1 := newHarnessWith(t, harnessOpts{store: store1, dataDir: data1, oidc: idp, logs: logs})
 
 	// Everything a user entrusts to the system, each made unique so that a

@@ -22,12 +22,12 @@ jobs:
         image: postgres:18-alpine
         env:
           POSTGRES_PASSWORD: ci
-          POSTGRES_DB: noddanas_test
+          POSTGRES_DB: frontdir_test
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 20
     env:
-      NODDANAS_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/noddanas_test?sslmode=disable
+      FRONTDIR_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/frontdir_test?sslmode=disable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,7 +60,7 @@ jobs:
           npm install --global --ignore-scripts playwright@1.63.0
           npx --yes playwright@1.63.0 install --with-deps chromium
       - name: Go and WebCrypto implementations agree byte-for-byte
-        run: NODDANAS_BROWSER_TEST=1 NODE_PATH="$(npm root -g)" go test -count=1 -run TestBrowserInterop -v ./internal/e2ee/
+        run: FRONTDIR_BROWSER_TEST=1 NODE_PATH="$(npm root -g)" go test -count=1 -run TestBrowserInterop -v ./internal/e2ee/
 
   lint:
     name: Lint
@@ -122,18 +122,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Build
-        run: docker build --build-arg VERSION=${{ github.sha }} -t noddanas:ci .
+        run: docker build --build-arg VERSION=${{ github.sha }} -t frontdir:ci .
       - name: Smoke test (non-root, read-only root filesystem)
         run: |
-          test "$(docker inspect -f '{{.Config.User}}' noddanas:ci)" = "65532:65532"
-          docker run --rm --read-only --cap-drop ALL noddanas:ci version
+          test "$(docker inspect -f '{{.Config.User}}' frontdir:ci)" = "65532:65532"
+          docker run --rm --read-only --cap-drop ALL frontdir:ci version
       - name: Trivy image scan
         run: >
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2
-          image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed noddanas:ci
+          image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed frontdir:ci
 
   # Brings up the real Docker Compose stack the way docs/ADMIN_GUIDE.md §3
-  # describes (secrets script, PostgreSQL, NoddaNAS, Caddy), then exercises
+  # describes (secrets script, PostgreSQL, FrontDir, Caddy), then exercises
   # settings, operator commands and the documented backup/restore commands.
   compose:
     name: Docker Compose stack (end to end)
@@ -152,11 +152,11 @@ jobs:
       - name: Configure a throwaway instance
         run: |
           cat > .env <<'EOF'
-          NODDANAS_HOST=localhost
+          FRONTDIR_HOST=localhost
           OIDC_ISSUER=https://idp.example.invalid
-          OIDC_CLIENT_ID=noddanas
-          ALLOWED_GROUPS=noddanas-users
-          ADMIN_GROUPS=noddanas-admins
+          OIDC_CLIENT_ID=frontdir
+          ALLOWED_GROUPS=frontdir-users
+          ADMIN_GROUPS=frontdir-admins
           TEAM_CREATION=false
           MAX_VERSIONS=5
           LOG_LEVEL=debug
@@ -181,43 +181,43 @@ jobs:
           fi
       - name: Settings from .env reach the server; secrets stay files
         run: |
-          env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose ps -q noddanas)")
-          echo "$env" | grep -qx 'NODDANAS_TEAM_CREATION=false'
-          echo "$env" | grep -qx 'NODDANAS_MAX_VERSIONS=5'
-          echo "$env" | grep -qx 'NODDANAS_LOG_LEVEL=debug'
-          if echo "$env" | grep -q '^NODDANAS_DATABASE_URL='; then
+          env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$(docker compose ps -q frontdir)")
+          echo "$env" | grep -qx 'FRONTDIR_TEAM_CREATION=false'
+          echo "$env" | grep -qx 'FRONTDIR_MAX_VERSIONS=5'
+          echo "$env" | grep -qx 'FRONTDIR_LOG_LEVEL=debug'
+          if echo "$env" | grep -q '^FRONTDIR_DATABASE_URL='; then
             echo "the database URL must only be passed as a file"; exit 1
           fi
       - name: Operator commands run in the container
         run: |
-          docker compose exec -T noddanas /noddanas verify-storage --hash
-          docker compose exec -T noddanas /noddanas revoke-sessions --all
+          docker compose exec -T frontdir /frontdir verify-storage --hash
+          docker compose exec -T frontdir /frontdir revoke-sessions --all
       - name: Web settings commands; settings from .env are locked, the rest default
         run: |
-          docker compose exec -T noddanas /noddanas settings show | tee "$RUNNER_TEMP/settings.txt"
+          docker compose exec -T frontdir /frontdir settings show | tee "$RUNNER_TEMP/settings.txt"
           grep -Eq '^OIDC_ISSUER +server +https://idp.example.invalid' "$RUNNER_TEMP/settings.txt"
           grep -Eq '^MAX_VERSIONS +server +5' "$RUNNER_TEMP/settings.txt"
           grep -Eq '^DEFAULT_QUOTA +default ' "$RUNNER_TEMP/settings.txt"
-          docker compose exec -T noddanas /noddanas settings reset storage
+          docker compose exec -T frontdir /frontdir settings reset storage
       - name: Documented backup and restore commands work (DISASTER_RECOVERY.md)
         run: |
-          docker compose exec -T postgres pg_dump -U noddanas -d noddanas -Fc > "$RUNNER_TEMP/noddanas-db.dump"
-          test -s "$RUNNER_TEMP/noddanas-db.dump"
-          docker compose stop noddanas
-          docker compose exec -T postgres dropdb -U noddanas noddanas
-          docker compose exec -T postgres createdb -U noddanas noddanas
-          docker compose exec -T postgres pg_restore -U noddanas -d noddanas --no-owner < "$RUNNER_TEMP/noddanas-db.dump"
+          docker compose exec -T postgres pg_dump -U frontdir -d frontdir -Fc > "$RUNNER_TEMP/frontdir-db.dump"
+          test -s "$RUNNER_TEMP/frontdir-db.dump"
+          docker compose stop frontdir
+          docker compose exec -T postgres dropdb -U frontdir frontdir
+          docker compose exec -T postgres createdb -U frontdir frontdir
+          docker compose exec -T postgres pg_restore -U frontdir -d frontdir --no-owner < "$RUNNER_TEMP/frontdir-db.dump"
           docker compose up -d --wait --wait-timeout 180
-          docker compose exec -T noddanas /noddanas verify-storage --hash
+          docker compose exec -T frontdir /frontdir verify-storage --hash
       - name: Without a sign-in method the server starts in setup mode
         run: |
           sed -i '/^OIDC_/d' .env
           docker compose up -d --wait --wait-timeout 180
           curl -sk https://localhost/api/v1/auth/methods | grep -q '"setup":true'
-          link=$(docker compose exec -T noddanas /noddanas setup-link | grep -o 'https://localhost/setup#[A-Za-z0-9_-]*')
+          link=$(docker compose exec -T frontdir /frontdir setup-link | grep -o 'https://localhost/setup#[A-Za-z0-9_-]*')
           token=${link#*#}
           test ${#token} -ge 40
-          if docker compose logs noddanas | grep -qF "$token"; then
+          if docker compose logs frontdir | grep -qF "$token"; then
             echo "the setup token must never be logged"; exit 1
           fi
           curl -skf -X POST -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" \

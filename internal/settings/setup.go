@@ -4,22 +4,22 @@ import (
 	"context"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/config"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/config"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
 )
 
 // The one-time setup link.
 //
 // A new server has no sign-in method, so nobody can sign in to configure
 // one: a chicken-and-egg problem. The person who runs the server solves it
-// from the server's shell with `noddanas setup-link`, which prints a link
+// from the server's shell with `frontdir setup-link`, which prints a link
 // that works once:
 //
 //   - The token is 256 random bits. Only its hash is stored, there is at
 //     most one, and it expires after 24 hours.
 //   - It is printed to the operator's terminal only, never logged: the
-//     server log says "run noddanas setup-link", not the link.
+//     server log says "run frontdir setup-link", not the link.
 //   - It sits in the URL fragment (/setup#token), which browsers never send
 //     to servers, proxies or Referer headers; the page reads it and sends it
 //     in a request body.
@@ -46,7 +46,7 @@ func NewSetupLink(ctx context.Context, store Store, fixed *config.Config, now ti
 }
 
 var errBadSetupToken = domain.E(domain.CodeUnauthorized,
-	"this setup link is not valid or has expired; run `noddanas setup-link` on the server for a new one")
+	"this setup link is not valid or has expired; run `frontdir setup-link` on the server for a new one")
 
 func (m *Manager) setupHash(ctx context.Context, token string) (string, error) {
 	if !secure.ValidToken(token) {

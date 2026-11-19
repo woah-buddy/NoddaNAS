@@ -1,6 +1,6 @@
 # Security policy
 
-NoddaNAS is built secure-by-design first; see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for
+FrontDir is built secure-by-design first; see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for
 what it defends against and the risks it accepts.
 
 ## Reporting a vulnerability

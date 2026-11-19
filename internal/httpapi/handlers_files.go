@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 func queryInt(r *http.Request, key string) int64 {
@@ -100,9 +100,9 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request, p serv
 		ID string `json:"id"`
 		entryReq
 	}
-	raw := r.Header.Get("X-NoddaNAS-Entry")
+	raw := r.Header.Get("X-FrontDir-Entry")
 	if len(raw) > 4096 || json.Unmarshal([]byte(raw), &meta) != nil {
-		s.writeError(w, r, domain.E(domain.CodeInvalid, "missing or malformed X-NoddaNAS-Entry header"))
+		s.writeError(w, r, domain.E(domain.CodeInvalid, "missing or malformed X-FrontDir-Entry header"))
 		return
 	}
 	s.upload(w, r, p, service.UploadRequest{ParentID: r.PathValue("id"), NewID: meta.ID, Entry: meta.entryReq.toService()}, http.StatusCreated)
@@ -270,9 +270,9 @@ func (s *Server) serveContainer(w http.ResponseWriter, r *http.Request, c *servi
 	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	h.Set("Cache-Control", "private, no-cache")
 	h.Set("Content-Type", "application/octet-stream")
-	h.Set("Content-Disposition", `attachment; filename="`+c.Node.ID+`.ndne"`)
+	h.Set("Content-Disposition", `attachment; filename="`+c.Node.ID+`.fdenc"`)
 	h.Set("ETag", `"`+c.Version.SHA256+`"`)
-	h.Set("X-NoddaNAS-Version", c.Version.ID)
+	h.Set("X-FrontDir-Version", c.Version.ID)
 	iw := &idleWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: time.Minute}
 	http.ServeContent(iw, r, "", c.Version.CreatedAt, c)
 }

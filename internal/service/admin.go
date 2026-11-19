@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // Administration: people, administrator rights and quotas.
@@ -49,7 +49,7 @@ type UserSummary struct {
 	Email           string
 	Issuer          string
 	Admin           bool // effective
-	AdminGranted    bool // appointed in NoddaNAS (otherwise through a group)
+	AdminGranted    bool // appointed in FrontDir (otherwise through a group)
 	KeysSetUp       bool
 	PersonalSpaceID string
 	QuotaBytes      int64

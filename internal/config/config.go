@@ -1,4 +1,4 @@
-// Package config loads NoddaNAS settings from the environment and defines
+// Package config loads FrontDir settings from the environment and defines
 // the settings an administrator can also change on the web (settings.go).
 //
 // Every secret can be supplied either directly (NAME) or, preferably, as a
@@ -19,12 +19,13 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/theme"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/theme"
 )
 
 // Config is the server's configuration: the server-only settings, plus the
@@ -67,9 +68,14 @@ type Config struct {
 
 // Load reads the configuration from the environment, failing closed on
 // anything missing or unsafe. Having no sign-in method is not an error: the
-// server then starts in setup mode (see `noddanas setup-link`).
+// server then starts in setup mode (see `frontdir setup-link`).
 func Load() (*Config, error) {
 	var errs []error
+	if old := LegacyEnv(); len(old) > 0 {
+		errs = append(errs, fmt.Errorf("FrontDir was called NoddaNAS before: rename these environment variables "+
+			"from NODDANAS_ to FRONTDIR_ (they are no longer read, and ignoring a setting such as allowed groups "+
+			"would fail open): %s", strings.Join(old, ", ")))
+	}
 	req := func(name string) string {
 		v, err := secret(name)
 		if err != nil {
@@ -81,38 +87,38 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Listen:      env("NODDANAS_LISTEN", ":8080"),
-		DataDir:     env("NODDANAS_DATA_DIR", "/data"),
-		WebDAV:      envBool(&errs, "NODDANAS_WEBDAV", true),
-		Worker:      envBool(&errs, "NODDANAS_WORKER", true),
-		AutoMigrate: envBool(&errs, "NODDANAS_AUTO_MIGRATE", true),
-		WebSettings: envBool(&errs, "NODDANAS_WEB_SETTINGS", true),
-		LogLevel:    env("NODDANAS_LOG_LEVEL", "info"),
-		TLSCertFile: os.Getenv("NODDANAS_TLS_CERT_FILE"),
-		TLSKeyFile:  os.Getenv("NODDANAS_TLS_KEY_FILE"),
+		Listen:      env("FRONTDIR_LISTEN", ":8080"),
+		DataDir:     env("FRONTDIR_DATA_DIR", "/data"),
+		WebDAV:      envBool(&errs, "FRONTDIR_WEBDAV", true),
+		Worker:      envBool(&errs, "FRONTDIR_WORKER", true),
+		AutoMigrate: envBool(&errs, "FRONTDIR_AUTO_MIGRATE", true),
+		WebSettings: envBool(&errs, "FRONTDIR_WEB_SETTINGS", true),
+		LogLevel:    env("FRONTDIR_LOG_LEVEL", "info"),
+		TLSCertFile: os.Getenv("FRONTDIR_TLS_CERT_FILE"),
+		TLSKeyFile:  os.Getenv("FRONTDIR_TLS_KEY_FILE"),
 	}
-	c.DatabaseURL = req("NODDANAS_DATABASE_URL")
+	c.DatabaseURL = req("FRONTDIR_DATABASE_URL")
 
-	pub := req("NODDANAS_PUBLIC_URL")
+	pub := req("FRONTDIR_PUBLIC_URL")
 	if pub != "" {
 		u, err := url.Parse(pub)
 		switch {
 		case err != nil || u.Host == "" || u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.User != nil:
-			errs = append(errs, errors.New("NODDANAS_PUBLIC_URL must be an origin like https://files.example.com"))
+			errs = append(errs, errors.New("FRONTDIR_PUBLIC_URL must be an origin like https://files.example.com"))
 		case u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())):
-			errs = append(errs, errors.New("NODDANAS_PUBLIC_URL must use https (plain http is allowed only for localhost)"))
+			errs = append(errs, errors.New("FRONTDIR_PUBLIC_URL must use https (plain http is allowed only for localhost)"))
 		default:
 			u.Path = ""
 			c.PublicURL = u
 		}
 	}
 
-	for _, s := range list("NODDANAS_TRUSTED_PROXIES") {
+	for _, s := range list("FRONTDIR_TRUSTED_PROXIES") {
 		p, err := netip.ParsePrefix(s)
 		if err != nil {
 			a, aerr := netip.ParseAddr(s)
 			if aerr != nil {
-				errs = append(errs, fmt.Errorf("NODDANAS_TRUSTED_PROXIES: invalid %q", s))
+				errs = append(errs, fmt.Errorf("FRONTDIR_TRUSTED_PROXIES: invalid %q", s))
 				continue
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
@@ -121,16 +127,16 @@ func Load() (*Config, error) {
 	}
 
 	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
-		errs = append(errs, errors.New("set both NODDANAS_TLS_CERT_FILE and NODDANAS_TLS_KEY_FILE, or neither"))
+		errs = append(errs, errors.New("set both FRONTDIR_TLS_CERT_FILE and FRONTDIR_TLS_KEY_FILE, or neither"))
 	}
 	if err := loadSAMLKeyPair(c); err != nil {
 		errs = append(errs, err)
 	}
-	if key, err := secret("NODDANAS_SETTINGS_KEY"); err != nil {
+	if key, err := secret("FRONTDIR_SETTINGS_KEY"); err != nil {
 		errs = append(errs, err)
 	} else if key != "" {
 		if c.SettingsKey, err = ParseSettingsKey(key); err != nil {
-			errs = append(errs, fmt.Errorf("NODDANAS_SETTINGS_KEY: %w", err))
+			errs = append(errs, fmt.Errorf("FRONTDIR_SETTINGS_KEY: %w", err))
 		}
 	}
 
@@ -142,11 +148,24 @@ func Load() (*Config, error) {
 	} else {
 		c.OIDC, c.SAML, c.Policy, c.Auth, c.Service, c.Theme = rt.OIDC, rt.SAML, rt.Policy, rt.Auth, rt.Service, rt.Theme
 		if !rt.SignIn() && !c.WebSettings {
-			errs = append(errs, errors.New("no sign-in method is configured, and NODDANAS_WEB_SETTINGS=false means none can be set up on the web: "+
-				"set NODDANAS_OIDC_ISSUER and/or NODDANAS_SAML_IDP_METADATA_URL (or _FILE)"))
+			errs = append(errs, errors.New("no sign-in method is configured, and FRONTDIR_WEB_SETTINGS=false means none can be set up on the web: "+
+				"set FRONTDIR_OIDC_ISSUER and/or FRONTDIR_SAML_IDP_METADATA_URL (or _FILE)"))
 		}
 	}
 	return c, errors.Join(errs...)
+}
+
+// LegacyEnv returns the names (never the values) of environment variables
+// that still use the prefix from before the project was renamed.
+func LegacyEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "NODDANAS_") {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // envValues reads every changeable setting from the environment. Files
@@ -246,9 +265,9 @@ func readLimited(name string, max int64) ([]byte, error) {
 }
 
 func loadSAMLKeyPair(c *Config) error {
-	keyFile, certFile := os.Getenv("NODDANAS_SAML_SP_KEY_FILE"), os.Getenv("NODDANAS_SAML_SP_CERT_FILE")
+	keyFile, certFile := os.Getenv("FRONTDIR_SAML_SP_KEY_FILE"), os.Getenv("FRONTDIR_SAML_SP_CERT_FILE")
 	if (keyFile == "") != (certFile == "") {
-		return errors.New("set both NODDANAS_SAML_SP_KEY_FILE and NODDANAS_SAML_SP_CERT_FILE, or neither")
+		return errors.New("set both FRONTDIR_SAML_SP_KEY_FILE and FRONTDIR_SAML_SP_CERT_FILE, or neither")
 	}
 	if keyFile == "" {
 		return nil

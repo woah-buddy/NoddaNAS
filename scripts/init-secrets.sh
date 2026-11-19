@@ -17,7 +17,7 @@ if [ ! -f "$dir/postgres_password" ]; then
 	echo "created $dir/postgres_password"
 fi
 if [ ! -f "$dir/database_url" ]; then
-	printf 'postgres://noddanas:%s@postgres:5432/noddanas?sslmode=disable\n' "$(cat "$dir/postgres_password")" > "$dir/database_url"
+	printf 'postgres://frontdir:%s@postgres:5432/frontdir?sslmode=disable\n' "$(cat "$dir/postgres_password")" > "$dir/database_url"
 	echo "created $dir/database_url"
 fi
 if [ ! -f "$dir/settings_key" ]; then
@@ -30,7 +30,7 @@ if [ ! -f "$dir/oidc_client_secret" ]; then
 fi
 
 chmod 0400 "$dir"/*
-# The NoddaNAS container runs as UID/GID 65532: hand its secrets to that user.
+# The FrontDir container runs as UID/GID 65532: hand its secrets to that user.
 if [ "$(id -u)" = 0 ]; then
 	chown 65532:65532 "$dir"/database_url "$dir"/oidc_client_secret "$dir"/settings_key
 	chown 70:70 "$dir"/postgres_password 2>/dev/null || true # postgres (alpine) user

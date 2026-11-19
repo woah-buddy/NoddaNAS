@@ -1,8 +1,10 @@
-// Browser implementation of NoddaNAS end-to-end encryption (docs/E2EE.md v1),
+// Browser implementation of FrontDir end-to-end encryption (docs/E2EE.md v1),
 // using only the WebCrypto API: X25519, Ed25519, HKDF/PBKDF2/HMAC-SHA-256 and
 // AES-256-GCM. The Go implementation (internal/e2ee) follows the same spec;
 // interoperability tests check that each reads what the other writes.
 
+// Format v1 label prefix. It keeps the project's former name on purpose:
+// changing it would make every existing file unreadable (docs/E2EE.md).
 const L = 'noddanas/e2ee/v1/';
 const te = new TextEncoder();
 const td = new TextDecoder('utf-8', { fatal: true });
@@ -476,7 +478,7 @@ export async function encryptFile(blob, { nk, spaceId, spacePub, meta, signer },
 // parseContainer reads the prefix of a container held in a Blob.
 export async function parseContainer(blob) {
   const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
-  if (head.length < 12 || td.decode(head.subarray(0, 8)) !== MAGIC) throw new E2EEError('not a NoddaNAS encrypted file');
+  if (head.length < 12 || td.decode(head.subarray(0, 8)) !== MAGIC) throw new E2EEError('not a FrontDir encrypted file');
   const hl = new DataView(head.buffer).getUint32(8);
   if (hl === 0 || hl > 65536) throw new E2EEError('malformed container');
   const prefix = new Uint8Array(await blob.slice(0, 12 + hl).arrayBuffer());

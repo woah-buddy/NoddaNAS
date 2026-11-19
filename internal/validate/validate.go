@@ -14,7 +14,7 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 // MaxNameBytes matches common filesystem limits so names round-trip through

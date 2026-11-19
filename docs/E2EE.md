@@ -1,8 +1,8 @@
 # End-to-end encryption specification (v1)
 
-This is the normative description of NoddaNAS's end-to-end encryption. Two independent
+This is the normative description of FrontDir's end-to-end encryption. Two independent
 implementations follow it: the browser client (`web/static/e2ee.js`, WebCrypto) and the Go
-client library (`internal/e2ee`, used by the `noddanas-cli` tool and the test suite). The
+client library (`internal/e2ee`, used by the `frontdir-cli` tool and the test suite). The
 interoperability tests check that each can read what the other wrote.
 
 ## Goals
@@ -23,6 +23,14 @@ interoperability tests check that each can read what the other wrote.
 - `GCM(k, pt, aad)`: AES-256-GCM with a fresh random 96-bit nonce; output `nonce || ct || tag`.
 - Every label below is ASCII and begins with `noddanas/e2ee/v1/`, abbreviated `L/`. Labels joined
   with IDs use a single NUL byte `\0` as separator. IDs are 32 lowercase hex characters.
+- **Why "noddanas"?** FrontDir was called NoddaNAS when this format was defined. Labels, the
+  container magic `NDNSE2E1`, and the server's token-hash labels (`noddanas/session/v1` and
+  similar) are inputs to key derivation, authenticated data and hashes, so changing them would
+  make every existing file, backup, link and session unreadable or invalid. They are fixed
+  identifiers of format v1, not branding, and stay as they are. Names that are only read by a
+  parser did change, and the old ones are still accepted: backups use `.fdenc` (`.ndne` before),
+  mirror metadata `_frontdir-space.json` / `_frontdir-folder.json` and format tags such as
+  `frontdir-keys/v1` (`noddanas-...` before), and app passwords start with `fd_` (`ndn_` before).
 
 ## 1. Account keys
 
@@ -131,7 +139,7 @@ descendants are untouched.
 
 ## 5. File containers
 
-Each stored file version is one self-contained container (`.ndne` when exported):
+Each stored file version is one self-contained container (`.fdenc` when exported):
 
 ```
 offset   size  field

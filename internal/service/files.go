@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // NodeInfo is a node plus the caller's effective permission on it.

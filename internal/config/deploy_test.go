@@ -14,10 +14,10 @@ import (
 // does not let .env change, and why. Everything else the server reads must
 // be passed through, or setting it in .env would be silently ignored.
 var fixedInCompose = map[string]string{
-	"NODDANAS_LISTEN":        "Caddy proxies to port 8080",
-	"NODDANAS_DATA_DIR":      "the noddanas-data volume is mounted at /data",
-	"NODDANAS_TLS_CERT_FILE": "Caddy terminates TLS",
-	"NODDANAS_TLS_KEY_FILE":  "Caddy terminates TLS",
+	"FRONTDIR_LISTEN":        "Caddy proxies to port 8080",
+	"FRONTDIR_DATA_DIR":      "the frontdir-data volume is mounted at /data",
+	"FRONTDIR_TLS_CERT_FILE": "Caddy terminates TLS",
+	"FRONTDIR_TLS_KEY_FILE":  "Caddy terminates TLS",
 }
 
 func readFile(t *testing.T, path string) string {
@@ -29,7 +29,7 @@ func readFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// settingsRead returns every NODDANAS_* variable this package reads (each
+// settingsRead returns every FRONTDIR_* variable this package reads (each
 // appears as a whole string literal in its non-test source files).
 func settingsRead(t *testing.T) []string {
 	t.Helper()
@@ -39,7 +39,7 @@ func settingsRead(t *testing.T) []string {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
-		for _, m := range regexp.MustCompile(`"(NODDANAS_[A-Z0-9_]+)"`).FindAllStringSubmatch(readFile(t, f), -1) {
+		for _, m := range regexp.MustCompile(`"(FRONTDIR_[A-Z0-9_]+)"`).FindAllStringSubmatch(readFile(t, f), -1) {
 			seen[m[1]] = true
 		}
 	}
@@ -54,13 +54,13 @@ func settingsRead(t *testing.T) []string {
 	return out
 }
 
-// noddanasService returns the noddanas service's section of compose.yaml.
-func noddanasService(t *testing.T) string {
+// frontdirService returns the frontdir service's section of compose.yaml.
+func frontdirService(t *testing.T) string {
 	t.Helper()
 	compose := readFile(t, "../../deploy/compose/compose.yaml")
-	start := strings.Index(compose, "\n  noddanas:\n")
+	start := strings.Index(compose, "\n  frontdir:\n")
 	if start < 0 {
-		t.Fatal("no noddanas service in compose.yaml")
+		t.Fatal("no frontdir service in compose.yaml")
 	}
 	rest := compose[start+1:]
 	if end := regexp.MustCompile(`\n  [a-z][a-z0-9-]*:\n`).FindStringIndex(rest[1:]); end != nil {
@@ -70,9 +70,9 @@ func noddanasService(t *testing.T) string {
 }
 
 func TestComposePassesEverySetting(t *testing.T) {
-	compose := noddanasService(t)
+	compose := frontdirService(t)
 	wired := map[string]bool{}
-	for _, m := range regexp.MustCompile(`(?m)^\s+(NODDANAS_[A-Z0-9_]+):`).FindAllStringSubmatch(compose, -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\s+(FRONTDIR_[A-Z0-9_]+):`).FindAllStringSubmatch(compose, -1) {
 		wired[m[1]] = true
 	}
 	read := map[string]bool{}
@@ -119,8 +119,8 @@ func TestAdminGuideDocumentsEverySetting(t *testing.T) {
 // empty string. Empty must therefore mean exactly what unset means.
 func TestEmptyComposeSettingsMeanDefaults(t *testing.T) {
 	base := map[string]string{
-		"NODDANAS_PUBLIC_URL": "https://files.example.com", "NODDANAS_DATABASE_URL": "postgres://x",
-		"NODDANAS_OIDC_ISSUER": "https://idp.example.com", "NODDANAS_OIDC_CLIENT_ID": "c",
+		"FRONTDIR_PUBLIC_URL": "https://files.example.com", "FRONTDIR_DATABASE_URL": "postgres://x",
+		"FRONTDIR_OIDC_ISSUER": "https://idp.example.com", "FRONTDIR_OIDC_CLIENT_ID": "c",
 	}
 	load := func(extra map[string]string) *Config {
 		t.Helper()
@@ -142,7 +142,7 @@ func TestEmptyComposeSettingsMeanDefaults(t *testing.T) {
 	}
 	// Every setting compose.yaml passes with an empty default (${X:-}).
 	empty := map[string]string{}
-	for _, m := range regexp.MustCompile(`(?m)^\s+(NODDANAS_[A-Z0-9_]+): \$\{[A-Z0-9_]+:-\}\s*$`).FindAllStringSubmatch(noddanasService(t), -1) {
+	for _, m := range regexp.MustCompile(`(?m)^\s+(FRONTDIR_[A-Z0-9_]+): \$\{[A-Z0-9_]+:-\}\s*$`).FindAllStringSubmatch(frontdirService(t), -1) {
 		if _, required := base[m[1]]; !required {
 			empty[m[1]] = ""
 		}

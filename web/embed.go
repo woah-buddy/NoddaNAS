@@ -1,4 +1,4 @@
-// Package web embeds the static web client into the NoddaNAS binary, so a
+// Package web embeds the static web client into the FrontDir binary, so a
 // deployment is a single file with no separate asset server to secure.
 package web
 

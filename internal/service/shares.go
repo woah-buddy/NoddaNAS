@@ -6,9 +6,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // NewUserShare is a share created by a client: it sealed the node key and
@@ -268,7 +268,7 @@ func (s *Service) OperatorFindUser(ctx context.Context, emailOrID string) (*doma
 }
 
 // OperatorRevokeLinks is the break-glass path for the server operator (the
-// `noddanas revoke-links` command, run with database access). It works even
+// `frontdir revoke-links` command, run with database access). It works even
 // when the web UI or every administrator account is unavailable or
 // compromised. An empty or malformed user ID is rejected (it never means
 // "everyone"); use OperatorRevokeAllLinks for that.

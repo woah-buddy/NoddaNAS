@@ -17,18 +17,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/blob/fsblob"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/testutil"
+	"github.com/woah-buddy/FrontDir/internal/blob/fsblob"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/testutil"
 )
 
 // These tests drive the service exactly as an E2EE client would: every
 // name, key and file they send is encrypted with internal/e2ee, and every
 // read is decrypted and verified. The server only ever sees ciphertext.
-// They run against a real PostgreSQL (NODDANAS_TEST_DATABASE_URL).
+// They run against a real PostgreSQL (FRONTDIR_TEST_DATABASE_URL).
 
 const pass = "correct horse battery staple"
 

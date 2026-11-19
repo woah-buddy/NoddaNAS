@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
-// This file is NoddaNAS's single authorization decision point. Every
+// This file is FrontDir's single authorization decision point. Every
 // operation on a node, from every transport, goes through authorize (or
 // authorizeLink for anonymous public links); every operation on a space
 // goes through spaceAccess.

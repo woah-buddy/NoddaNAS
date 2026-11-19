@@ -11,9 +11,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
-	"github.com/woah-buddy/NoddaNAS/internal/theme"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/theme"
 )
 
 // Settings that an administrator can change from the web admin area as well
@@ -31,7 +31,7 @@ import (
 // Precedence: a non-empty environment variable wins and locks the setting
 // in the web admin area; otherwise the web value; otherwise the default.
 // Sign-in settings lock as a group: OIDC is configured entirely in the
-// environment (NODDANAS_OIDC_ISSUER is set) or entirely on the web, and the
+// environment (FRONTDIR_OIDC_ISSUER is set) or entirely on the web, and the
 // same for SAML, so a deployment never runs on a mix nobody reviewed whole.
 
 // Setting describes one changeable setting.
@@ -67,67 +67,67 @@ var signInGroups = map[string]string{"oidc": "OIDC_ISSUER", "saml": "SAML_IDP_ME
 
 // Registry lists every changeable setting.
 var Registry = []Setting{
-	{Key: "DEFAULT_QUOTA", Env: "NODDANAS_DEFAULT_QUOTA", Group: "storage", Kind: "size", Default: "10GiB", Max: 32,
+	{Key: "DEFAULT_QUOTA", Env: "FRONTDIR_DEFAULT_QUOTA", Group: "storage", Kind: "size", Default: "10GiB", Max: 32,
 		Label: "Default personal storage", Help: "Storage for each new person's personal folder. Existing folders keep theirs; change those under People."},
-	{Key: "DEFAULT_TEAM_QUOTA", Env: "NODDANAS_DEFAULT_TEAM_QUOTA", Group: "storage", Kind: "size", Default: "50GiB", Max: 32,
+	{Key: "DEFAULT_TEAM_QUOTA", Env: "FRONTDIR_DEFAULT_TEAM_QUOTA", Group: "storage", Kind: "size", Default: "50GiB", Max: 32,
 		Label: "Default team folder storage", Help: "Storage for each new team folder."},
-	{Key: "MAX_FILE_SIZE", Env: "NODDANAS_MAX_FILE_SIZE", Group: "storage", Kind: "size", Default: "50GiB", Max: 32,
+	{Key: "MAX_FILE_SIZE", Env: "FRONTDIR_MAX_FILE_SIZE", Group: "storage", Kind: "size", Default: "50GiB", Max: 32,
 		Label: "Largest file", Help: "Uploads larger than this are refused."},
-	{Key: "MAX_VERSIONS", Env: "NODDANAS_MAX_VERSIONS", Group: "storage", Kind: "int", Default: "10", Max: 8,
+	{Key: "MAX_VERSIONS", Env: "FRONTDIR_MAX_VERSIONS", Group: "storage", Kind: "int", Default: "10", Max: 8,
 		Label: "Versions kept per file", Help: "Including the current one (1 to 1000). Lowering it removes older versions as files change."},
-	{Key: "TRASH_RETENTION", Env: "NODDANAS_TRASH_RETENTION", Group: "storage", Kind: "duration", Default: "30d", Max: 32,
+	{Key: "TRASH_RETENTION", Env: "FRONTDIR_TRASH_RETENTION", Group: "storage", Kind: "duration", Default: "30d", Max: 32,
 		Label: "Keep deleted items for", Help: "Items in the trash are deleted for good after this long (at least 1h)."},
-	{Key: "TEAM_CREATION", Env: "NODDANAS_TEAM_CREATION", Group: "storage", Kind: "bool", Default: "true", Max: 8,
+	{Key: "TEAM_CREATION", Env: "FRONTDIR_TEAM_CREATION", Group: "storage", Kind: "bool", Default: "true", Max: 8,
 		Label: "Everyone can create team folders", Help: "If off, only administrators can."},
 
-	{Key: "LINK_DEFAULT_TTL", Env: "NODDANAS_LINK_DEFAULT_TTL", Group: "sharing", Kind: "duration", Default: "30d", Max: 32,
+	{Key: "LINK_DEFAULT_TTL", Env: "FRONTDIR_LINK_DEFAULT_TTL", Group: "sharing", Kind: "duration", Default: "30d", Max: 32,
 		Label: "Public links expire after", Help: "Used when the person sharing does not choose."},
-	{Key: "LINK_MAX_TTL", Env: "NODDANAS_LINK_MAX_TTL", Group: "sharing", Kind: "duration", Default: "365d", Max: 32,
+	{Key: "LINK_MAX_TTL", Env: "FRONTDIR_LINK_MAX_TTL", Group: "sharing", Kind: "duration", Default: "365d", Max: 32,
 		Label: "Longest public link lifetime", Help: "Nobody can create a link that lasts longer."},
 
-	{Key: "ALLOWED_GROUPS", Env: "NODDANAS_ALLOWED_GROUPS", Group: "access", Kind: "list", Max: 4096,
+	{Key: "ALLOWED_GROUPS", Env: "FRONTDIR_ALLOWED_GROUPS", Group: "access", Kind: "list", Max: 4096,
 		Label: "Allowed groups", Help: "Only members of one of these identity-provider groups can sign in. Empty: no group needed."},
-	{Key: "ALLOWED_EMAIL_DOMAINS", Env: "NODDANAS_ALLOWED_EMAIL_DOMAINS", Group: "access", Kind: "list", Max: 4096,
+	{Key: "ALLOWED_EMAIL_DOMAINS", Env: "FRONTDIR_ALLOWED_EMAIL_DOMAINS", Group: "access", Kind: "list", Max: 4096,
 		Label: "Allowed email domains", Help: "Only people with a verified email in one of these domains can sign in. Empty: any."},
-	{Key: "ADMIN_GROUPS", Env: "NODDANAS_ADMIN_GROUPS", Group: "access", Kind: "list", Max: 4096,
+	{Key: "ADMIN_GROUPS", Env: "FRONTDIR_ADMIN_GROUPS", Group: "access", Kind: "list", Max: 4096,
 		Label: "Administrator groups", Help: "Members of these identity-provider groups are administrators. You can also make people administrators under People."},
 
-	{Key: "SESSION_IDLE", Env: "NODDANAS_SESSION_IDLE", Group: "sessions", Kind: "duration", Default: "12h", Max: 32,
+	{Key: "SESSION_IDLE", Env: "FRONTDIR_SESSION_IDLE", Group: "sessions", Kind: "duration", Default: "12h", Max: 32,
 		Label: "Sign out after inactivity", Help: "Between 5m and 30d."},
-	{Key: "SESSION_MAX_AGE", Env: "NODDANAS_SESSION_MAX_AGE", Group: "sessions", Kind: "duration", Default: "7d", Max: 32,
+	{Key: "SESSION_MAX_AGE", Env: "FRONTDIR_SESSION_MAX_AGE", Group: "sessions", Kind: "duration", Default: "7d", Max: 32,
 		Label: "Sign out after", Help: "However active the session is (15m to 365d)."},
 
-	{Key: "OIDC_ISSUER", Env: "NODDANAS_OIDC_ISSUER", Group: "oidc", Kind: "url", Max: 2048,
+	{Key: "OIDC_ISSUER", Env: "FRONTDIR_OIDC_ISSUER", Group: "oidc", Kind: "url", Max: 2048,
 		Label: "Issuer URL", Help: "Your identity provider's issuer, e.g. https://id.example.com/realms/main. Empty turns OIDC sign-in off."},
-	{Key: "OIDC_CLIENT_ID", Env: "NODDANAS_OIDC_CLIENT_ID", Group: "oidc", Kind: "text", Max: 512,
-		Label: "Client ID", Help: "From the client you registered for NoddaNAS."},
-	{Key: "OIDC_CLIENT_SECRET", Env: "NODDANAS_OIDC_CLIENT_SECRET", Group: "oidc", Kind: "secret", Max: 1024,
+	{Key: "OIDC_CLIENT_ID", Env: "FRONTDIR_OIDC_CLIENT_ID", Group: "oidc", Kind: "text", Max: 512,
+		Label: "Client ID", Help: "From the client you registered for FrontDir."},
+	{Key: "OIDC_CLIENT_SECRET", Env: "FRONTDIR_OIDC_CLIENT_SECRET", Group: "oidc", Kind: "secret", Max: 1024,
 		Label: "Client secret", Help: "Stored encrypted and never shown again. Leave empty for a public client."},
-	{Key: "OIDC_SCOPES", Env: "NODDANAS_OIDC_SCOPES", Group: "oidc", Kind: "list", Default: "openid, email, profile", Max: 1024,
+	{Key: "OIDC_SCOPES", Env: "FRONTDIR_OIDC_SCOPES", Group: "oidc", Kind: "list", Default: "openid, email, profile", Max: 1024,
 		Label: "Scopes", Help: "Must include openid."},
-	{Key: "OIDC_GROUPS_CLAIM", Env: "NODDANAS_OIDC_GROUPS_CLAIM", Group: "oidc", Kind: "text", Default: "groups", Max: 128,
+	{Key: "OIDC_GROUPS_CLAIM", Env: "FRONTDIR_OIDC_GROUPS_CLAIM", Group: "oidc", Kind: "text", Default: "groups", Max: 128,
 		Label: "Groups claim", Help: "The ID-token claim that lists the person's groups."},
 
-	{Key: "SAML_IDP_METADATA_URL", Env: "NODDANAS_SAML_IDP_METADATA_URL", Group: "saml", Kind: "url", Max: 2048,
+	{Key: "SAML_IDP_METADATA_URL", Env: "FRONTDIR_SAML_IDP_METADATA_URL", Group: "saml", Kind: "url", Max: 2048,
 		Label: "IdP metadata URL", Help: "An https URL. Set this or the metadata XML below; both empty turns SAML sign-in off."},
-	{Key: "SAML_IDP_METADATA", Env: "NODDANAS_SAML_IDP_METADATA_FILE", File: true, Group: "saml", Kind: "xml", Max: 1 << 20,
+	{Key: "SAML_IDP_METADATA", Env: "FRONTDIR_SAML_IDP_METADATA_FILE", File: true, Group: "saml", Kind: "xml", Max: 1 << 20,
 		Label: "IdP metadata XML", Help: "Paste the metadata document if your IdP has no metadata URL."},
-	{Key: "SAML_ENTITY_ID", Env: "NODDANAS_SAML_ENTITY_ID", Group: "saml", Kind: "text", Max: 1024,
+	{Key: "SAML_ENTITY_ID", Env: "FRONTDIR_SAML_ENTITY_ID", Group: "saml", Kind: "text", Max: 1024,
 		Label: "Our entity ID", Help: "Defaults to our metadata URL. Change it only if your IdP requires a specific value."},
-	{Key: "SAML_TRUST_EMAIL", Env: "NODDANAS_SAML_TRUST_EMAIL", Group: "saml", Kind: "bool", Default: "false", Max: 8,
+	{Key: "SAML_TRUST_EMAIL", Env: "FRONTDIR_SAML_TRUST_EMAIL", Group: "saml", Kind: "bool", Default: "false", Max: 8,
 		Label: "Trust asserted emails", Help: "Turn on only if your IdP verifies email addresses. Needed for sharing by email."},
-	{Key: "SAML_EMAIL_ATTRIBUTES", Env: "NODDANAS_SAML_EMAIL_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
+	{Key: "SAML_EMAIL_ATTRIBUTES", Env: "FRONTDIR_SAML_EMAIL_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
 		Label: "Email attributes", Help: "Empty: common names (email, mail, ...)."},
-	{Key: "SAML_NAME_ATTRIBUTES", Env: "NODDANAS_SAML_NAME_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
+	{Key: "SAML_NAME_ATTRIBUTES", Env: "FRONTDIR_SAML_NAME_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
 		Label: "Name attributes", Help: "Empty: common names (displayName, cn, ...)."},
-	{Key: "SAML_GROUP_ATTRIBUTES", Env: "NODDANAS_SAML_GROUP_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
+	{Key: "SAML_GROUP_ATTRIBUTES", Env: "FRONTDIR_SAML_GROUP_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
 		Label: "Group attributes", Help: "Empty: common names (groups, memberOf, ...)."},
 
-	{Key: "BRAND_NAME", Env: "NODDANAS_BRAND_NAME", Group: "branding", Kind: "text", Default: "NoddaNAS", Max: 256,
+	{Key: "BRAND_NAME", Env: "FRONTDIR_BRAND_NAME", Group: "branding", Kind: "text", Default: "FrontDir", Max: 256,
 		Label: "Name", Help: "Shown in the header and the browser tab."},
-	{Key: "THEME", Env: "NODDANAS_THEME_FILE", File: true, Group: "branding", Kind: "json", Max: 64 << 10,
+	{Key: "THEME", Env: "FRONTDIR_THEME_FILE", File: true, Group: "branding", Kind: "json", Max: 64 << 10,
 		Label: "Theme", Help: "Color tokens as JSON (docs/THEMING.md). Every color is checked for readable contrast."},
-	{Key: "BRAND_LOGO", Env: "NODDANAS_BRAND_LOGO_FILE", File: true, Group: "branding", Kind: "image", Max: 700 << 10,
+	{Key: "BRAND_LOGO", Env: "FRONTDIR_BRAND_LOGO_FILE", File: true, Group: "branding", Kind: "image", Max: 700 << 10,
 		Label: "Logo", Help: "PNG or JPEG, up to 512 KiB and 1 megapixel. It is re-encoded, so only the pixels are kept."},
 }
 

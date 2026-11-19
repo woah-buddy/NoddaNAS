@@ -1,4 +1,4 @@
-module github.com/woah-buddy/NoddaNAS
+module github.com/woah-buddy/FrontDir
 
 go 1.26.0
 

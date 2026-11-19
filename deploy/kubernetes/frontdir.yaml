@@ -1,7 +1,7 @@
-# NoddaNAS on Kubernetes: a hardened reference manifest.
+# FrontDir on Kubernetes: a hardened reference manifest.
 #
 # Prerequisites (created out-of-band, never committed):
-#   kubectl -n noddanas create secret generic noddanas-secrets \
+#   kubectl -n frontdir create secret generic frontdir-secrets \
 #     --from-literal=database_url='postgres://...?...sslmode=verify-full' \
 #     --from-literal=oidc_client_secret='...' \
 #     --from-literal=settings_key="$(openssl rand -base64 32)"
@@ -9,52 +9,52 @@
 # settings_key only encrypts secrets saved in the web admin area; back it up.
 # Settings in the ConfigMap win over (and lock) the web admin area. Omit the
 # OIDC lines to set up sign-in on the web instead:
-#   kubectl -n noddanas exec deploy/noddanas -- /noddanas setup-link
+#   kubectl -n frontdir exec deploy/frontdir -- /frontdir setup-link
 # PostgreSQL: use a managed service or an operator (e.g. CloudNativePG).
 # Storage: more than one replica needs a ReadWriteMany volume (NFS, CephFS,
 # Longhorn RWX, ...). With ReadWriteOnce storage, keep replicas: 1.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: noddanas
+  name: frontdir
   labels:
     pod-security.kubernetes.io/enforce: restricted
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: noddanas
-  namespace: noddanas
-automountServiceAccountToken: false   # NoddaNAS never talks to the Kubernetes API
+  name: frontdir
+  namespace: frontdir
+automountServiceAccountToken: false   # FrontDir never talks to the Kubernetes API
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: noddanas
-  namespace: noddanas
+  name: frontdir
+  namespace: frontdir
 data:
-  NODDANAS_PUBLIC_URL: https://files.example.com
-  NODDANAS_OIDC_ISSUER: https://id.example.com/realms/home
-  NODDANAS_OIDC_CLIENT_ID: noddanas
-  # Or/also SAML: NODDANAS_SAML_IDP_METADATA_URL: https://idp.example.com/metadata
-  NODDANAS_ALLOWED_GROUPS: noddanas-users
-  NODDANAS_ADMIN_GROUPS: noddanas-admins
+  FRONTDIR_PUBLIC_URL: https://files.example.com
+  FRONTDIR_OIDC_ISSUER: https://id.example.com/realms/home
+  FRONTDIR_OIDC_CLIENT_ID: frontdir
+  # Or/also SAML: FRONTDIR_SAML_IDP_METADATA_URL: https://idp.example.com/metadata
+  FRONTDIR_ALLOWED_GROUPS: frontdir-users
+  FRONTDIR_ADMIN_GROUPS: frontdir-admins
   # Quotas, link lifetimes and branding are left to the web admin area here;
   # set them in this ConfigMap to manage (and lock) them as code instead.
-  # NODDANAS_DEFAULT_QUOTA: 10GiB
+  # FRONTDIR_DEFAULT_QUOTA: 10GiB
   # Branding (docs/THEMING.md): mount a ConfigMap holding theme.json and/or
-  # logo.png read-only and point NODDANAS_THEME_FILE / NODDANAS_BRAND_LOGO_FILE
+  # logo.png read-only and point FRONTDIR_THEME_FILE / FRONTDIR_BRAND_LOGO_FILE
   # at it. An invalid theme stops startup with a list of problems.
-  # NODDANAS_BRAND_NAME: Acme Files
+  # FRONTDIR_BRAND_NAME: Acme Files
   # Pod CIDR of your ingress controller, so client IPs are logged and rate
   # limited correctly. Adjust to your cluster.
-  NODDANAS_TRUSTED_PROXIES: 10.0.0.0/8
+  FRONTDIR_TRUSTED_PROXIES: 10.0.0.0/8
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: noddanas-data
-  namespace: noddanas
+  name: frontdir-data
+  namespace: frontdir
 spec:
   accessModes: [ReadWriteOnce]   # ReadWriteMany for replicas > 1
   resources:
@@ -64,19 +64,19 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: noddanas
-  namespace: noddanas
+  name: frontdir
+  namespace: frontdir
 spec:
   replicas: 1
   strategy:
     type: Recreate   # RollingUpdate is fine with ReadWriteMany storage
   selector:
-    matchLabels: {app: noddanas}
+    matchLabels: {app: frontdir}
   template:
     metadata:
-      labels: {app: noddanas}
+      labels: {app: frontdir}
     spec:
-      serviceAccountName: noddanas
+      serviceAccountName: frontdir
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -85,24 +85,24 @@ spec:
         fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
-        - name: noddanas
-          image: ghcr.io/woah-buddy/noddanas:latest   # pin by digest in production
+        - name: frontdir
+          image: ghcr.io/woah-buddy/frontdir:latest   # pin by digest in production
           args: [serve]
           ports:
             - {name: http, containerPort: 8080}
           envFrom:
-            - configMapRef: {name: noddanas}
+            - configMapRef: {name: frontdir}
           env:
-            - {name: NODDANAS_DATABASE_URL_FILE, value: /run/secrets/noddanas/database_url}
-            - {name: NODDANAS_OIDC_CLIENT_SECRET_FILE, value: /run/secrets/noddanas/oidc_client_secret}
-            - {name: NODDANAS_SETTINGS_KEY_FILE, value: /run/secrets/noddanas/settings_key}
+            - {name: FRONTDIR_DATABASE_URL_FILE, value: /run/secrets/frontdir/database_url}
+            - {name: FRONTDIR_OIDC_CLIENT_SECRET_FILE, value: /run/secrets/frontdir/oidc_client_secret}
+            - {name: FRONTDIR_SETTINGS_KEY_FILE, value: /run/secrets/frontdir/settings_key}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: data, mountPath: /data}
-            - {name: secrets, mountPath: /run/secrets/noddanas, readOnly: true}
+            - {name: secrets, mountPath: /run/secrets/frontdir, readOnly: true}
             - {name: tmp, mountPath: /tmp}
           readinessProbe:
             httpGet: {path: /readyz, port: http}
@@ -115,10 +115,10 @@ spec:
             limits: {memory: 512Mi}
       volumes:
         - name: data
-          persistentVolumeClaim: {claimName: noddanas-data}
+          persistentVolumeClaim: {claimName: frontdir-data}
         - name: secrets
           secret:
-            secretName: noddanas-secrets
+            secretName: frontdir-secrets
             defaultMode: 0440   # group-readable via fsGroup; never world-readable
         - name: tmp
           emptyDir: {medium: Memory, sizeLimit: 64Mi}
@@ -126,22 +126,22 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: noddanas
-  namespace: noddanas
+  name: frontdir
+  namespace: frontdir
 spec:
-  selector: {app: noddanas}
+  selector: {app: frontdir}
   ports:
     - {name: http, port: 80, targetPort: http}
 ---
-# Default-deny, then allow only what NoddaNAS needs: ingress from the
+# Default-deny, then allow only what FrontDir needs: ingress from the
 # ingress controller, egress to DNS, PostgreSQL and the OIDC provider (HTTPS).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: noddanas
-  namespace: noddanas
+  name: frontdir
+  namespace: frontdir
 spec:
-  podSelector: {matchLabels: {app: noddanas}}
+  podSelector: {matchLabels: {app: frontdir}}
   policyTypes: [Ingress, Egress]
   ingress:
     - from:

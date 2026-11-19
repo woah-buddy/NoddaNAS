@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/auth"
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/auth"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 // Session, login-request and app-password persistence. Only hashes of the

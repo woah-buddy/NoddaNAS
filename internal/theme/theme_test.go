@@ -28,7 +28,7 @@ func TestContrast(t *testing.T) {
 // Every built-in mode/accent combination passes the same rules operators must meet.
 func TestBuiltinsPass(t *testing.T) {
 	th := Default()
-	if th.Name != "NoddaNAS" || len(th.Accents) != 6 {
+	if th.Name != "FrontDir" || len(th.Accents) != 6 {
 		t.Fatalf("default theme: %+v", th)
 	}
 }
@@ -92,8 +92,8 @@ func TestCSSIsInert(t *testing.T) {
 		t.Fatal("missing high-contrast rules or ETag")
 	}
 	// High contrast is the last layer, so no accent can override it.
-	if !strings.Contains(s, "@layer noddanas-mode, noddanas-accent, noddanas-contrast;") ||
-		strings.Index(s, "@layer noddanas-contrast{") < strings.LastIndex(s, ".swatch") {
+	if !strings.Contains(s, "@layer frontdir-mode, frontdir-accent, frontdir-contrast;") ||
+		strings.Index(s, "@layer frontdir-contrast{") < strings.LastIndex(s, ".swatch") {
 		t.Fatal("layer order wrong")
 	}
 	// Braces balance: no value can open or close a block.

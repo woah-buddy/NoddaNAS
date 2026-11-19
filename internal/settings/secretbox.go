@@ -13,16 +13,18 @@ import (
 
 // Secrets saved from the web admin area (today: the OIDC client secret) are
 // encrypted before they reach the database, with AES-256-GCM under a key
-// that lives only in the server's environment (NODDANAS_SETTINGS_KEY_FILE).
+// that lives only in the server's environment (FRONTDIR_SETTINGS_KEY_FILE).
 //
 // Why bother, when the database is trusted? Because database dumps travel:
 // to backup storage, to a colleague debugging something, into a ticket. The
-// client secret lets whoever holds it act as NoddaNAS towards the identity
+// client secret lets whoever holds it act as FrontDir towards the identity
 // provider. Encrypted, a dump alone does not give it away; the key has to
 // be stolen from the server too.
 //
 // Each value is bound to its setting name (associated data), so a
-// ciphertext copied from one setting to another does not decrypt.
+// ciphertext copied from one setting to another does not decrypt. The
+// labels keep the project's former name on purpose: stored ciphertexts
+// depend on them.
 
 const encPrefix = "enc:v1:"
 

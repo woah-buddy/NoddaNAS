@@ -8,10 +8,10 @@ import (
 	"errors"
 	"io"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/e2ee"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/validate"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
 // UploadRequest describes an end-to-end encrypted container arriving from a
@@ -101,7 +101,7 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	var head bytes.Buffer
 	prefix, err := e2ee.ParsePrefix(io.TeeReader(io.LimitReader(body, 12+e2ee.MaxHeaderLen), &head))
 	if err != nil {
-		return nil, domain.E(domain.CodeInvalid, "body is not a valid NoddaNAS encrypted container")
+		return nil, domain.E(domain.CodeInvalid, "body is not a valid FrontDir encrypted container")
 	}
 	if prefix.Owner.Space != target.space.ID {
 		return nil, domain.E(domain.CodeInvalid, "the container is sealed to a different space")

@@ -15,9 +15,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/secure"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/secure"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 // OIDCConfig configures the OpenID Connect relying party.
@@ -64,7 +64,7 @@ func (p Policy) Check(id service.Identity) error {
 }
 
 // OIDC is a lazily-initialized OIDC client. Discovery happens on first use,
-// so NoddaNAS starts (and passes health checks) even if the IdP container is
+// so FrontDir starts (and passes health checks) even if the IdP container is
 // still booting.
 type OIDC struct {
 	raw    OIDCConfig // as given, to detect changes
@@ -271,7 +271,7 @@ func claimTime(c map[string]json.RawMessage, k string) (time.Time, bool) {
 }
 
 // ErrNotAllowed is shown when the IdP authenticated someone who is not
-// permitted to use this NoddaNAS instance.
+// permitted to use this FrontDir instance.
 var ErrNotAllowed = domain.E(domain.CodeForbidden, "your account is not permitted to use this service")
 
 // LogoutURL returns the IdP's RP-initiated logout URL, or "" if the IdP

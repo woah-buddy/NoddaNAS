@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
-	"github.com/woah-buddy/NoddaNAS/internal/service"
+	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/service"
 )
 
 const maxJSONBody = 64 << 10
@@ -79,7 +79,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 			status = http.StatusInternalServerError
 		}
 		if status == http.StatusUnauthorized && r.Header.Get("Authorization") != "" {
-			w.Header().Set("WWW-Authenticate", `Basic realm="NoddaNAS", charset="UTF-8"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="FrontDir", charset="UTF-8"`)
 		}
 		msg := de.Message
 		if msg == "" {

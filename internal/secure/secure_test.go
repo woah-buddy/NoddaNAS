@@ -14,6 +14,11 @@ func TestTokens(t *testing.T) {
 		t.Fatal("IDs must be 32 hex chars and unique")
 	}
 	ap := NewAppPassword()
+	// App passwords from before the rename (ndn_) stay valid; nothing else does.
+	legacy := LegacyAppPasswordPrefix + strings.TrimPrefix(ap, AppPasswordPrefix)
+	if !ValidAppPassword(legacy) || ValidAppPassword("xx_"+strings.TrimPrefix(ap, AppPasswordPrefix)) {
+		t.Fatal("legacy app password prefix handling is wrong")
+	}
 	if !ValidAppPassword(ap) || ValidAppPassword(strings.TrimPrefix(ap, AppPasswordPrefix)) {
 		t.Fatal("app password validation wrong")
 	}

@@ -1,4 +1,4 @@
-// Package e2ee implements NoddaNAS's end-to-end encryption as specified in
+// Package e2ee implements FrontDir's end-to-end encryption as specified in
 // docs/E2EE.md. It is client-side code: the browser implements the same
 // spec in JavaScript, and this package serves the CLI client and the test
 // suite. The server only ever uses ParsePrefix, to check a container's shape.
@@ -22,7 +22,9 @@ import (
 	"errors"
 )
 
-// Label prefix for every KDF info string, AAD and signature context.
+// Label prefix for every KDF info string, AAD and signature context. It
+// keeps the project's former name on purpose: it is part of format v1, and
+// changing it would make every existing file unreadable (docs/E2EE.md).
 const L = "noddanas/e2ee/v1/"
 
 // ErrAuth means a ciphertext, wrapped key or signature failed verification.

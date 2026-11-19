@@ -1,4 +1,4 @@
-// Package domain holds NoddaNAS's core types. It has no dependencies on
+// Package domain holds FrontDir's core types. It has no dependencies on
 // HTTP, databases or storage backends, so the security rules built on top of
 // it can be read and tested on their own.
 //
@@ -57,7 +57,7 @@ type Version struct {
 	CreatedBy string
 }
 
-// User is a NoddaNAS account, provisioned just-in-time on first sign-in.
+// User is a FrontDir account, provisioned just-in-time on first sign-in.
 type User struct {
 	ID              string // internal random ID; never the IdP subject
 	Issuer          string // OIDC issuer or SAML IdP entity ID
@@ -65,7 +65,7 @@ type User struct {
 	Email           string // set only if the IdP asserted it as verified
 	DisplayName     string
 	Admin           bool // effective: AdminGranted or a member of an administrator group
-	AdminGranted    bool // appointed in NoddaNAS (setup link or another administrator)
+	AdminGranted    bool // appointed in FrontDir (setup link or another administrator)
 	PersonalSpaceID string
 	Keys            *PublicKeys // nil until the user sets up encryption
 	KeyBundle       string      // opaque client key bundle (JSON)

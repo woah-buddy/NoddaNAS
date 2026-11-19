@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/woah-buddy/NoddaNAS/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/domain"
 )
 
 // Background maintenance runs inside every replica. Work is claimed through

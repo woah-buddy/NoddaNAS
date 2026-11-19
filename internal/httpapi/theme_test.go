@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/woah-buddy/NoddaNAS/internal/httpapi"
-	"github.com/woah-buddy/NoddaNAS/internal/theme"
-	"github.com/woah-buddy/NoddaNAS/web"
+	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/theme"
+	"github.com/woah-buddy/FrontDir/web"
 )
 
 // The theming endpoints need no database, so they are tested on a bare server.

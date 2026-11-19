@@ -1,6 +1,6 @@
 # Theming and branding
 
-NoddaNAS has two layers of theming:
+FrontDir has two layers of theming:
 
 - **Users** choose a mode (match system, light, dark, high contrast) and an accent color under
   *Settings → Appearance*. The choice is stored in that browser only (`localStorage`) and never
@@ -17,9 +17,9 @@ when the OS asks for more contrast (`prefers-contrast: more`).
 
 | Variable | Purpose |
 |---|---|
-| `NODDANAS_BRAND_NAME` | Display name in the header, page title and sign-in page (1-40 characters) |
-| `NODDANAS_BRAND_LOGO_FILE` | PNG or JPEG, at most 512 KiB and 1 megapixel; shown at 28 px high |
-| `NODDANAS_THEME_FILE` | JSON theme file (below), at most 64 KiB |
+| `FRONTDIR_BRAND_NAME` | Display name in the header, page title and sign-in page (1-40 characters) |
+| `FRONTDIR_BRAND_LOGO_FILE` | PNG or JPEG, at most 512 KiB and 1 megapixel; shown at 28 px high |
+| `FRONTDIR_THEME_FILE` | JSON theme file (below), at most 64 KiB |
 
 ### Theme file
 
@@ -54,12 +54,12 @@ Every key is optional. Colors are hex only (`#rgb` or `#rrggbb`).
 
 Accent IDs are lowercase letters, digits and hyphens (`^[a-z][a-z0-9-]{0,23}$`). Defining an ID
 that already exists (`blue`, `green`, `purple`, `orange`, `teal`, `rose`) replaces that built-in.
-`name` is overridden by `NODDANAS_BRAND_NAME` when both are set.
+`name` is overridden by `FRONTDIR_BRAND_NAME` when both are set.
 
 ### Validation
 
 The theme is checked at startup, and before any web change is saved. If anything is wrong,
-NoddaNAS **refuses to start** (or to save) and lists every problem. It never falls back silently. Besides syntax, every combination of mode and accent must
+FrontDir **refuses to start** (or to save) and lists every problem. It never falls back silently. Besides syntax, every combination of mode and accent must
 meet WCAG 2.x AA contrast (4.5:1) for each pair below:
 
 - `text` on `bg`, `panel` and `rowHover`
@@ -82,7 +82,7 @@ A theme sounds cosmetic, but it is content that every user's browser renders on 
 they type their encryption passphrase. Styling can be an attack channel: CSS can fetch URLs (and
 so leak data through attribute selectors), hide warnings, or overlay fake UI. Logos can be
 polyglots, valid images that are also HTML or script. So theming follows the same rules as
-the rest of NoddaNAS.
+the rest of FrontDir.
 
 1. **Data, not code.** A theme is a list of allowlisted color tokens, never CSS. Values must match
    a strict hex grammar, so `url(...)`, `@import`, `;}` and every other piece of CSS syntax are
@@ -111,8 +111,8 @@ the rest of NoddaNAS.
    go through the same validator: a web theme is still only colors, contrast-checked, and a logo is
    still re-encoded pixels. Saving needs a recent re-authentication at the identity provider, not
    just a session (ADMIN_GUIDE §7, "Confirm it's you"). Every change is audited as
-   `settings.changed`. Setting `NODDANAS_BRAND_NAME`, `NODDANAS_THEME_FILE` or
-   `NODDANAS_BRAND_LOGO_FILE` locks that item to the configuration, and `NODDANAS_WEB_SETTINGS=false`
+   `settings.changed`. Setting `FRONTDIR_BRAND_NAME`, `FRONTDIR_THEME_FILE` or
+   `FRONTDIR_BRAND_LOGO_FILE` locks that item to the configuration, and `FRONTDIR_WEB_SETTINGS=false`
    locks everything. So even a theme saved by an attacker cannot inject markup or script, hide a
    warning or break contrast: the most it can change is colors, the name and the logo, which the
    re-authentication and the audit trail make hard to do unnoticed.

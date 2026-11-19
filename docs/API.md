@@ -5,7 +5,7 @@ client-encrypted per [E2EE.md](E2EE.md); the server treats those fields as opaqu
 for shape and size. `internal/client` is a complete reference client.
 
 **Authentication.** Browsers use the session cookie from sign-in. Other clients use an app password:
-`Authorization: Bearer ndn_...` (or HTTP Basic, any username). *session* = interactive session only.
+`Authorization: Bearer fd_...` (or HTTP Basic, any username). *session* = interactive session only.
 
 **Errors**
 
@@ -43,7 +43,7 @@ IDs because they are bound into the encryption.
 | `POST /auth/logout` | Ends the session; returns `{"logoutUrl"}` (OIDC RP-initiated logout) |
 | `GET /auth/reauth?return_to=/path` | *session*. "Confirm it's you": sign in again at the IdP (forced), through the method the account uses; the new session counts as a recent sign-in for 15 minutes |
 
-**First-time setup** with the link from `noddanas setup-link` (the token is the URL fragment; send
+**First-time setup** with the link from `frontdir setup-link` (the token is the URL fragment; send
 it only in request bodies):
 
 | Method & path | |
@@ -91,7 +91,7 @@ it only in request bodies):
 | `GET /api/v1/nodes/{id}/path` | Key-derivation path: `space` (with `rootKey`/`myGrant` if you are a member), optional entry `share`, and `nodes` from the entry point down |
 | `GET /api/v1/nodes/{id}/children?limit=&cursor=` | Children with `nameEnc`, `wrappedKey`; follow `nextCursor` |
 | `POST /api/v1/nodes/{id}/folders` | `{"id","nameEnc","nameHash","wrappedKey"}` |
-| `POST /api/v1/nodes/{id}/files` | Body: container. Header `X-NoddaNAS-Entry: {"id","nameEnc","nameHash","wrappedKey"}` |
+| `POST /api/v1/nodes/{id}/files` | Body: container. Header `X-FrontDir-Entry: {"id","nameEnc","nameHash","wrappedKey"}` |
 | `PUT /api/v1/nodes/{id}/content?revision=` | New version; body: container (same node key) |
 | `GET /api/v1/nodes/{id}/content?version=` | The container (Range supported) |
 | `PATCH /api/v1/nodes/{id}` | Rename `{"nameEnc","nameHash"}`; move also `{"parentId","wrappedKey"}`; optional `revision` |
@@ -122,8 +122,8 @@ it only in request bodies):
 
 ## WebDAV (read-only ciphertext, for backups)
 
-`/dav/` with an app password: `/dav/<spaceId>/` contains `_noddanas-space.json`,
-`_noddanas-folder.json`, subfolders by ID and `<fileId>.ndne` containers. Write methods return 405.
+`/dav/` with an app password: `/dav/<spaceId>/` contains `_frontdir-space.json`,
+`_frontdir-folder.json`, subfolders by ID and `<fileId>.fdenc` containers. Write methods return 405.
 
 ## Administration
 
