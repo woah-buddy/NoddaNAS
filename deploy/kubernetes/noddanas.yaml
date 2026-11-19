@@ -1,0 +1,147 @@
+# NoddaNAS on Kubernetes: a hardened reference manifest.
+#
+# Prerequisites (created out-of-band, never committed):
+#   kubectl -n noddanas create secret generic noddanas-secrets \
+#     --from-literal=database_url='postgres://...?...sslmode=verify-full' \
+#     --from-literal=oidc_client_secret='...'
+# Files are end-to-end encrypted by clients; the server holds no content keys.
+# PostgreSQL: use a managed service or an operator (e.g. CloudNativePG).
+# Storage: more than one replica needs a ReadWriteMany volume (NFS, CephFS,
+# Longhorn RWX, ...). With ReadWriteOnce storage, keep replicas: 1.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: noddanas
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: noddanas
+  namespace: noddanas
+automountServiceAccountToken: false   # NoddaNAS never talks to the Kubernetes API
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: noddanas
+  namespace: noddanas
+data:
+  NODDANAS_PUBLIC_URL: https://files.example.com
+  NODDANAS_OIDC_ISSUER: https://id.example.com/realms/home
+  NODDANAS_OIDC_CLIENT_ID: noddanas
+  # Or/also SAML: NODDANAS_SAML_IDP_METADATA_URL: https://idp.example.com/metadata
+  NODDANAS_ALLOWED_GROUPS: noddanas-users
+  NODDANAS_ADMIN_GROUPS: noddanas-admins
+  NODDANAS_DEFAULT_QUOTA: 10GiB
+  NODDANAS_DEFAULT_TEAM_QUOTA: 50GiB
+  # Branding (docs/THEMING.md): mount a ConfigMap holding theme.json and/or
+  # logo.png read-only and point NODDANAS_THEME_FILE / NODDANAS_BRAND_LOGO_FILE
+  # at it. An invalid theme stops startup with a list of problems.
+  # NODDANAS_BRAND_NAME: Acme Files
+  # Pod CIDR of your ingress controller, so client IPs are logged and rate
+  # limited correctly. Adjust to your cluster.
+  NODDANAS_TRUSTED_PROXIES: 10.0.0.0/8
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: noddanas-data
+  namespace: noddanas
+spec:
+  accessModes: [ReadWriteOnce]   # ReadWriteMany for replicas > 1
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: noddanas
+  namespace: noddanas
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # RollingUpdate is fine with ReadWriteMany storage
+  selector:
+    matchLabels: {app: noddanas}
+  template:
+    metadata:
+      labels: {app: noddanas}
+    spec:
+      serviceAccountName: noddanas
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: noddanas
+          image: ghcr.io/woah-buddy/noddanas:latest   # pin by digest in production
+          args: [serve]
+          ports:
+            - {name: http, containerPort: 8080}
+          envFrom:
+            - configMapRef: {name: noddanas}
+          env:
+            - {name: NODDANAS_DATABASE_URL_FILE, value: /run/secrets/noddanas/database_url}
+            - {name: NODDANAS_OIDC_CLIENT_SECRET_FILE, value: /run/secrets/noddanas/oidc_client_secret}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: secrets, mountPath: /run/secrets/noddanas, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: noddanas-data}
+        - name: secrets
+          secret:
+            secretName: noddanas-secrets
+            defaultMode: 0440   # group-readable via fsGroup; never world-readable
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: noddanas
+  namespace: noddanas
+spec:
+  selector: {app: noddanas}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+# Default-deny, then allow only what NoddaNAS needs: ingress from the
+# ingress controller, egress to DNS, PostgreSQL and the OIDC provider (HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: noddanas
+  namespace: noddanas
+spec:
+  podSelector: {matchLabels: {app: noddanas}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+      ports: [{port: 8080}]
+  egress:
+    - ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - ports: [{port: 5432}]
+    - ports: [{port: 443}]

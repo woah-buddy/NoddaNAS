@@ -1,0 +1,12 @@
+# Keep the build context minimal, and secrets out of it entirely.
+.git
+.github
+**/secrets
+data
+*.keyring
+.env
+.env.*
+docs
+deploy
+bin
+dist

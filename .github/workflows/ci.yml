@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege for the workflow token: read-only unless a job opts in.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (race detector, real PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: noddanas_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 20
+    env:
+      NODDANAS_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/noddanas_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
+      - run: go mod verify
+      - run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out | tail -1
+
+  browser-interop:
+    name: Browser/Go E2EE interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --global --ignore-scripts playwright@1.63.0
+          npx --yes playwright@1.63.0 install --with-deps chromium
+      - name: Go and WebCrypto implementations agree byte-for-byte
+        run: NODDANAS_BROWSER_TEST=1 NODE_PATH="$(npm root -g)" go test -count=1 -run TestBrowserInterop -v ./internal/e2ee/
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      # "Trojan Source": invisible bidirectional characters make code read
+      # differently to reviewers than to compilers. Write them as escapes.
+      - name: No hidden bidirectional characters
+        run: |
+          git ls-files -z -- '*.go' '*.js' '*.mjs' '*.html' '*.css' '*.md' '*.json' '*.yaml' '*.yml' '*.sql' '*.sh' |
+            xargs -0 perl -CSD -ne 'if (/[\x{202A}-\x{202E}\x{2066}-\x{2069}]/) { print "$ARGV:$.: hidden bidirectional character\n"; $bad = 1 } close ARGV if eof; END { exit($bad ? 1 : 0) }'
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          # Latest 1.26 patch release: go.mod states the minimum language
+          # version, but CI and scans must use a toolchain with security fixes.
+          go-version: '1.26.x'
+          check-latest: true
+      # Reachability-aware: fails on vulnerabilities our code can actually reach,
+      # except reviewed, expiring exceptions in .github/govulncheck-exceptions.json.
+      # The gate fails closed if govulncheck errors or its output is unrecognized.
+      - name: govulncheck
+        run: |
+          set +e
+          go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 -format json ./... > govulncheck.json
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then echo "govulncheck failed (exit $status)"; exit "$status"; fi
+          go run ./tools/vulngate -exceptions .github/govulncheck-exceptions.json < govulncheck.json
+      - name: gosec
+        if: success() || failure() # report both scanners' findings in one run
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.30.0 -exclude-dir=internal/testutil ./...
+
+  container:
+    name: Container build and scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build --build-arg VERSION=${{ github.sha }} -t noddanas:ci .
+      - name: Smoke test (non-root, read-only root filesystem)
+        run: |
+          test "$(docker inspect -f '{{.Config.User}}' noddanas:ci)" = "65532:65532"
+          docker run --rm --read-only --cap-drop ALL noddanas:ci version
+      - name: Trivy image scan
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2
+          image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed noddanas:ci

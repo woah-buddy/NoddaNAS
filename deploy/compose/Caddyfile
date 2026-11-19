@@ -1,0 +1,11 @@
+# Caddy obtains and renews TLS certificates automatically. For a LAN-only
+# host (e.g. nas.home.arpa) add "tls internal" and trust Caddy's local CA.
+{$NODDANAS_HOST} {
+	# No response compression: compressing secrets alongside attacker-
+	# influenced content over TLS invites BREACH-style attacks.
+	reverse_proxy noddanas:8080 {
+		# Large uploads and downloads stream; never buffer them in the proxy.
+		flush_interval -1
+	}
+	log
+}
