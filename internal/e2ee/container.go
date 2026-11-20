@@ -470,10 +470,5 @@ func (v *Verifier) Finish(trailer []byte) error {
 	if !v.Complete() {
 		return errors.New("e2ee: cannot verify a container that was not read in order")
 	}
-	if len(trailer) != TrailerSize || string(trailer[:4]) != trailerMagic {
-		return ErrAuth
-	}
-	msg := append(append(join("container"), 0), sum(v.p.raw)...)
-	msg = append(msg, v.bh.Sum(nil)...)
-	return verify(v.signer.Sig, msg, trailer[4:])
+	return v.p.checkTrailer(v.signer, v.bh.Sum(nil), trailer)
 }

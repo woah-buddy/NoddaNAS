@@ -79,5 +79,13 @@ Keep it running while you use the drive. **Ctrl+C** stops it, which also locks y
   memory, and removed after upload.
 - Your keys are in memory while it runs, so stop it when you do not need it.
 
+- It remembers the newest version of each file it has verified (in `FRONTDIR_STATE_DIR`, by
+  default `frontdir` in your user configuration folder). If the server later shows an older or a
+  different history for a file, the drive refuses to open or save over that file and says why in
+  its terminal. When you know the reason (for example, your administrator restored the server
+  from a backup), stop the drive, accept the file's history with `frontdir-cli accept <path>`,
+  and start it again (a running drive keeps its own memory and would write it back).
+  ([E2EE.md §5c](E2EE.md#5c-signed-version-history) explains this.)
+
 Shared items from other people (Shared → Shared with me) are not shown on the drive yet; open them
 in the web app.

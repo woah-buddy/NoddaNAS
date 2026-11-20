@@ -14,8 +14,8 @@ import (
 
 const purgeLease = 10 * time.Minute
 
-// RunMaintenance expires old trash and purges scheduled nodes. It returns
-// how many nodes were purged.
+// RunMaintenance expires old trash, purges scheduled nodes and fills in
+// missing version digests. It returns how many nodes were purged.
 func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error) {
 	if n, err := s.store.ExpireTrash(ctx, s.now().Add(-s.conf().TrashRetention)); err != nil {
 		return 0, err
@@ -48,6 +48,9 @@ func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error
 			s.log.ErrorContext(ctx, "space purge failed", "space", sp.ID, "err", err)
 			break
 		}
+	}
+	if err := s.backfillDigests(ctx, digestsPerRun); err != nil && ctx.Err() == nil {
+		s.log.ErrorContext(ctx, "version digests", "err", err)
 	}
 	return purged, nil
 }

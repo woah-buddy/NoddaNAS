@@ -343,7 +343,10 @@ the same way as the data volume to reuse the old certificates.)
 **10. Tell users.** Say what happened, give the date and time of the restore point, and confirm
 that their files are back and remained end-to-end encrypted throughout. They unlock exactly as
 before, with their passphrase or recovery code. Anything they saved after the restore point needs
-to be uploaded again. If they keep their own encrypted backups, **Restore backup…** (or
+to be uploaded again. For files that changed after the restore point, their devices warn that
+the file "has gone back in time" (E2EE.md §5c): that is correct, and expected. Each person opens
+**Versions** and chooses **Accept this history** (or runs `frontdir-cli accept <path>`) once they
+know why. Ask them to report such a warning when you have *not* restored anything. If they keep their own encrypted backups, **Restore backup…** (or
 `frontdir-cli restore`) puts those files back as they were, because their space keys did not
 change.
 

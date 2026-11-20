@@ -420,6 +420,19 @@ func (f *FS) failedVerification(version string) bool {
 	return seen && !ok
 }
 
+// historyProblem reports a file whose signed history does not check out,
+// is older than, or differs from, what this device saw before (docs/E2EE.md
+// §5c). Such a file is neither served nor saved over; the user decides
+// (frontdir-cli accept, or the web app). It returns nil for other errors.
+func (f *FS) historyProblem(p string, err error) error {
+	if !errors.Is(err, e2ee.ErrHistory) && !errors.Is(err, e2ee.ErrRolledBack) && !errors.Is(err, e2ee.ErrForked) {
+		return nil
+	}
+	f.log.Warn("a file's version history does not check out; it is not served or saved over until you accept it with: frontdir-cli accept PATH",
+		"path", p, "problem", err)
+	return os.ErrPermission
+}
+
 // mapErr turns API errors into the os errors x/net/webdav maps to statuses.
 func mapErr(err error) error {
 	var ae *client.APIError

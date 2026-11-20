@@ -148,11 +148,37 @@ func (c *client) container(spaceID string, nk *e2ee.NodeKey, name, body string) 
 	return b
 }
 
+// record signs a version record (docs/E2EE.md §5c) for container ct as
+// the next version of nodeID (the first, for a new file).
+func (c *client) record(nodeID string, ct []byte, kind string) ([]byte, []byte) {
+	c.t.Helper()
+	p, err := e2ee.ParsePrefix(bytes.NewReader(ct))
+	if err != nil {
+		return nil, nil // not a container: the upload fails before the record matters
+	}
+	rec := e2ee.VersionRecord{Node: nodeID, Seq: 1, Container: e2ee.B64(p.Hash()), Kind: kind, At: time.Now().UnixMilli()}
+	if vs, err := c.e.svc.ListVersions(c.e.ctx, c.p, nodeID); err == nil && len(vs) > 0 && vs[0].Seq > 0 {
+		rec.Seq, rec.Prev = vs[0].Seq+1, e2ee.B64(vs[0].RecordHash)
+	}
+	r, err := e2ee.SignRecord(c.acct, rec)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	return r.Raw, r.Sig
+}
+
+// restore restores version v of nodeID with a signed record.
+func (c *client) restore(nodeID string, v *domain.Version) (*domain.Node, error) {
+	raw, sig := c.record(nodeID, v.Header, e2ee.KindRestore)
+	return c.e.svc.RestoreVersion(c.e.ctx, c.p, nodeID, v.ID, raw, sig)
+}
+
 func (c *client) put(parentID, name, body string) (*domain.Node, error) {
 	id, nk := secure.NewID(), e2ee.NewNodeKey()
 	ct := c.container(c.spaceOf[parentID], nk, name, body)
+	rec, sig := c.record(id, ct, e2ee.KindSave)
 	n, err := c.e.svc.Upload(c.e.ctx, c.p, service.UploadRequest{ParentID: parentID, NewID: id,
-		Entry: c.entry(parentID, id, name, nk), Size: int64(len(ct))}, bytes.NewReader(ct))
+		Entry: c.entry(parentID, id, name, nk), Size: int64(len(ct)), Record: rec, RecordSig: sig}, bytes.NewReader(ct))
 	if err == nil {
 		c.keys[id], c.spaceOf[id] = nk, c.spaceOf[parentID]
 	}
@@ -161,7 +187,8 @@ func (c *client) put(parentID, name, body string) (*domain.Node, error) {
 
 func (c *client) putVersion(id, name, body string) (*domain.Node, error) {
 	ct := c.container(c.spaceOf[id], c.keys[id], name, body)
-	return c.e.svc.Upload(c.e.ctx, c.p, service.UploadRequest{NodeID: id, Size: int64(len(ct))}, bytes.NewReader(ct))
+	rec, sig := c.record(id, ct, e2ee.KindSave)
+	return c.e.svc.Upload(c.e.ctx, c.p, service.UploadRequest{NodeID: id, Size: int64(len(ct)), Record: rec, RecordSig: sig}, bytes.NewReader(ct))
 }
 
 // read downloads, decrypts and verifies a file's current content.
@@ -299,7 +326,7 @@ func TestE2EEFileLifecycle(t *testing.T) {
 	if len(vs) != 2 {
 		t.Fatalf("versions = %d", len(vs))
 	}
-	must[*domain.Node](t)(e.svc.RestoreVersion(e.ctx, a.p, f.ID, vs[1].ID))
+	must[*domain.Node](t)(a.restore(f.ID, vs[1]))
 	a.mustRead(f.ID, "hello v1")
 
 	// Rename = new encrypted name and hash; move = also a re-wrapped key.
@@ -359,8 +386,9 @@ func TestIndependentBackupAndRestore(t *testing.T) {
 		t.Fatalf("backup does not verify: %v", err)
 	}
 	id := secure.NewID()
+	rec, sig := a.record(id, backup, e2ee.KindRestore)
 	restored, err := e.svc.Upload(e.ctx, a.p, service.UploadRequest{ParentID: a.root, NewID: id,
-		Entry: a.entry(a.root, id, meta.Name, nk), Size: int64(len(backup))}, bytes.NewReader(backup))
+		Entry: a.entry(a.root, id, meta.Name, nk), Size: int64(len(backup)), Record: rec, RecordSig: sig}, bytes.NewReader(backup))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,7 +649,9 @@ func TestQuotaIsAtomic(t *testing.T) {
 	for i := range reqs {
 		id, nk, name := secure.NewID(), e2ee.NewNodeKey(), fmt.Sprintf("f%02d", i)
 		bodies[i] = a.container(a.home, nk, name, strings.Repeat("y", 100))
-		reqs[i] = service.UploadRequest{ParentID: a.root, NewID: id, Entry: a.entry(a.root, id, name, nk), Size: int64(len(bodies[i]))}
+		rec, sig := a.record(id, bodies[i], e2ee.KindSave)
+		reqs[i] = service.UploadRequest{ParentID: a.root, NewID: id, Entry: a.entry(a.root, id, name, nk), Size: int64(len(bodies[i])),
+			Record: rec, RecordSig: sig}
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -655,6 +685,7 @@ func TestUploadValidation(t *testing.T) {
 	up := func(body []byte, size int64, mutate func(*service.UploadRequest)) error {
 		id := secure.NewID()
 		req := service.UploadRequest{ParentID: a.root, NewID: id, Entry: a.entry(a.root, id, "a", nk), Size: size}
+		req.Record, req.RecordSig = a.record(id, good, e2ee.KindSave)
 		if mutate != nil {
 			mutate(&req)
 		}

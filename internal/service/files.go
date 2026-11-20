@@ -85,6 +85,9 @@ func (s *Service) ListChildren(ctx context.Context, p Principal, id, cursor stri
 	if err != nil {
 		return nil, nil, "", err
 	}
+	if err := s.markThumbnails(ctx, p, children); err != nil {
+		return nil, nil, "", err
+	}
 	return infoOf(a), children, next, nil
 }
 

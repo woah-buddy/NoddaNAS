@@ -40,10 +40,24 @@ type Node struct {
 	TrashedBy  string
 	RestoreKey string // node key + name sealed to the space, for restoring from trash
 	RestoreSig string
+
+	// HasThumbnail is a listing hint: the current version has a thumbnail
+	// by its uploader or by the caller. Clients verify before showing one.
+	HasThumbnail bool
 }
 
 // IsRoot reports whether the node is a space's root folder.
 func (n *Node) IsRoot() bool { return n.ParentID == "" }
+
+// Thumbnail is a client-encrypted preview attached to one file version
+// (docs/E2EE.md §5a). Enc and Sig are opaque to the server.
+type Thumbnail struct {
+	VersionID string
+	MakerID   string
+	Enc       string
+	Sig       string
+	CreatedAt time.Time
+}
 
 // Version is one stored, client-encrypted container.
 type Version struct {
@@ -54,7 +68,23 @@ type Version struct {
 	Size      int64
 	SHA256    string
 	CreatedAt time.Time
-	CreatedBy string
+	CreatedBy string // who uploaded it (a restore uploads someone else's container)
+	// Attribution (docs/E2EE.md §5b), copied or derived from the container
+	// at upload, for clients to verify: the header's claimed signer, the
+	// prefix, the body hash and the trailer. Empty when not known yet
+	// (versions stored before this was recorded) or not computable.
+	SignerID string
+	Header   []byte
+	BodyHash []byte
+	Trailer  []byte
+	// Signed history (docs/E2EE.md §5c): the record whoever stored the
+	// version signed, its signature, its position in the file's chain and
+	// its hash (which the next version's record names). Empty for versions
+	// stored before records existed.
+	Record     []byte
+	RecordSig  []byte
+	Seq        int64
+	RecordHash []byte
 }
 
 // User is a FrontDir account, provisioned just-in-time on first sign-in.

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -119,6 +120,8 @@ type nodeView struct {
 	RestoreSig string     `json:"restoreSig,omitempty"`
 	Permission string     `json:"permission,omitempty"`
 	CanModify  *bool      `json:"canModify,omitempty"`
+	VersionID  string     `json:"versionId,omitempty"`
+	HasThumb   bool       `json:"hasThumbnail,omitempty"`
 }
 
 func viewNode(n *domain.Node) nodeView {
@@ -127,6 +130,7 @@ func viewNode(n *domain.Node) nodeView {
 		NameHash: n.NameHash, WrappedKey: n.WrappedKey, Size: n.Size, PlainSize: n.PlainSize, SHA256: n.SHA256, CreatedAt: n.CreatedAt,
 		CreatedBy: n.CreatedBy, ModifiedAt: n.ModifiedAt, ModifiedBy: n.ModifiedBy, Revision: n.Revision,
 		TrashedAt: n.TrashedAt, TrashedBy: n.TrashedBy, RestoreKey: n.RestoreKey, RestoreSig: n.RestoreSig,
+		VersionID: n.VersionID, HasThumb: n.HasThumbnail,
 	}
 }
 
@@ -234,13 +238,39 @@ func viewMember(m *domain.Member) memberView {
 	return v
 }
 
+// versionView is one version of a file. Prefix, BodyHash and Trailer are
+// its attribution digest (docs/E2EE.md §5b), for the client to verify who
+// signed it; absent while not known yet, or when it cannot be computed.
 type versionView struct {
 	ID        string    `json:"id"`
 	Size      int64     `json:"size"`
 	SHA256    string    `json:"sha256"`
 	CreatedAt time.Time `json:"createdAt"`
 	CreatedBy string    `json:"createdBy"`
+	Prefix    string    `json:"prefix,omitempty"`
+	BodyHash  string    `json:"bodyHash,omitempty"`
+	Trailer   string    `json:"trailer,omitempty"`
+	Record    string    `json:"record,omitempty"`
+	RecordSig string    `json:"recordSig,omitempty"`
 }
+
+func viewVersion(v *domain.Version) versionView {
+	out := versionView{ID: v.ID, Size: v.Size, SHA256: v.SHA256, CreatedAt: v.CreatedAt, CreatedBy: v.CreatedBy}
+	if len(v.Header) > 0 {
+		out.Prefix = b64(v.Header)
+	}
+	if len(v.BodyHash) > 0 && len(v.Trailer) > 0 {
+		out.BodyHash = b64(v.BodyHash)
+		out.Trailer = b64(v.Trailer)
+	}
+	if len(v.Record) > 0 {
+		out.Record = b64(v.Record)
+		out.RecordSig = b64(v.RecordSig)
+	}
+	return out
+}
+
+func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 type shareView struct {
 	ID           string     `json:"id"`

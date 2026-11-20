@@ -29,7 +29,7 @@ in the browser.
 
 | | |
 |---|---|
-| Files & folders | Upload, download, folders, rename, move, versions (restore any), trash with automatic purge |
+| Files & folders | Upload, download, folders, rename, move, versions (restore any; a signed history shows who saved each one and when, and warns if the server rolls a file back), trash with automatic purge |
 | Backups | Download any file as an encrypted `.fdenc` container and restore it later, anywhere in the same space; `frontdir-cli backup`; read-only WebDAV for rclone/restic mirrors |
 | Disaster recovery | Whole-server backups stay end-to-end encrypted; `frontdir verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
 | Offline recovery | `frontdir-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |
@@ -42,6 +42,7 @@ in the browser.
 | Clients | Web app (no build step, no npm dependencies) and `frontdir-cli` (Go) |
 | Mount as a drive | `frontdir-cli mount`: your files, decrypted on your computer only, in Finder or File Explorer |
 | Large downloads | Files of any size stream to disk in the browser, decrypted and verified chunk by chunk |
+| Thumbnails | Previews of images and videos, made on your device, encrypted like everything else, and shown only if made by the file's author or by you |
 | Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
 
 Not included (yet): calendar/contacts, document editing, the Nextcloud sync protocol, a plaintext

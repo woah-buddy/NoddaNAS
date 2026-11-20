@@ -91,12 +91,15 @@ it only in request bodies):
 | `GET /api/v1/nodes/{id}/path` | Key-derivation path: `space` (with `rootKey`/`myGrant` if you are a member), optional entry `share`, and `nodes` from the entry point down |
 | `GET /api/v1/nodes/{id}/children?limit=&cursor=` | Children with `nameEnc`, `wrappedKey`; follow `nextCursor` |
 | `POST /api/v1/nodes/{id}/folders` | `{"id","nameEnc","nameHash","wrappedKey"}` |
-| `POST /api/v1/nodes/{id}/files` | Body: container. Header `X-FrontDir-Entry: {"id","nameEnc","nameHash","wrappedKey"}` |
-| `PUT /api/v1/nodes/{id}/content?revision=` | New version; body: container (same node key) |
-| `GET /api/v1/nodes/{id}/content?version=` | The container (Range supported) |
+| `POST /api/v1/nodes/{id}/files` | Body: container. Header `X-FrontDir-Entry: {"id","nameEnc","nameHash","wrappedKey"}`, and the signed version record (E2EE.md §5c, `seq` 1) in `X-FrontDir-Record` and `X-FrontDir-Record-Sig` (b64u) |
+| `PUT /api/v1/nodes/{id}/content?revision=` | New version; body: container (same node key), with its version record in the same two headers, following the current version. A record that no longer follows (someone saved meanwhile) gets `412`: reload and retry |
+| `GET /api/v1/nodes/{id}/content?version=` | The container (Range supported). Headers `X-FrontDir-Version` and, for versions that have one, `X-FrontDir-Record` / `X-FrontDir-Record-Sig` |
 | `PATCH /api/v1/nodes/{id}` | Rename `{"nameEnc","nameHash"}`; move also `{"parentId","wrappedKey"}`; optional `revision` |
 | `POST /api/v1/nodes/{id}/trash` | `{"restoreKey","restoreSig","revision"?}` |
-| `GET /api/v1/nodes/{id}/versions`, `POST .../versions/{vid}/restore` | |
+| `GET /api/v1/nodes/{id}/versions` | Newest first: `{"versions": [{"id","size","sha256","createdAt","createdBy","prefix","bodyHash","trailer","record","recordSig"}]}`. `createdAt` and `createdBy` are the server's word. `prefix`, `bodyHash` and `trailer` (b64u) let the client verify who wrote a version without downloading it (E2EE.md §5b); `bodyHash` and `trailer` are absent for older versions until the server has computed them. `record` and `recordSig` (b64u) are the signed version record (§5c), absent for versions stored before records existed. |
+| `POST /api/v1/nodes/{id}/versions/{vid}/restore` | (write) `{"record","recordSig"}`: a `restore` record naming that version's container and following the current version. Stores the container unchanged as the new current version; it keeps its author. |
+| `GET /api/v1/nodes/{id}/thumbnail` | The current version's thumbnails by its author (the signer its header names) and by you: `{"versionId", "prefix", "bodyHash", "trailer", "thumbnails": [{"maker","enc","sig"}]}`; 404 if none. `prefix` is always present (the thumbnail key comes from its salt); `bodyHash` and `trailer` as for versions. Clients verify the author, then apply the display rule (E2EE.md §5a). Folder listings mark files with `hasThumbnail`. |
+| `PUT /api/v1/nodes/{id}/thumbnail` | (write) `{"versionId","enc","sig"}` attaches or replaces your thumbnail for that version of the file |
 | `POST /api/v1/trash/{id}/restore` | `{"parentId","nameEnc","nameHash","wrappedKey"}` |
 | `DELETE /api/v1/trash/{id}` | Delete permanently (manage; asynchronous) |
 

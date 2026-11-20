@@ -37,6 +37,24 @@ func TestBrowserInterop(t *testing.T) {
 	r, _, _ := NewWriter(strings.NewReader(plain), WriteParams{Size: int64(len(plain)), NodeKey: child, SpaceID: spaceID,
 		SpacePub: space.Priv.PublicKey(), Meta: Meta{Name: "Résumé ✓.txt", Type: "text/plain", MTime: 1}, Signer: acct})
 	container, _ := io.ReadAll(r)
+	cp, _ := ParsePrefix(bytes.NewReader(container))
+	ck, _ := cp.Keys(child)
+	thumbImg := []byte("\xff\xd8\xff thumbnail from Go")
+	thumbEnc, thumbSig, err := SealThumb(acct, childID, cp, ck, thumbImg, "image/jpeg", 64, 48)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cd := cp.NewDigester() // what the server computes at upload (§5b)
+	cd.Write(container)
+	digest, err := cd.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A signed history (§5c): the Go user saves, then restores the same
+	// container as version 2.
+	rec1, _ := SignRecord(acct, VersionRecord{Node: childID, Seq: 1, Container: B64(cp.Hash()), Kind: KindSave, At: 1700000000000})
+	rec2, _ := SignRecord(acct, VersionRecord{Node: childID, Seq: 2, Prev: B64(rec1.Hash()), Container: B64(cp.Hash()), Kind: KindRestore, At: 1700000001000})
+	history := []map[string]string{{"raw": B64(rec2.Raw), "sig": B64(rec2.Sig)}, {"raw": B64(rec1.Raw), "sig": B64(rec1.Sig)}}
 	hashKey := NewNodeKey()
 	hashNames := []string{"Report.PDF", "report.pdf", "İstanbul", "ΣΟΦΟΣ", "ΌΣΟΣ ΧΡΌΝΟΣ", "STRASSE", "straße", "ǅemal",
 		"ﬀ", "é", "é", "Ⅻ", "ΑΣ.txt", "日本語", "😀 emoji"}
@@ -54,6 +72,9 @@ func TestBrowserInterop(t *testing.T) {
 		"plaintext": plain, "hashKeyRaw": B64(hashKey.Raw()), "hashNames": hashNames,
 		"jsSpaceId": strings.Repeat("8", 32), "teamId": strings.Repeat("9", 32), "shareId": strings.Repeat("a", 32),
 		"contacts": sealedContacts, "contactId": contactID, "contactFp": contactFP,
+		"thumb":   map[string]string{"enc": thumbEnc, "sig": thumbSig, "data": B64(thumbImg)},
+		"digest":  map[string]string{"prefix": B64(digest.Header), "bodyHash": B64(digest.BodyHash), "trailer": B64(digest.Trailer)},
+		"history": history,
 	}
 	vjson, _ := json.Marshal(vectors)
 
@@ -92,6 +113,11 @@ func TestBrowserInterop(t *testing.T) {
 			t.Errorf("browser check %s: %s", name, outcome)
 		}
 	}
+	for _, name := range []string{"container-stream", "thumbnail-from-go", "version-author-from-go", "history-from-go"} {
+		if res.Checks[name] != "ok" {
+			t.Errorf("browser check %s did not pass (%q)", name, res.Checks[name])
+		}
+	}
 	if len(res.Checks) < 10 || len(res.PageErrors) > 0 {
 		t.Fatalf("checks %v, page errors %v", res.Checks, res.PageErrors)
 	}
@@ -125,6 +151,8 @@ func TestBrowserInterop(t *testing.T) {
 		LinkKey      string            `json:"linkKey"`
 		Trash        map[string]string `json:"trash"`
 		Contacts     string            `json:"contacts"`
+		Thumb        map[string]string `json:"thumb"`
+		Record       map[string]string `json:"record"`
 	}
 	if err := json.Unmarshal(res.JS, &js); err != nil {
 		t.Fatal(err)
@@ -177,8 +205,28 @@ func TestBrowserInterop(t *testing.T) {
 	if err := DecryptVerify(bytes.NewReader(ct[p.BodyOffset():]), &plainOut, p, k, jsPub); err != nil || plainOut.String() != js.Plaintext {
 		t.Fatalf("Go cannot decrypt/verify the browser container: %v", err)
 	}
+	// The server's digest of a browser-made container verifies as the
+	// browser's author: both compute the body hash the same way.
+	jd := p.NewDigester()
+	jd.Write(ct)
+	if d, err := jd.Digest(); err != nil || p.VerifyDigest(jsPub, d.BodyHash, d.Trailer) != nil {
+		t.Fatalf("digest of the browser container does not verify: %v", err)
+	}
 	if nk, err := p.OwnerNodeKey(jsSpace); err != nil || B64(nk.Raw()) != js.ChildRaw {
 		t.Fatalf("owner seal: %v", err)
+	}
+	if th, img, err := OpenThumb(jsPub, js.ChildID, p, k, js.Thumb["enc"], js.Thumb["sig"]); err != nil ||
+		string(img) != "browser thumbnail" || th.Type != "image/webp" || th.W != 32 || !ThumbAuthorOK(jsPub, jsPub, "someone else") {
+		t.Fatalf("Go cannot open the browser's thumbnail: %v", err)
+	}
+	// The browser's record about its container verifies here, in the
+	// canonical form Go would also produce.
+	jr, err := ParseRecord(mustB64(t, js.Record["raw"]), mustB64(t, js.Record["sig"]))
+	if err != nil || jr.Verify(jsPub) != nil || jr.Container != B64(p.Hash()) || jr.Node != js.ChildID || jr.Seq != 1 || jr.Kind != KindSave {
+		t.Fatalf("browser version record: %v", err)
+	}
+	if _, err := VerifyHistory(js.ChildID, []HistoryEntry{{Prefix: p, Record: jr}}, func(string) (*PublicUser, error) { return jsPub, nil }); err != nil {
+		t.Fatalf("browser history: %v", err)
 	}
 	nk, name, err := OpenShare(acct, jsPub, strings.Repeat("a", 32), js.ChildID, "write", js.Share["sealedKey"], js.Share["sig"])
 	if err != nil || name != "Shared folder" || B64(nk.Raw()) != js.ChildRaw {
@@ -205,4 +253,13 @@ func TestBrowserInterop(t *testing.T) {
 	if _, err := acct.OpenContacts(js.Contacts); err == nil {
 		t.Fatal("a contact list opened under another account")
 	}
+}
+
+func mustB64(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := UnB64(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

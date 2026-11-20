@@ -45,6 +45,8 @@ type RemoteFile struct {
 	mu    sync.Mutex
 	start int64  // window position in the container
 	win   []byte // cached ciphertext window
+
+	record, recordSig string // the version record served with the first fetch (§5c)
 }
 
 const (
@@ -81,6 +83,10 @@ func (c *Client) OpenRemote(ctx context.Context, nodeID string) (*RemoteFile, er
 	if rf.Signer, err = c.UserKeys(ctx, p.Signer.User); err != nil {
 		return nil, err
 	}
+	// Not older than, or different from, what this client saw (§5c).
+	if err := c.checkServedRecord(ctx, nodeID, p, rf.record, rf.recordSig); err != nil {
+		return nil, err
+	}
 	rf.Prefix = p
 	return rf, nil
 }
@@ -108,6 +114,7 @@ func (rf *RemoteFile) fetch(ctx context.Context, off, n int64) error {
 	ver := resp.Header.Get("X-FrontDir-Version")
 	if rf.Version == "" {
 		rf.Version = ver
+		rf.record, rf.recordSig = resp.Header.Get("X-FrontDir-Record"), resp.Header.Get("X-FrontDir-Record-Sig")
 	} else if ver != rf.Version {
 		return errors.New("the server returned a different version of the file")
 	}

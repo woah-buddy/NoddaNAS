@@ -673,7 +673,9 @@ user appears to come from the proxy and shares one rate-limit budget.
 | Yearly, or when staff leave | Rotate the database password, OIDC client secret and SAML SP key | [§14](#14-rotating-secrets) |
 
 The background worker does the rest automatically: it expires trash, purges deleted files and
-team folders, and removes expired sessions and login requests.
+team folders, removes expired sessions and login requests, and, after an upgrade, works through
+older file versions so the web app can show who saved each one (a few versions a minute, reading
+encrypted files from storage; it decrypts nothing).
 
 ---
 
@@ -777,6 +779,9 @@ A backup you have not restored is a hope, not a backup. Each quarter:
 4. Watch the logs until you see `frontdir listening`, and check `https://<host>/readyz`.
    Migrations run automatically at startup. With several replicas, a database lock ensures only
    one applies them.
+5. Ask users of `frontdir-cli` (and its drive) to update it too. Since the release that added
+   signed version history, the server refuses new files and versions without a signed version
+   record, so an older CLI can still read but no longer save. The web app updates itself.
 
 ### Upgrading from NoddaNAS
 

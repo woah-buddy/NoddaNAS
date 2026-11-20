@@ -95,6 +95,46 @@ const result = await page.evaluate(async () => {
     try { await E.openContainerStream(pieces(cut), child, goSigner, cut.length); return false; } catch { /* length checked up front */ }
     return err !== null;
   });
+  await check('thumbnail-from-go', async () => {
+    const header = E.parsePrefix(E.unb64u(v.container));
+    const goUser = await goSigner();
+    const t = await E.openThumb(goUser, v.childId, header, child, v.thumb);
+    let moved = false;
+    try { await E.openThumb(goUser, 'f'.repeat(32), header, child, v.thumb); moved = true; } catch { /* bound to the node */ }
+    return !moved && E.b64u(t.bytes) === v.thumb.data && t.w === 64 && E.thumbAuthorOK(goUser, goUser, 'someone else') &&
+      !E.thumbAuthorOK(null, goUser, 'someone else') && E.thumbAuthorOK(null, goUser, goUser.id);
+  });
+  await check('version-author-from-go', async () => {
+    const d = { prefix: E.unb64u(v.digest.prefix), bh: E.unb64u(v.digest.bodyHash), tr: E.unb64u(v.digest.trailer) };
+    const { header, signer } = await E.versionAuthor(child, d.prefix, d.bh, d.tr, goSigner);
+    const rejects = async (f) => { try { await f(); return false; } catch { return true; } };
+    const flip = (b, i) => { const c = b.slice(); c[i] ^= 1; return c; };
+    return signer.id === v.bundle.userId && header.signer.user === v.bundle.userId &&
+      await rejects(() => E.versionAuthor(child, d.prefix, flip(d.bh, 0), d.tr, goSigner)) &&
+      await rejects(() => E.versionAuthor(child, d.prefix, d.bh, flip(d.tr, 30), goSigner)) &&
+      await rejects(() => E.versionAuthor(child, d.prefix.slice(0, -1), d.bh, d.tr, goSigner)) &&
+      await rejects(async () => E.versionAuthor(await E.NodeKey.fresh(), d.prefix, d.bh, d.tr, goSigner));
+  });
+  await check('history-from-go', async () => {
+    const prefix = E.unb64u(v.digest.prefix);
+    const goUser = await goSigner();
+    const recs = await Promise.all(v.history.map((r) => E.parseVersionRecord(r.raw, r.sig)));
+    const entries = () => recs.map((record) => ({ prefix, record }));
+    const es = entries();
+    const head = await E.verifyHistory(v.childId, es, async () => goUser);
+    const rejects = async (f) => { try { await f(); return false; } catch { return true; } };
+    const code = async (f) => { try { await f(); return 'none'; } catch (e) { return e.code; } };
+    // Non-canonical encodings are refused, so Go and the browser agree.
+    const spaced = E.b64u(new TextEncoder().encode(' ' + new TextDecoder().decode(recs[0].raw)));
+    return head.rec.seq === 2 && head.rec.kind === 'restore' && es[1].storedBy.id === v.bundle.userId &&
+      await rejects(() => E.verifyHistory(v.childId, entries().reverse(), async () => goUser)) &&
+      await rejects(() => E.verifyHistory('f'.repeat(32), entries(), async () => goUser)) &&
+      await rejects(() => E.parseVersionRecord(spaced, v.history[0].sig)) &&
+      await code(() => E.checkFresh(E.seenOf(recs[0]), [recs[1]])) === 'rolledback' &&
+      await code(() => E.checkFresh(E.seenOf(recs[1]), recs)) === 'none' &&
+      await code(() => E.checkFreshHead(E.seenOf(recs[1]), recs[0])) === 'none' &&
+      await code(() => E.checkFreshHead({ seq: 1, hash: E.b64u(recs[0].hash) }, recs[0])) === 'forked';
+  });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
   await check('open-contacts', async () => {
     const c = await E.openContacts(goAcct, v.contacts);
@@ -143,6 +183,14 @@ const result = await page.evaluate(async () => {
     teamSecret: E.b64u(team.secret), teamGrant: await team.grant(account, goPub), teamName: await team.encryptName('Team ✓'),
     linkSecret: E.b64u(linkSecret), linkKey: await E.linkKey(linkSecret, v.shareId, v.childId, 'Linked', jsChild),
     trash: await E.trashKey(account, E.unb64u(v.spacePub), v.childId, 'trashed.txt', 'file', jsChild),
+    thumb: await E.sealThumb(account, v.childId, E.parsePrefix(new Uint8Array(await container.arrayBuffer())), jsChild,
+      { type: 'image/webp', w: 32, h: 24, bytes: new TextEncoder().encode('browser thumbnail') }),
+    record: await (async () => {
+      const r = await E.signVersionRecord(account, { node: v.childId, seq: 1, prev: '',
+        container: await E.containerId((await E.parseContainer(container)).prefix),
+        kind: 'save', at: 1700000002000 });
+      return { raw: E.b64u(r.raw), sig: E.b64u(r.sig) };
+    })(),
     contacts: await E.sealContacts(account, { v: 1, contacts: { ['d'.repeat(32)]: { fp: 'e'.repeat(40), name: 'From the browser \u2713', verifiedAt: 2 } } }),
   };
   return out;

@@ -116,6 +116,16 @@ type Store interface {
 	// creates (isNew) or updates the node, and records the version.
 	CommitContent(ctx context.Context, n *domain.Node, v *domain.Version, isNew bool, expectedRev int64) error
 	ListVersions(ctx context.Context, nodeID string) ([]*domain.Version, error)
+	// Attribution digests (docs/E2EE.md §5b) for versions stored before
+	// they were recorded at upload.
+	VersionsWithoutDigest(ctx context.Context, limit int) ([]*domain.Version, error)
+	SetVersionDigest(ctx context.Context, v *domain.Version) error
+	// Thumbnails (thumbs.go).
+	PutThumbnail(ctx context.Context, t *domain.Thumbnail) error
+	GetThumbnails(ctx context.Context, versionID string, makers []string) ([]*domain.Thumbnail, error)
+	// ThumbnailHints returns which of the versions have a thumbnail made by
+	// their uploader or by viewerID.
+	ThumbnailHints(ctx context.Context, versionIDs []string, viewerID string) (map[string]bool, error)
 	GetVersion(ctx context.Context, nodeID, versionID string) (*domain.Version, error)
 
 	// ---- shares ----

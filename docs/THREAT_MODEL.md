@@ -55,6 +55,10 @@ server is still responsible for (access control, integrity of structure, availab
 | Capturing another user's shares via their email | Accounts keyed by (issuer, subject); emails recorded only if verified and unclaimed; SAML emails trusted only if configured | `service/users.go` |
 | Forged key grant (anyone can seal to a public key) | Every share, team grant and trash seal is signed by its granter; clients verify | `e2ee` tests: forged grant/share rejected |
 | Server inserts a team member to obtain the team key | Clients never grant keys automatically; a manager approves each pending member after seeing their fingerprint and verification status; the Go library requires an approval callback | Browser test: database-inserted member is not granted; `TestEndToEnd` (no blind or unapproved grants) |
+| A collaborator attaches a misleading thumbnail to someone else's file (a harmless picture on something else) | Thumbnails are stored per version and per maker, so nobody can overwrite the author's; clients show only the version's verified author's thumbnail (E2EE §5b) or the viewer's own, after verifying the maker's signature; a thumbnail is bound to its node and version | `TestThumbnails` (Go and HTTP), `TestVersionAuthors`, interop `thumbnail-from-go` |
+| Server attributes a version to someone who did not write it (to make a planted or altered version look like a colleague's, or to show a collaborator's thumbnail as the author's) | Every version's author is verified from its header without downloading it: the author's signature over the header and the body hash must check out, after the key commitment ties the header to the node (E2EE §5b); a header carries a fresh salt, so no other body hash verifies with it; altered digests or swapped headers show "cannot verify" and that version cannot be restored from the web app | `TestDigest`, `TestVersionAuthors` (tampered hash, trailer and swapped header), interop `version-author-from-go`, browser test |
+| Server rewrites a file's version history: reorders, inserts, drops or relabels versions (who stored one, when, restore versus save) | Every version carries a record signed by whoever stored it, chained to the previous one (E2EE §5c); the server keeps the chain linear (one version per position) and clients verify it, refusing to save or restore on top of a history that fails | `TestVersionHistory`, `TestVersionRecords` (server refuses misplaced, foreign or forged records; racing uploads), `TestSignedHistory` (tampered time, order, dropped and moved records), interop `history-from-go` |
+| Server rolls a file back to an older version, or shows people different histories | Each device remembers the newest record it verified per file; downloads, the drive, saves and the Versions dialog report "gone back in time" or "history differs" and refuse until the user accepts; detection, not prevention (residual 14) | `TestFreshness`, `TestSignedHistory` (rollback on download, drive, save, after a restart; fork through a third user), browser test |
 | Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
@@ -80,7 +84,8 @@ server is still responsible for (access control, integrity of structure, availab
 ### Repudiation
 
 Containers, shares, grants and trash seals are signed by their author's Ed25519 key, so a client
-can attribute content and grants cryptographically. The server additionally logs structured audit
+can attribute content and grants cryptographically. The Versions dialog shows each version's
+verified author without downloading the file (E2EE §5b). The server additionally logs structured audit
 events (identifiers only; never names, tokens or passwords).
 
 ### Information disclosure
@@ -98,6 +103,7 @@ events (identifiers only; never names, tokens or passwords).
 | Streaming releases plaintext before the signature is checked | Each chunk is AES-GCM-authenticated before release; the last chunk is withheld until the signature verifies, and a failure aborts the download (the browser discards it) or fails the copy from the drive | `TestStreamingVerifier`, interop `container-stream-*`, `TestDecryptingGateway` |
 | The local drive (`frontdir-cli mount`) exposes plaintext to other users of the computer, to web pages, or to the network | Loopback only, with no option otherwise; a random 256-bit token in every path; loopback `Host` required (DNS rebinding) and browser requests (`Origin`, `Sec-Fetch-Site`) refused; inert response headers; upload buffers that spill to disk are encrypted under a key held in memory | `TestDecryptingGateway`, `TestListenIsLoopbackOnly`, `TestSpoolSpillsEncrypted` |
 | Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
+| Thumbnails leak content or metadata | Made on the uploader's device and re-encoded (no EXIF or GPS), encrypted under a key derived from the file key and that version's salt; the server sees only that a version has one and its size (documented in E2EE.md, "What the server can still see"); rendered only as `<img>` WebP or JPEG, never SVG | `TestThumbnails`, browser test |
 | Server-side request forgery through IdP URLs entered on the web (reaching cloud metadata or internal services, reading their responses) | All IdP traffic uses one client that refuses link-local, metadata, unspecified, multicast and (except on localhost deployments) loopback addresses, checked before sending and again on the address actually dialled (DNS rebinding); 1 MiB response cap, 20 s timeout, at most three redirects and never https→http; errors describe the failure and never echo the response | `TestIdPClientRefusesInternalAddresses`, `TestIdPChecksNeverEchoTheRemote` |
 | OIDC client secret in a database dump | Secrets saved on the web are AES-256-GCM encrypted under a key that lives only in the server's environment, bound to the setting name; never returned by the API or logged | `TestSecretBox`, `TestSignInChangesAreCheckedAndConfirmed` |
 
@@ -143,19 +149,28 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
 8. **Public links can carry their key.** Whoever has the full link URL can decrypt the shared item
    until it expires or is revoked; link passwords add a server-enforced gate on top.
 9. **Per-replica rate limits and WebDAV locks.** See ARCHITECTURE.md › Scaling.
-8. **Administrators can redirect sign-in.** An administrator who passes "confirm it's you" can
-   point FrontDir at another identity provider. That cannot take over existing accounts or
-   decrypt anything, but people who then sign in through the new provider get new accounts, and
-   its groups decide who administers from then on. Lock sign-in to the server's configuration
-   (`FRONTDIR_OIDC_ISSUER` / `FRONTDIR_SAML_IDP_METADATA_URL`, or `FRONTDIR_WEB_SETTINGS=false`)
-   where that is a concern; changes are audited either way.
-9. **The database is trusted for settings.** Anyone who can write to the database can change
-   settings directly, as they could change any other metadata. Settings are not signed; the
-   end-to-end encryption, not the settings, protects file contents from such an attacker.
-10. **Identity providers on private networks are reachable.** So that an IdP on the same Docker
-   network works, administrators can make the server send GET requests to private addresses.
-   The responses are never shown, only whether the check passed.
-11. **The local drive holds unlocked keys and serves plaintext for as long as it runs.** Anyone who
-   can act as the user on that computer can read what the drive shows (as they could read files
-   the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
-   secret; `--url-file` keeps it in a file readable only by the user.
+10. **Administrators can redirect sign-in.** An administrator who passes "confirm it's you" can
+    point FrontDir at another identity provider. That cannot take over existing accounts or
+    decrypt anything, but people who then sign in through the new provider get new accounts, and
+    its groups decide who administers from then on. Lock sign-in to the server's configuration
+    (`FRONTDIR_OIDC_ISSUER` / `FRONTDIR_SAML_IDP_METADATA_URL`, or `FRONTDIR_WEB_SETTINGS=false`)
+    where that is a concern; changes are audited either way.
+11. **The database is trusted for settings.** Anyone who can write to the database can change
+    settings directly, as they could change any other metadata. Settings are not signed; the
+    end-to-end encryption, not the settings, protects file contents from such an attacker.
+12. **Identity providers on private networks are reachable.** So that an IdP on the same Docker
+    network works, administrators can make the server send GET requests to private addresses.
+    The responses are never shown, only whether the check passed.
+13. **The local drive holds unlocked keys and serves plaintext for as long as it runs.** Anyone who
+    can act as the user on that computer can read what the drive shows (as they could read files
+    the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
+    secret; `--url-file` keeps it in a file readable only by the user.
+14. **Rollbacks and forks are detected, not prevented, and only for what you have seen.** Who
+    wrote and who stored each version, when, and in what order are signed (E2EE §5b, §5c). The
+    server can still cut the newest versions off a file, or show different people different
+    histories. A client notices once it is shown an older or different history than one it saw
+    before. A person who never saw the newer history can't tell; the memory is per device (clearing
+    site data or a new device starts afresh); and folder-level changes (hiding a file, undoing a
+    rename or a deletion) are not covered. With one untrusted server and no other channel between
+    users this is the best available ("fork consistency"). After a legitimate restore from backup,
+    users see these warnings for files changed since the backup and accept them.

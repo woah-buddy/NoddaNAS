@@ -26,6 +26,11 @@ type UploadRequest struct {
 	Revision int64
 
 	Size int64 // declared Content-Length, or -1 if unknown
+
+	// The signed version record (docs/E2EE.md §5c) and its signature.
+	Record, RecordSig []byte
+
+	restore bool // a server-side restore: the record must say so
 }
 
 type uploadTarget struct {
@@ -106,6 +111,21 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	if prefix.Owner.Space != target.space.ID {
 		return nil, domain.E(domain.CodeInvalid, "the container is sealed to a different space")
 	}
+	if validate.ID(prefix.Signer.User) != nil {
+		return nil, domain.E(domain.CodeInvalid, "the container does not name a valid signer")
+	}
+	nodeID := req.NewID
+	if target.existing != nil {
+		nodeID = target.existing.ID
+	}
+	current, err := s.currentVersion(ctx, target.existing)
+	if err != nil {
+		return nil, err
+	}
+	record, err := s.checkRecord(ctx, p, &req, nodeID, current, prefix)
+	if err != nil {
+		return nil, err
+	}
 	total := prefix.TotalSize()
 	switch {
 	case req.Size >= 0 && req.Size != total:
@@ -119,7 +139,8 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	blobKey := secure.NewID()
 	lr := &limitReader{r: io.MultiReader(&head, body), n: total}
 	h := sha256.New()
-	if _, err := s.blobs.Create(ctx, blobKey, io.TeeReader(lr, h)); err != nil {
+	dg := prefix.NewDigester() // attribution digest (docs/E2EE.md §5b), in the same pass
+	if _, err := s.blobs.Create(ctx, blobKey, io.TeeReader(lr, io.MultiWriter(h, dg))); err != nil {
 		_ = s.blobs.Delete(context.WithoutCancel(ctx), blobKey)
 		if errors.Is(err, errOverLimit) {
 			return nil, domain.E(domain.CodeInvalid, "body is longer than the container's declared size")
@@ -133,6 +154,10 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	if lr.read != total {
 		return fail(domain.E(domain.CodeInvalid, "body is shorter than the container's declared size"))
 	}
+	digest, err := dg.Digest()
+	if err != nil { // cannot happen once the length matched; refuse rather than store a version without it
+		return fail(err)
+	}
 	// Re-authorize: the upload may have taken minutes, and access may have
 	// been revoked (or the folder trashed) while bytes were in flight.
 	if target, err = s.resolveUploadTarget(ctx, p, &req); err != nil {
@@ -140,7 +165,9 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	}
 	now := s.now()
 	v := &domain.Version{ID: secure.NewID(), SpaceID: target.space.ID, BlobKey: blobKey, Size: total,
-		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID}
+		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID,
+		SignerID: prefix.Signer.User, Header: digest.Header, BodyHash: digest.BodyHash, Trailer: digest.Trailer,
+		Record: record.Raw, RecordSig: record.Sig, Seq: record.Seq, RecordHash: record.Hash()}
 	n, err := s.commit(ctx, p, target, &req, v, prefix.Size)
 	if err != nil {
 		return fail(err)
@@ -249,13 +276,27 @@ func (s *Service) ListVersions(ctx context.Context, p Principal, nodeID string) 
 	if a.node.Kind != domain.KindFile {
 		return nil, domain.E(domain.CodeInvalid, "not a file")
 	}
-	return s.store.ListVersions(ctx, nodeID)
+	vs, err := s.store.ListVersions(ctx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	// Versions stored before digests were recorded and not backfilled yet:
+	// the prefix alone is cheap to read, and clients need it to restore
+	// such a version (their record names its container).
+	for _, v := range vs {
+		if len(v.Header) == 0 && v.BodyHash == nil {
+			if h, err := s.readPrefix(ctx, v); err == nil {
+				v.Header = h
+			}
+		}
+	}
+	return vs, nil
 }
 
 // RestoreVersion makes an old version current again by storing a copy of
 // its container as a new version. The container is unchanged (still
 // encrypted, still decryptable with the file's key); history is preserved.
-func (s *Service) RestoreVersion(ctx context.Context, p Principal, nodeID, versionID string) (*domain.Node, error) {
+func (s *Service) RestoreVersion(ctx context.Context, p Principal, nodeID, versionID string, record, recordSig []byte) (*domain.Node, error) {
 	a, err := s.authorize(ctx, p, nodeID, domain.PermWrite)
 	if err != nil {
 		return nil, err
@@ -268,7 +309,8 @@ func (s *Service) RestoreVersion(ctx context.Context, p Principal, nodeID, versi
 		return nil, err
 	}
 	defer old.Close()
-	n, err := s.Upload(ctx, p, UploadRequest{NodeID: nodeID, Revision: a.node.Revision, Size: old.Version.Size}, old)
+	n, err := s.Upload(ctx, p, UploadRequest{NodeID: nodeID, Revision: a.node.Revision, Size: old.Version.Size,
+		Record: record, RecordSig: recordSig, restore: true}, old)
 	if err == nil {
 		s.audit(ctx, "file.version_restore", p, "node", nodeID, "from_version", versionID)
 	}

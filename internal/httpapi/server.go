@@ -183,6 +183,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/nodes/{id}", s.authed(s.handleUpdateNode))
 	mux.HandleFunc("POST /api/v1/nodes/{id}/trash", s.authed(s.handleTrashNode))
 	mux.HandleFunc("GET /api/v1/nodes/{id}/versions", s.authed(s.handleListVersions))
+	mux.HandleFunc("GET /api/v1/nodes/{id}/thumbnail", s.authed(s.handleGetThumbnails))
+	mux.HandleFunc("PUT /api/v1/nodes/{id}/thumbnail", s.authed(s.handlePutThumbnail))
 	mux.HandleFunc("POST /api/v1/nodes/{id}/versions/{vid}/restore", s.authed(s.handleRestoreVersion))
 	mux.HandleFunc("POST /api/v1/trash/{id}/restore", s.authed(s.handleRestoreTrash))
 	mux.HandleFunc("DELETE /api/v1/trash/{id}", s.authed(s.handleDeleteTrash))

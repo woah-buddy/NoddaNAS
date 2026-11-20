@@ -172,6 +172,10 @@ Trash expiry, permanent deletion and team-folder deletion run in each replica, c
 with `FOR UPDATE SKIP LOCKED` plus a lease. Purges delete blobs before rows, so an interrupted
 purge is simply resumed; quota is refunded exactly once per version.
 
+The worker also computes version digests (E2EE.md §5b) for versions stored before uploads
+recorded them, a few per run, reading the stored ciphertext; no keys are involved. Replicas may
+occasionally digest the same version; the result is identical and only the first write is kept.
+
 ## Scaling
 
 Replicas are stateless (sessions and work queues live in PostgreSQL). Several replicas need shared
@@ -193,6 +197,14 @@ registered with scope `/dl/` so it sees no other request), which turns the strea
 ordinary browser download. The worker fetches nothing and keeps nothing; the page holds the keys.
 Registering it needs a Trusted Types script URL, so the CSP allows exactly one policy,
 `frontdir-sw`, which can only produce that one constant URL.
+
+Thumbnails ([E2EE.md §5a](E2EE.md#5a-thumbnails)) are made in the browser when an image or video
+is uploaded (`createImageBitmap`, or a frame captured from a `<video>` loaded from the local file,
+which is why the CSP allows `media-src blob:`), or later with **Make thumbnails** on a folder.
+Each is a small record encrypted for one version and stored beside the container, so adding one
+never rewrites a file. Folder listings carry a `hasThumbnail` hint; only rows on screen fetch
+theirs, four at a time, and a preview is shown only if made by the version's author or by the
+viewer.
 
 ## Local drive (`frontdir-cli mount`)
 
