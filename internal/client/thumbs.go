@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -70,7 +69,7 @@ func (c *Client) Thumbnail(ctx context.Context, nodeID string) (*e2ee.Thumb, []b
 		return nil, nil, err
 	}
 	var resp struct {
-		Prefix     string `json:"prefix"`
+		versionDigest
 		Thumbnails []struct {
 			Maker string `json:"maker"`
 			Enc   string `json:"enc"`
@@ -84,26 +83,24 @@ func (c *Client) Thumbnail(ctx context.Context, nodeID string) (*e2ee.Thumb, []b
 		}
 		return nil, nil, err
 	}
-	raw, err := e2ee.UnB64(resp.Prefix)
-	if err != nil {
-		return nil, nil, e2ee.ErrMalformed
-	}
-	p, err := e2ee.ParsePrefix(bytes.NewReader(raw))
+	p, k, err := resp.open(nk) // the header belongs to this node
 	if err != nil {
 		return nil, nil, err
 	}
-	k, err := p.Keys(nk) // the header that names the author belongs to this node
-	if err != nil {
-		return nil, nil, err
+	// The author counts only once their signature over this version
+	// verifies (§5b); otherwise just the viewer's own thumbnail is shown.
+	author, _ := c.verifyAuthor(ctx, p, &resp.versionDigest)
+	want := []string{acct.UserID}
+	if author != nil {
+		want = []string{author.ID, acct.UserID} // the author's first
 	}
-	// The author's thumbnail first, then the viewer's own.
-	for _, want := range []string{p.Signer.User, acct.UserID} {
+	for _, id := range want {
 		for _, t := range resp.Thumbnails {
-			if t.Maker != want {
+			if t.Maker != id {
 				continue
 			}
 			maker, err := c.UserKeys(ctx, t.Maker)
-			if err != nil || !e2ee.ThumbAuthorOK(p, maker, acct.UserID) {
+			if err != nil || !e2ee.ThumbAuthorOK(author, maker, acct.UserID) {
 				continue
 			}
 			if th, img, err := e2ee.OpenThumb(maker, nodeID, p, k, t.Enc, t.Sig); err == nil {

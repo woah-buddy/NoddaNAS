@@ -804,15 +804,22 @@ async function loadThumb(c) {
   let url = '';
   try {
     const r = await api('GET', `/api/v1/nodes/${c.id}/thumbnail`);
-    const header = E.parsePrefix(E.unb64u(r.prefix));
+    const prefix = E.unb64u(r.prefix);
+    const header = E.parsePrefix(prefix);
     const nk = await nodeKey(c.id);
     const me = S.me.user.id;
-    outer: for (const want of [header.signer.user, me]) { // the author's first, then your own
+    // The author counts only once their signature over this version
+    // verifies (E2EE.md §5b); otherwise only your own thumbnail is shown.
+    let author = null;
+    if (r.bodyHash && r.trailer) {
+      try { author = (await E.versionAuthor(nk, prefix, E.unb64u(r.bodyHash), E.unb64u(r.trailer), userKeys)).signer; } catch { /* unverified */ }
+    }
+    outer: for (const want of author ? [author.id, me] : [me]) { // the author's first, then your own
       for (const t of r.thumbnails) {
         if (t.maker !== want) continue;
         try {
           const maker = await userKeys(t.maker);
-          if (!E.thumbAuthorOK(header, maker, me)) continue;
+          if (!E.thumbAuthorOK(author, maker, me)) continue;
           const th = await E.openThumb(maker, c.id, header, nk, t);
           url = URL.createObjectURL(new Blob([th.bytes], { type: th.type }));
           break outer;
@@ -1004,15 +1011,47 @@ async function trashNode(c, ctx) {
 }
 
 async function versionsDialog(c) {
-  let data;
-  try { data = await api('GET', `/api/v1/nodes/${c.id}/versions`); } catch (e) { return toast(e.message); }
-  const rows = data.versions.map((v, i) => h('tr', {},
-    h('td', {}, fmtDate(v.createdAt), i === 0 ? ' (current)' : ''),
-    h('td', { class: 'num' }, fmtSize(v.size)),
-    h('td', { class: 'actions' },
-      h('button', { class: 'link', onclick: () => downloadFile(c, v.id) }, 'Download'),
-      i > 0 && h('button', { class: 'link', onclick: async () => { d.close(); await act(() => api('POST', `/api/v1/nodes/${c.id}/versions/${v.id}/restore`), 'Version restored'); } }, 'Restore'))));
-  const d = dialog(`Versions of ${c.name}`, h('table', {}, h('tbody', {}, rows)), h('form', { method: 'dialog', class: 'row' }, h('button', {}, 'Close')));
+  let data, nk;
+  try {
+    data = await api('GET', `/api/v1/nodes/${c.id}/versions`);
+    nk = await nodeKey(c.id);
+  } catch (e) { return toast(e.message); }
+  // Who saved each version, checked from its signature without downloading
+  // it (E2EE.md §5b). A server cannot make this name the wrong person; at
+  // worst it makes the check fail, which we show as a warning.
+  const author = async (v) => {
+    if (!v.prefix) return { pending: true };
+    try {
+      const { signer } = await E.versionAuthor(nk, E.unb64u(v.prefix), E.unb64u(v.bodyHash), E.unb64u(v.trailer), userKeys);
+      return { signer };
+    } catch { return { failed: true }; }
+  };
+  const who = (pu) => (pu.id === S.me.user.id ? 'You' : nameOf(pu));
+  const authors = await Promise.all(data.versions.map(author));
+  const uploaders = await Promise.all(data.versions.map((v) => userKeys(v.createdBy).catch(() => null)));
+  const reopen = () => { d.close(); versionsDialog(c); };
+  const rows = data.versions.map((v, i) => {
+    const a = authors[i], up = uploaders[i];
+    let by;
+    if (a.signer) {
+      const restored = up && v.createdBy !== a.signer.id ? h('span', { class: 'note' }, ` · restored by ${who(up)}`) : null;
+      by = h('span', { class: 'version-author' }, who(a.signer), ' ', trustBadge(a.signer, reopen), restored);
+    } else if (a.pending) {
+      by = h('span', { class: 'note', title: 'This version was saved before FrontDir recorded what is needed to check its author. The server fills this in for older versions in the background.' }, 'Not checked yet');
+    } else {
+      by = h('span', { class: 'error', title: 'Its signature does not check out: it may have been altered on the server. Do not rely on its contents.' }, '⚠ Cannot verify who saved this');
+    }
+    return h('tr', {},
+      h('td', {}, fmtDate(v.createdAt), i === 0 ? ' (current)' : ''),
+      h('td', {}, by),
+      h('td', { class: 'num' }, fmtSize(v.size)),
+      h('td', { class: 'actions' },
+        h('button', { class: 'link', onclick: () => downloadFile(c, v.id) }, 'Download'),
+        i > 0 && !a.failed && h('button', { class: 'link', onclick: async () => { d.close(); await act(() => api('POST', `/api/v1/nodes/${c.id}/versions/${v.id}/restore`), 'Version restored'); } }, 'Restore')));
+  });
+  const head = h('thead', {}, h('tr', {}, h('th', {}, 'Saved'), h('th', {}, 'By'), h('th', { class: 'num' }, 'Size'), h('th', {})));
+  const d = dialog(`Versions of ${c.name}`, h('table', { class: 'versions' }, head, h('tbody', {}, rows)),
+    h('form', { method: 'dialog', class: 'row' }, h('button', {}, 'Close')));
 }
 
 // ---- sharing ---------------------------------------------------------------------------------------------

@@ -172,6 +172,10 @@ Trash expiry, permanent deletion and team-folder deletion run in each replica, c
 with `FOR UPDATE SKIP LOCKED` plus a lease. Purges delete blobs before rows, so an interrupted
 purge is simply resumed; quota is refunded exactly once per version.
 
+The worker also computes version digests (E2EE.md §5b) for versions stored before uploads
+recorded them, a few per run, reading the stored ciphertext; no keys are involved. Replicas may
+occasionally digest the same version; the result is identical and only the first write is kept.
+
 ## Scaling
 
 Replicas are stateless (sessions and work queues live in PostgreSQL). Several replicas need shared

@@ -679,7 +679,7 @@ const subtreeCTE = `WITH RECURSIVE sub AS (
 		SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id WHERE n.trashed_at IS NULL
 	) `
 
-const versionCols = `id, node_id, space_id, blob_key, size, sha256, created_at, created_by`
+const versionCols = `id, node_id, space_id, blob_key, size, sha256, created_at, created_by, signer_id, header, body_hash, trailer`
 
 // ListVersionBlobs pages through every stored file version in blob-key
 // order (for storage verification).
@@ -696,8 +696,13 @@ func scanVersions(rows pgx.Rows) ([]*domain.Version, error) {
 	var out []*domain.Version
 	for rows.Next() {
 		v := &domain.Version{}
-		if err := rows.Scan(&v.ID, &v.NodeID, &v.SpaceID, &v.BlobKey, &v.Size, &v.SHA256, &v.CreatedAt, &v.CreatedBy); err != nil {
+		var signer *string
+		if err := rows.Scan(&v.ID, &v.NodeID, &v.SpaceID, &v.BlobKey, &v.Size, &v.SHA256, &v.CreatedAt, &v.CreatedBy,
+			&signer, &v.Header, &v.BodyHash, &v.Trailer); err != nil {
 			return nil, mapErr(err)
+		}
+		if signer != nil {
+			v.SignerID = *signer
 		}
 		out = append(out, v)
 	}
@@ -789,8 +794,9 @@ func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Ver
 			}
 			n.Revision = expectedRev + 1
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO versions (`+versionCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-			v.ID, v.NodeID, v.SpaceID, v.BlobKey, v.Size, v.SHA256, v.CreatedAt, v.CreatedBy); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO versions (`+versionCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			v.ID, v.NodeID, v.SpaceID, v.BlobKey, v.Size, v.SHA256, v.CreatedAt, v.CreatedBy,
+			v.SignerID, v.Header, v.BodyHash, v.Trailer); err != nil {
 			return err
 		}
 		// Atomic quota check: condition and increment in one statement.
@@ -804,6 +810,33 @@ func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Ver
 		}
 		return nil
 	}))
+}
+
+// VersionsWithoutDigest returns versions whose attribution digest has not
+// been computed yet (stored before it was recorded at upload).
+func (s *Store) VersionsWithoutDigest(ctx context.Context, limit int) ([]*domain.Version, error) {
+	rows, err := s.db.Query(ctx, "SELECT "+versionCols+" FROM versions WHERE body_hash IS NULL ORDER BY id LIMIT $1", limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return scanVersions(rows)
+}
+
+// SetVersionDigest records a version's attribution digest, unless it is
+// already known. Empty values record that it cannot be computed.
+func (s *Store) SetVersionDigest(ctx context.Context, v *domain.Version) error {
+	_, err := s.db.Exec(ctx, `UPDATE versions SET signer_id = NULLIF($2, ''), header = $3, body_hash = $4, trailer = $5
+		WHERE id = $1 AND body_hash IS NULL`, v.ID, v.SignerID, nonNil(v.Header), nonNil(v.BodyHash), nonNil(v.Trailer))
+	return mapErr(err)
+}
+
+// nonNil turns a nil slice into an empty one, which pgx stores as an empty
+// bytea rather than NULL.
+func nonNil(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
 }
 
 func (s *Store) ListVersions(ctx context.Context, nodeID string) ([]*domain.Version, error) {

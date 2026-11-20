@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -179,7 +178,7 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request, p se
 	}
 	out := make([]versionView, len(vs))
 	for i, v := range vs {
-		out[i] = versionView{ID: v.ID, Size: v.Size, SHA256: v.SHA256, CreatedAt: v.CreatedAt, CreatedBy: v.CreatedBy}
+		out[i] = viewVersion(v)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"versions": out})
 }
@@ -295,8 +294,12 @@ func (s *Server) handleGetThumbnails(w http.ResponseWriter, r *http.Request, p s
 	for i, t := range set.Thumbnails {
 		out[i] = thumbView{Maker: t.MakerID, Enc: t.Enc, Sig: t.Sig}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"versionId": set.VersionID,
-		"prefix": base64.RawURLEncoding.EncodeToString(set.Prefix), "thumbnails": out})
+	// The version's prefix (always: the thumbnail key comes from its salt)
+	// and, once known, the rest of its digest, so the client can verify
+	// who the author is before showing their thumbnail (docs/E2EE.md §5b).
+	v := viewVersion(set.Version)
+	writeJSON(w, http.StatusOK, map[string]any{"versionId": v.ID, "prefix": b64(set.Version.Header),
+		"bodyHash": v.BodyHash, "trailer": v.Trailer, "thumbnails": out})
 }
 
 func (s *Server) handlePutThumbnail(w http.ResponseWriter, r *http.Request, p service.Principal) {

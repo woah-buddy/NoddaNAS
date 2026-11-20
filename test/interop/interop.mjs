@@ -101,7 +101,19 @@ const result = await page.evaluate(async () => {
     const t = await E.openThumb(goUser, v.childId, header, child, v.thumb);
     let moved = false;
     try { await E.openThumb(goUser, 'f'.repeat(32), header, child, v.thumb); moved = true; } catch { /* bound to the node */ }
-    return !moved && E.b64u(t.bytes) === v.thumb.data && t.w === 64 && E.thumbAuthorOK(header, goUser, 'someone else');
+    return !moved && E.b64u(t.bytes) === v.thumb.data && t.w === 64 && E.thumbAuthorOK(goUser, goUser, 'someone else') &&
+      !E.thumbAuthorOK(null, goUser, 'someone else') && E.thumbAuthorOK(null, goUser, goUser.id);
+  });
+  await check('version-author-from-go', async () => {
+    const d = { prefix: E.unb64u(v.digest.prefix), bh: E.unb64u(v.digest.bodyHash), tr: E.unb64u(v.digest.trailer) };
+    const { header, signer } = await E.versionAuthor(child, d.prefix, d.bh, d.tr, goSigner);
+    const rejects = async (f) => { try { await f(); return false; } catch { return true; } };
+    const flip = (b, i) => { const c = b.slice(); c[i] ^= 1; return c; };
+    return signer.id === v.bundle.userId && header.signer.user === v.bundle.userId &&
+      await rejects(() => E.versionAuthor(child, d.prefix, flip(d.bh, 0), d.tr, goSigner)) &&
+      await rejects(() => E.versionAuthor(child, d.prefix, d.bh, flip(d.tr, 30), goSigner)) &&
+      await rejects(() => E.versionAuthor(child, d.prefix.slice(0, -1), d.bh, d.tr, goSigner)) &&
+      await rejects(async () => E.versionAuthor(await E.NodeKey.fresh(), d.prefix, d.bh, d.tr, goSigner));
   });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
   await check('open-contacts', async () => {

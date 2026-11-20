@@ -664,7 +664,30 @@ export async function openThumb(maker, nodeId, header, nk, rec) {
   return { type: t.type, w: t.w, h: t.h, bytes };
 }
 
-// The display rule: made by the version's author (as its header names
-// them, same fingerprint) or by the viewer.
-export const thumbAuthorOK = (header, maker, viewerId) =>
-  maker.id === viewerId || (maker.id === header.signer.user && maker.fp === header.signer.fp);
+// The display rule: made by the version's verified author (versionAuthor
+// passed for them; null if it could not be checked) or by the viewer. The
+// header's signer claim alone is not enough: a server could pair someone
+// else's thumbnail with a header that names them.
+export const thumbAuthorOK = (author, maker, viewerId) =>
+  maker.id === viewerId || (!!author && maker.id === author.id && maker.fp === author.fp);
+
+// ---- version attribution (spec §5b) -----------------------------------------------------------------
+// versionAuthor proves who wrote a version of a file without downloading
+// it. The server reports the version's prefix, its body hash BH (computed
+// from the ciphertext at upload) and its trailer; the author's signature
+// over (prefix, BH) must verify. Only the author can make that signature,
+// and a header belongs to one container, so a server that lies makes the
+// check fail; it cannot make it name someone else. The key commitment is
+// checked first: the header must be one that this node's key made.
+// signerFor(userId) returns a verified public user. Returns { header, signer }.
+export async function versionAuthor(nk, prefix, bodyHash, trailer, signerFor) {
+  const header = parsePrefix(prefix);
+  if (prefix.length !== 12 + new DataView(prefix.buffer, prefix.byteOffset).getUint32(8)) throw new E2EEError('malformed container');
+  const fk = await fileKeys(nk, unb64u(header.salt));
+  if (!ctEqual(fk.commit, unb64u(header.commit))) throw authFail();
+  const signer = await signerFor(header.signer.user);
+  if (signer.id !== header.signer.user || signer.fp !== header.signer.fp) throw new E2EEError('the version claims a signer key that does not match the directory');
+  if (bodyHash.length !== 32 || trailer.length !== TRAILER || td.decode(trailer.subarray(0, 4)) !== 'SIG1') throw authFail();
+  await mustVerify(signer.sig, concat(label('container'), NUL, await sha256(prefix), bodyHash), trailer.subarray(4));
+  return { header, signer };
+}

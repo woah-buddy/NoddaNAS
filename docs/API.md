@@ -96,8 +96,9 @@ it only in request bodies):
 | `GET /api/v1/nodes/{id}/content?version=` | The container (Range supported) |
 | `PATCH /api/v1/nodes/{id}` | Rename `{"nameEnc","nameHash"}`; move also `{"parentId","wrappedKey"}`; optional `revision` |
 | `POST /api/v1/nodes/{id}/trash` | `{"restoreKey","restoreSig","revision"?}` |
-| `GET /api/v1/nodes/{id}/versions`, `POST .../versions/{vid}/restore` | |
-| `GET /api/v1/nodes/{id}/thumbnail` | The current version's thumbnails by its uploader and by you: `{"versionId", "prefix": b64u(container header), "thumbnails": [{"maker","enc","sig"}]}`; 404 if none. Clients verify and apply the display rule (E2EE.md §5a). Folder listings mark files with `hasThumbnail`. |
+| `GET /api/v1/nodes/{id}/versions` | Newest first: `{"versions": [{"id","size","sha256","createdAt","createdBy","prefix","bodyHash","trailer"}]}`. `createdBy` is who stored the version (for a restore, the restorer). `prefix`, `bodyHash` and `trailer` (b64u) let the client verify who wrote it without downloading it (E2EE.md §5b); they are absent for older versions until the server has computed them, or if the stored container is damaged. |
+| `POST /api/v1/nodes/{id}/versions/{vid}/restore` | (write) Stores that version's container unchanged as the new current version; it keeps its author. |
+| `GET /api/v1/nodes/{id}/thumbnail` | The current version's thumbnails by its author (the signer its header names) and by you: `{"versionId", "prefix", "bodyHash", "trailer", "thumbnails": [{"maker","enc","sig"}]}`; 404 if none. `prefix` is always present (the thumbnail key comes from its salt); `bodyHash` and `trailer` as for versions. Clients verify the author, then apply the display rule (E2EE.md §5a). Folder listings mark files with `hasThumbnail`. |
 | `PUT /api/v1/nodes/{id}/thumbnail` | (write) `{"versionId","enc","sig"}` attaches or replaces your thumbnail for that version of the file |
 | `POST /api/v1/trash/{id}/restore` | `{"parentId","nameEnc","nameHash","wrappedKey"}` |
 | `DELETE /api/v1/trash/{id}` | Delete permanently (manage; asynchronous) |

@@ -106,6 +106,9 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	if prefix.Owner.Space != target.space.ID {
 		return nil, domain.E(domain.CodeInvalid, "the container is sealed to a different space")
 	}
+	if validate.ID(prefix.Signer.User) != nil {
+		return nil, domain.E(domain.CodeInvalid, "the container does not name a valid signer")
+	}
 	total := prefix.TotalSize()
 	switch {
 	case req.Size >= 0 && req.Size != total:
@@ -119,7 +122,8 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	blobKey := secure.NewID()
 	lr := &limitReader{r: io.MultiReader(&head, body), n: total}
 	h := sha256.New()
-	if _, err := s.blobs.Create(ctx, blobKey, io.TeeReader(lr, h)); err != nil {
+	dg := prefix.NewDigester() // attribution digest (docs/E2EE.md §5b), in the same pass
+	if _, err := s.blobs.Create(ctx, blobKey, io.TeeReader(lr, io.MultiWriter(h, dg))); err != nil {
 		_ = s.blobs.Delete(context.WithoutCancel(ctx), blobKey)
 		if errors.Is(err, errOverLimit) {
 			return nil, domain.E(domain.CodeInvalid, "body is longer than the container's declared size")
@@ -133,6 +137,10 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	if lr.read != total {
 		return fail(domain.E(domain.CodeInvalid, "body is shorter than the container's declared size"))
 	}
+	digest, err := dg.Digest()
+	if err != nil { // cannot happen once the length matched; refuse rather than store a version without it
+		return fail(err)
+	}
 	// Re-authorize: the upload may have taken minutes, and access may have
 	// been revoked (or the folder trashed) while bytes were in flight.
 	if target, err = s.resolveUploadTarget(ctx, p, &req); err != nil {
@@ -140,7 +148,8 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 	}
 	now := s.now()
 	v := &domain.Version{ID: secure.NewID(), SpaceID: target.space.ID, BlobKey: blobKey, Size: total,
-		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID}
+		SHA256: hex.EncodeToString(h.Sum(nil)), CreatedAt: now, CreatedBy: p.UserID,
+		SignerID: prefix.Signer.User, Header: digest.Header, BodyHash: digest.BodyHash, Trailer: digest.Trailer}
 	n, err := s.commit(ctx, p, target, &req, v, prefix.Size)
 	if err != nil {
 		return fail(err)

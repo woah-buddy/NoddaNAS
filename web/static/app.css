@@ -82,6 +82,13 @@ th.num { text-align: right; }
 .trust-unverified { color: var(--muted); }
 .trust-changed, .trust-lookalike { color: var(--danger); border-color: var(--danger); font-weight: 600; }
 .trust-wrap .error { font-size: 13px; margin-top: 4px; max-width: 46ch; white-space: normal; }
+/* Versions dialog: on narrow screens the actions stack instead of overflowing. */
+@media (max-width: 600px) {
+  dialog:has(.versions) { padding: 16px; }
+  .versions th, .versions td { padding: 6px 4px; }
+  .versions td.actions { white-space: normal; }
+  .versions td.actions .link { display: block; margin: 0 0 4px auto; }
+}
 .confirm-list { margin: 0 0 12px; padding-left: 20px; max-height: 40vh; overflow: auto; }
 .confirm-list li { margin: 4px 0; }
 

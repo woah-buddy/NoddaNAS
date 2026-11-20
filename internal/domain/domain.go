@@ -68,7 +68,15 @@ type Version struct {
 	Size      int64
 	SHA256    string
 	CreatedAt time.Time
-	CreatedBy string
+	CreatedBy string // who uploaded it (a restore uploads someone else's container)
+	// Attribution (docs/E2EE.md §5b), copied or derived from the container
+	// at upload, for clients to verify: the header's claimed signer, the
+	// prefix, the body hash and the trailer. Empty when not known yet
+	// (versions stored before this was recorded) or not computable.
+	SignerID string
+	Header   []byte
+	BodyHash []byte
+	Trailer  []byte
 }
 
 // User is a FrontDir account, provisioned just-in-time on first sign-in.

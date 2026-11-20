@@ -472,6 +472,88 @@ func TestStreamingVerifier(t *testing.T) {
 	}
 }
 
+func TestDigest(t *testing.T) {
+	for _, size := range []int{0, 1, ChunkSize - 1, ChunkSize, ChunkSize + 1, 3*ChunkSize + 5} {
+		f := newFixture(t, size)
+		d := f.prefix.NewDigester()
+		// Feed it in awkward pieces, as a network body arrives.
+		for rest, step := f.ct, 1; len(rest) > 0; step = step*3 + 1 {
+			k := min(step, len(rest))
+			if _, err := d.Write(rest[:k]); err != nil {
+				t.Fatalf("size %d: %v", size, err)
+			}
+			rest = rest[k:]
+		}
+		dg, err := d.Digest()
+		if err != nil {
+			t.Fatalf("size %d: %v", size, err)
+		}
+		if !bytes.Equal(dg.Header, f.ct[:f.prefix.BodyOffset()]) || !bytes.Equal(dg.Trailer, f.ct[len(f.ct)-TrailerSize:]) {
+			t.Fatalf("size %d: header or trailer not captured", size)
+		}
+		if err := f.prefix.VerifyDigest(f.alice.Public(), dg.BodyHash, dg.Trailer); err != nil {
+			t.Fatalf("size %d: genuine digest rejected: %v", size, err)
+		}
+		// The body hash must be the one the full read verifies.
+		k, _ := f.prefix.Keys(f.nk)
+		v, _ := f.prefix.NewVerifier(f.alice.Public())
+		r := NewReader(bytes.NewReader(f.ct), f.prefix, k)
+		r.OnChunk = func(i int64, ct []byte) { v.Chunk(i, ct) }
+		if _, err := io.ReadAll(r); err != nil || !bytes.Equal(v.bh.Sum(nil), dg.BodyHash) {
+			t.Fatalf("size %d: digester and verifier disagree", size)
+		}
+	}
+
+	f := newFixture(t, 2*ChunkSize+3)
+	d := f.prefix.NewDigester()
+	d.Write(f.ct)
+	dg, _ := d.Digest()
+	// A server cannot pass off a wrong body hash or trailer ...
+	for i, mut := range []func(bh, tr []byte){
+		func(bh, _ []byte) { bh[0] ^= 1 },
+		func(_, tr []byte) { tr[20] ^= 1 },
+		func(_, tr []byte) { tr[0] = 'X' },
+	} {
+		bh, tr := bytes.Clone(dg.BodyHash), bytes.Clone(dg.Trailer)
+		mut(bh, tr)
+		if f.prefix.VerifyDigest(f.alice.Public(), bh, tr) == nil {
+			t.Fatalf("tampering %d accepted", i)
+		}
+	}
+	if f.prefix.VerifyDigest(f.alice.Public(), dg.BodyHash[:31], dg.Trailer) == nil {
+		t.Fatal("short body hash accepted")
+	}
+	// ... or another header (here: a different size claim) ...
+	other := bytes.Replace(f.ct[:f.prefix.BodyOffset()], []byte(`"size":131075`), []byte(`"size":131076`), 1)
+	if bytes.Equal(other, f.ct[:f.prefix.BodyOffset()]) {
+		t.Fatal("test did not alter the header")
+	}
+	op, err := ParsePrefix(bytes.NewReader(other))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.VerifyDigest(f.alice.Public(), dg.BodyHash, dg.Trailer) == nil {
+		t.Fatal("signature transferred to an altered header")
+	}
+	// ... or name someone else as the author.
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	if f.prefix.VerifyDigest(mallory.Public(), dg.BodyHash, dg.Trailer) == nil {
+		t.Fatal("digest verified against a signer the header does not name")
+	}
+	// Incomplete or overlong input is refused.
+	short := f.prefix.NewDigester()
+	short.Write(f.ct[:len(f.ct)-1])
+	if _, err := short.Digest(); err == nil {
+		t.Fatal("digest of a truncated container")
+	}
+	long := f.prefix.NewDigester()
+	long.Write(f.ct)
+	long.Write([]byte{0})
+	if _, err := long.Digest(); err == nil {
+		t.Fatal("digester accepted trailing data")
+	}
+}
+
 func TestThumbnails(t *testing.T) {
 	f := newFixture(t, 100)
 	k, _ := f.prefix.Keys(f.nk)
@@ -499,8 +581,11 @@ func TestThumbnails(t *testing.T) {
 		t.Fatal("thumbnail attributed to someone who did not sign it")
 	}
 	// The display rule: the version's author, or the viewer; nobody else.
-	if !ThumbAuthorOK(f.prefix, f.alice.Public(), "viewer") || ThumbAuthorOK(f.prefix, mallory.Public(), "viewer") ||
-		!ThumbAuthorOK(f.prefix, mallory.Public(), mallory.UserID) {
+	// "Author" means verified author: without that, only your own counts.
+	alice := f.alice.Public()
+	if !ThumbAuthorOK(alice, alice, "viewer") || ThumbAuthorOK(alice, mallory.Public(), "viewer") ||
+		!ThumbAuthorOK(alice, mallory.Public(), mallory.UserID) || ThumbAuthorOK(nil, alice, "viewer") ||
+		!ThumbAuthorOK(nil, mallory.Public(), mallory.UserID) {
 		t.Fatal("display rule wrong")
 	}
 	// Shape limits.

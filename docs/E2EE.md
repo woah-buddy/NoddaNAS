@@ -195,8 +195,9 @@ Why each part exists:
 - The signature makes the container **attributable**, which matters for backups: anyone can seal
   a key to a public key, so an unsigned container from a backup could have been planted.
 
-The server parses only `v`, `alg`, `size` and `owner.space`, checks the total length, and stores
-the bytes as they are.
+The server parses only `v`, `alg`, `size`, `owner.space` and `signer.user` (which must be a
+well-formed user ID), checks the total length, and stores the bytes as they are. While they
+stream in it also computes the values §5b needs.
 
 ## 5a. Thumbnails
 
@@ -218,17 +219,55 @@ maker, and parses none of it.
   version (another version's key differs), and the AAD ties it to the node.
 - Before deriving `tk`, readers check the header's key commitment against `NK`, so the header
   that supplies the salt and the author belongs to this node.
-- **Display rule:** a thumbnail is shown only if its maker is the version's author (the signer the
-  container header names, with the same key fingerprint) or the viewer. A collaborator with write
+- **Display rule:** a thumbnail is shown only if its maker is the version's **verified** author
+  (§5b: the signature over the header and body hash checks out for them) or the viewer. If the
+  author cannot be verified, viewers see only their own thumbnails. A collaborator with write
   access can attach a thumbnail to someone else's file, but only they will ever see it. Records
   are stored per maker, so nobody can overwrite the author's thumbnail.
 - Thumbnails are generated on the uploader's device from the plaintext, re-encoded, so photo
   metadata (EXIF, GPS) is not carried over. Clients render them only as `<img>` images of the two
   allowed types, never as SVG or a document.
-- Residual: the author named in the header is fully verified only when the whole file is
-  downloaded (the signature covers the header). A server colluding with a key-holding collaborator
-  could therefore relabel a version's header to show that collaborator's thumbnail as the
-  author's, until someone downloads the file and the signature fails.
+
+## 5b. Version attribution
+
+Every version shows who wrote it, checked without downloading the file. The container signature
+(§5) covers `SHA-256(prefix) || BH`. Computing `BH` normally takes the whole body, but `BH` is not
+secret: it is a hash of ciphertext. The server computes it once, as an upload streams in (chunk
+boundaries follow from the header's `size`), and stores beside each version:
+
+| Stored | Value |
+|---|---|
+| `prefix` | bytes `[0, 12+H)` of the container |
+| `bodyHash` | `BH` |
+| `trailer` | the last 68 bytes: `"SIG1"` and the signature |
+
+A client verifies a version's author by:
+
+1. parsing `prefix`, which must be exactly `12+H` bytes;
+2. checking the key commitment against the `NK` the folder hierarchy gave, so the header is one
+   that this node's key made;
+3. looking up the user the header names and checking their key fingerprint matches;
+4. verifying the trailer's signature with that user's key over
+   `"L/container" \0 || SHA-256(prefix) || bodyHash`.
+
+**Why the server cannot misattribute a version.** Only the author's key makes that signature, and
+a header belongs to exactly one container (it carries a fresh random salt). So the only
+`bodyHash` that verifies with a given header is the one its author computed. A server that alters
+the prefix, `bodyHash` or trailer, or pairs one version's header with another's, makes the check
+fail; it cannot make it name someone else. Clients show such a version as unverifiable.
+
+What a passing check does not prove: that the stored body still matches `BH`. Reading the file
+proves that (§5), as before. Attribution answers "who wrote this version", not "is the copy on
+the server intact".
+
+**Restores.** Restoring a version stores its container unchanged as a new version, so it keeps
+its author; the server records the restorer separately as the one who stored it. Clients show
+both ("You · restored by Bob").
+
+**Older versions.** Versions stored before the server recorded these values have none at first.
+The server's maintenance worker computes them from the stored ciphertext, a few per run; until
+then clients show the author as not checked yet. A container that is missing or damaged gets an
+empty record and stays unverifiable.
 
 ## 6. Shares and links
 

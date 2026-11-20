@@ -84,11 +84,14 @@ func OpenThumb(maker *PublicUser, nodeID string, p *Prefix, k *FileKeys, enc, si
 }
 
 // ThumbAuthorOK is the display rule: a thumbnail is shown only if its maker
-// is the version's author (as the container header names them, with the
-// same key fingerprint) or the viewer.
-func ThumbAuthorOK(p *Prefix, maker *PublicUser, viewerID string) bool {
+// is the version's author or the viewer. author is the version's verified
+// author (VerifyDigest passed for them), or nil if that could not be
+// checked; then only the viewer's own thumbnails qualify. The header's
+// signer claim alone is not enough: a server could pair someone else's
+// thumbnail with a header that names them.
+func ThumbAuthorOK(author, maker *PublicUser, viewerID string) bool {
 	if maker.ID == viewerID {
 		return true
 	}
-	return maker.ID == p.Signer.User && maker.Finger == p.Signer.FP
+	return author != nil && maker.ID == author.ID && maker.Finger == author.Finger
 }

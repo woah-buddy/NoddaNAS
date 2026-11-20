@@ -95,6 +95,18 @@ func RestoreCopy(t *testing.T, from string) (restored *postgres.Store, dump stri
 	return to, sb.String()
 }
 
+// Exec runs SQL directly in a test schema, for tests that play a server
+// whose database has been tampered with.
+func Exec(t *testing.T, schema, sql string, args ...any) int64 {
+	t.Helper()
+	c := adminConn(t, withSchema(os.Getenv("FRONTDIR_TEST_DATABASE_URL"), schema))
+	tag, err := c.Exec(context.Background(), sql, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tag.RowsAffected()
+}
+
 func adminConn(t *testing.T, dsn string) *pgx.Conn {
 	t.Helper()
 	c, err := pgx.Connect(context.Background(), dsn)

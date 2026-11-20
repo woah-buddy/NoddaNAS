@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -237,13 +238,31 @@ func viewMember(m *domain.Member) memberView {
 	return v
 }
 
+// versionView is one version of a file. Prefix, BodyHash and Trailer are
+// its attribution digest (docs/E2EE.md §5b), for the client to verify who
+// signed it; absent while not known yet, or when it cannot be computed.
 type versionView struct {
 	ID        string    `json:"id"`
 	Size      int64     `json:"size"`
 	SHA256    string    `json:"sha256"`
 	CreatedAt time.Time `json:"createdAt"`
 	CreatedBy string    `json:"createdBy"`
+	Prefix    string    `json:"prefix,omitempty"`
+	BodyHash  string    `json:"bodyHash,omitempty"`
+	Trailer   string    `json:"trailer,omitempty"`
 }
+
+func viewVersion(v *domain.Version) versionView {
+	out := versionView{ID: v.ID, Size: v.Size, SHA256: v.SHA256, CreatedAt: v.CreatedAt, CreatedBy: v.CreatedBy}
+	if len(v.Header) > 0 && len(v.BodyHash) > 0 && len(v.Trailer) > 0 {
+		out.Prefix = b64(v.Header)
+		out.BodyHash = b64(v.BodyHash)
+		out.Trailer = b64(v.Trailer)
+	}
+	return out
+}
+
+func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 type shareView struct {
 	ID           string     `json:"id"`

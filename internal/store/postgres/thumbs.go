@@ -30,15 +30,16 @@ func (s *Store) GetThumbnails(ctx context.Context, versionID string, makers []st
 	return out, mapErr(err)
 }
 
-// ThumbnailHints reports which versions have a thumbnail by their uploader
-// or by the viewer.
+// ThumbnailHints reports which versions have a thumbnail by their author
+// (the signer their header names; the uploader for versions not yet
+// backfilled) or by the viewer.
 func (s *Store) ThumbnailHints(ctx context.Context, versionIDs []string, viewerID string) (map[string]bool, error) {
 	out := map[string]bool{}
 	if len(versionIDs) == 0 {
 		return out, nil
 	}
 	rows, err := s.db.Query(ctx, `SELECT DISTINCT t.version_id FROM thumbnails t JOIN versions v ON v.id = t.version_id
-		WHERE t.version_id = ANY($1::text[]) AND (t.maker_id = v.created_by OR t.maker_id = $2)`, versionIDs, viewerID)
+		WHERE t.version_id = ANY($1::text[]) AND (t.maker_id = COALESCE(v.signer_id, v.created_by) OR t.maker_id = $2)`, versionIDs, viewerID)
 	if err != nil {
 		return nil, mapErr(err)
 	}

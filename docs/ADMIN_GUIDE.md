@@ -673,7 +673,9 @@ user appears to come from the proxy and shares one rate-limit budget.
 | Yearly, or when staff leave | Rotate the database password, OIDC client secret and SAML SP key | [§14](#14-rotating-secrets) |
 
 The background worker does the rest automatically: it expires trash, purges deleted files and
-team folders, and removes expired sessions and login requests.
+team folders, removes expired sessions and login requests, and, after an upgrade, works through
+older file versions so the web app can show who saved each one (a few versions a minute, reading
+encrypted files from storage; it decrypts nothing).
 
 ---
 

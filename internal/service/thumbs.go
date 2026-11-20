@@ -2,10 +2,9 @@ package service
 
 import (
 	"context"
-	"encoding/binary"
-	"io"
 
 	"github.com/woah-buddy/FrontDir/internal/domain"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
 	"github.com/woah-buddy/FrontDir/internal/validate"
 )
 
@@ -46,12 +45,11 @@ func (s *Service) AttachThumbnail(ctx context.Context, p Principal, nodeID, vers
 }
 
 // ThumbnailSet is what a client needs to show a file's thumbnail: the
-// current version's container prefix (it carries the salt, the key
-// commitment and the author) and the thumbnails made by that version's
-// uploader and by the caller.
+// current version, with its attribution digest so the client can verify
+// who wrote it (docs/E2EE.md §5b), and the thumbnails made by that author
+// and by the caller.
 type ThumbnailSet struct {
-	VersionID  string
-	Prefix     []byte
+	Version    *domain.Version
 	Thumbnails []*domain.Thumbnail
 }
 
@@ -69,32 +67,40 @@ func (s *Service) Thumbnails(ctx context.Context, p Principal, nodeID string) (*
 	if err != nil {
 		return nil, err
 	}
-	thumbs, err := s.store.GetThumbnails(ctx, v.ID, []string{v.CreatedBy, p.UserID})
+	if len(v.Header) == 0 {
+		// Stored before digests were recorded, and not backfilled yet. The
+		// client needs the prefix for the thumbnail key; without the rest
+		// it cannot verify the author, so it shows only its own thumbnail.
+		if v.Header, err = s.readPrefix(ctx, v); err != nil {
+			return nil, err
+		}
+	}
+	author := v.SignerID
+	if author == "" {
+		author = v.CreatedBy
+	}
+	thumbs, err := s.store.GetThumbnails(ctx, v.ID, []string{author, p.UserID})
 	if err != nil {
 		return nil, err
 	}
 	if len(thumbs) == 0 {
 		return nil, domain.ErrNotFound
 	}
+	return &ThumbnailSet{Version: v, Thumbnails: thumbs}, nil
+}
+
+// readPrefix reads a version's container prefix from blob storage.
+func (s *Service) readPrefix(ctx context.Context, v *domain.Version) ([]byte, error) {
 	rc, err := s.blobs.Open(ctx, v.BlobKey)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
-	var head [12]byte
-	if _, err := io.ReadFull(rc, head[:]); err != nil {
-		return nil, err
-	}
-	hl := binary.BigEndian.Uint32(head[8:])
-	if hl == 0 || hl > 64<<10 {
+	p, err := e2ee.ParsePrefix(rc)
+	if err != nil {
 		return nil, domain.E(domain.CodeInvalid, "stored container is malformed")
 	}
-	prefix := make([]byte, 12+int(hl))
-	copy(prefix, head[:])
-	if _, err := io.ReadFull(rc, prefix[12:]); err != nil {
-		return nil, err
-	}
-	return &ThumbnailSet{VersionID: v.ID, Prefix: prefix, Thumbnails: thumbs}, nil
+	return p.Raw(), nil
 }
 
 // markThumbnails sets the HasThumbnail hint on listed files.

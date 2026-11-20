@@ -55,7 +55,8 @@ server is still responsible for (access control, integrity of structure, availab
 | Capturing another user's shares via their email | Accounts keyed by (issuer, subject); emails recorded only if verified and unclaimed; SAML emails trusted only if configured | `service/users.go` |
 | Forged key grant (anyone can seal to a public key) | Every share, team grant and trash seal is signed by its granter; clients verify | `e2ee` tests: forged grant/share rejected |
 | Server inserts a team member to obtain the team key | Clients never grant keys automatically; a manager approves each pending member after seeing their fingerprint and verification status; the Go library requires an approval callback | Browser test: database-inserted member is not granted; `TestEndToEnd` (no blind or unapproved grants) |
-| A collaborator attaches a misleading thumbnail to someone else's file (a harmless picture on something else) | Thumbnails are stored per version and per maker, so nobody can overwrite the author's; clients show only the version author's thumbnail (the header's signer, same fingerprint) or the viewer's own, after verifying the maker's signature; a thumbnail is bound to its node and version | `TestThumbnails` (Go and HTTP), interop `thumbnail-from-go` |
+| A collaborator attaches a misleading thumbnail to someone else's file (a harmless picture on something else) | Thumbnails are stored per version and per maker, so nobody can overwrite the author's; clients show only the version's verified author's thumbnail (E2EE §5b) or the viewer's own, after verifying the maker's signature; a thumbnail is bound to its node and version | `TestThumbnails` (Go and HTTP), `TestVersionAuthors`, interop `thumbnail-from-go` |
+| Server attributes a version to someone who did not write it (to make a planted or altered version look like a colleague's, or to show a collaborator's thumbnail as the author's) | Every version's author is verified from its header without downloading it: the author's signature over the header and the body hash must check out, after the key commitment ties the header to the node (E2EE §5b); a header carries a fresh salt, so no other body hash verifies with it; altered digests or swapped headers show "cannot verify" and that version cannot be restored from the web app | `TestDigest`, `TestVersionAuthors` (tampered hash, trailer and swapped header), interop `version-author-from-go`, browser test |
 | Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
@@ -81,7 +82,8 @@ server is still responsible for (access control, integrity of structure, availab
 ### Repudiation
 
 Containers, shares, grants and trash seals are signed by their author's Ed25519 key, so a client
-can attribute content and grants cryptographically. The server additionally logs structured audit
+can attribute content and grants cryptographically. The Versions dialog shows each version's
+verified author without downloading the file (E2EE §5b). The server additionally logs structured audit
 events (identifiers only; never names, tokens or passwords).
 
 ### Information disclosure
@@ -145,25 +147,24 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
 8. **Public links can carry their key.** Whoever has the full link URL can decrypt the shared item
    until it expires or is revoked; link passwords add a server-enforced gate on top.
 9. **Per-replica rate limits and WebDAV locks.** See ARCHITECTURE.md › Scaling.
-8. **Administrators can redirect sign-in.** An administrator who passes "confirm it's you" can
-   point FrontDir at another identity provider. That cannot take over existing accounts or
-   decrypt anything, but people who then sign in through the new provider get new accounts, and
-   its groups decide who administers from then on. Lock sign-in to the server's configuration
-   (`FRONTDIR_OIDC_ISSUER` / `FRONTDIR_SAML_IDP_METADATA_URL`, or `FRONTDIR_WEB_SETTINGS=false`)
-   where that is a concern; changes are audited either way.
-9. **The database is trusted for settings.** Anyone who can write to the database can change
-   settings directly, as they could change any other metadata. Settings are not signed; the
-   end-to-end encryption, not the settings, protects file contents from such an attacker.
-10. **Identity providers on private networks are reachable.** So that an IdP on the same Docker
-   network works, administrators can make the server send GET requests to private addresses.
-   The responses are never shown, only whether the check passed.
-11. **The local drive holds unlocked keys and serves plaintext for as long as it runs.** Anyone who
-   can act as the user on that computer can read what the drive shows (as they could read files
-   the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
-   secret; `--url-file` keeps it in a file readable only by the user.
-12. **Thumbnail attribution rests on the header until the file is downloaded.** The author a
-   thumbnail is checked against is the signer the container header names, and the header's
-   signature is verified only when the whole file is read. A server colluding with a key-holding
-   collaborator could relabel a header so that collaborator's thumbnail is shown as the author's;
-   downloading the file then fails its signature check. It needs both parties and changes only a
-   preview.
+10. **Administrators can redirect sign-in.** An administrator who passes "confirm it's you" can
+    point FrontDir at another identity provider. That cannot take over existing accounts or
+    decrypt anything, but people who then sign in through the new provider get new accounts, and
+    its groups decide who administers from then on. Lock sign-in to the server's configuration
+    (`FRONTDIR_OIDC_ISSUER` / `FRONTDIR_SAML_IDP_METADATA_URL`, or `FRONTDIR_WEB_SETTINGS=false`)
+    where that is a concern; changes are audited either way.
+11. **The database is trusted for settings.** Anyone who can write to the database can change
+    settings directly, as they could change any other metadata. Settings are not signed; the
+    end-to-end encryption, not the settings, protects file contents from such an attacker.
+12. **Identity providers on private networks are reachable.** So that an IdP on the same Docker
+    network works, administrators can make the server send GET requests to private addresses.
+    The responses are never shown, only whether the check passed.
+13. **The local drive holds unlocked keys and serves plaintext for as long as it runs.** Anyone who
+    can act as the user on that computer can read what the drive shows (as they could read files
+    the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
+    secret; `--url-file` keeps it in a file readable only by the user.
+14. **Version history is the server's account, authorship is not.** Each version's author is
+    verified (E2EE §5b), but when a version was saved, who stored it (the "restored by" name) and
+    which version is current come from the server. A malicious server could present an older,
+    genuine version as the current one, or misname who restored it; it cannot make a version
+    appear to be written by someone who did not write it.
