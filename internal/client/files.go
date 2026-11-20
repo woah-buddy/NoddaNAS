@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -47,15 +48,19 @@ func (c *Client) Resolve(ctx context.Context, path string) (*Node, error) {
 
 // openContainer downloads a container (current version unless versionID).
 func (c *Client) openContainer(ctx context.Context, nodeID, versionID string) (io.ReadCloser, error) {
-	path := "/api/v1/nodes/" + nodeID + "/content"
-	if versionID != "" {
-		path += "?version=" + versionID
-	}
-	resp, err := c.do(ctx, "GET", path, nil, nil, nil)
+	resp, err := c.getContainer(ctx, nodeID, versionID)
 	if err != nil {
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+func (c *Client) getContainer(ctx context.Context, nodeID, versionID string) (*http.Response, error) {
+	path := "/api/v1/nodes/" + nodeID + "/content"
+	if versionID != "" {
+		path += "?version=" + versionID
+	}
+	return c.do(ctx, "GET", path, nil, nil, nil)
 }
 
 // DownloadContainer writes a file's encrypted container to w unchanged:
@@ -77,12 +82,20 @@ func (c *Client) Download(ctx context.Context, nodeID string, w io.Writer) (*e2e
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.openContainer(ctx, nodeID, "")
+	resp, err := c.getContainer(ctx, nodeID, "")
 	if err != nil {
 		return nil, err
 	}
-	defer body.Close()
-	return c.decrypt(ctx, body, nk, w)
+	defer resp.Body.Close()
+	p, err := e2ee.ParsePrefix(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	// Not older than, or different from, what this client saw (§5c).
+	if err := c.checkServedRecord(ctx, nodeID, p, resp.Header.Get("X-FrontDir-Record"), resp.Header.Get("X-FrontDir-Record-Sig")); err != nil {
+		return nil, err
+	}
+	return c.decryptAfterPrefix(ctx, resp.Body, p, nk, w)
 }
 
 func (c *Client) decrypt(ctx context.Context, r io.Reader, nk *e2ee.NodeKey, w io.Writer) (*e2ee.Meta, error) {
@@ -90,6 +103,10 @@ func (c *Client) decrypt(ctx context.Context, r io.Reader, nk *e2ee.NodeKey, w i
 	if err != nil {
 		return nil, err
 	}
+	return c.decryptAfterPrefix(ctx, r, p, nk, w)
+}
+
+func (c *Client) decryptAfterPrefix(ctx context.Context, r io.Reader, p *e2ee.Prefix, nk *e2ee.NodeKey, w io.Writer) (*e2ee.Meta, error) {
 	k, err := p.Keys(nk) // key commitment: the container belongs to this node
 	if err != nil {
 		return nil, err
@@ -139,14 +156,19 @@ func (c *Client) RestoreContainer(ctx context.Context, parentID string, containe
 	}
 	e["id"] = id
 	hdr, _ := json.Marshal(e)
+	rec, err := c.nextRecord(ctx, id, p, e2ee.KindRestore, true) // stored again, from a backup
+	if err != nil {
+		return nil, err
+	}
 	var n Node
 	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", bytes.NewReader(container), int64(len(container)),
-		map[string]string{"X-FrontDir-Entry": string(hdr)}, &n); err != nil {
+		recordHeaders(rec, map[string]string{"X-FrontDir-Entry": string(hdr)}), &n); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
 	c.keys[id] = nk
 	c.mu.Unlock()
+	c.remember(c.Account(), id, rec, false)
 	n.Name = meta.Name
 	return &n, nil
 }

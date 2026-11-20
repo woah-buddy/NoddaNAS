@@ -96,6 +96,7 @@ th.num { text-align: right; }
 .banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
           border: 1px solid var(--accent); border-radius: 10px; padding: 10px 14px; margin: 0 0 16px; }
 .banner.ok { border-color: var(--line); color: var(--muted); }
+.banner.history-warning { border-color: var(--danger); max-width: 60ch; }
 form.settings fieldset { display: grid; gap: 14px; padding: 12px 16px 16px; }
 form.settings legend { font-size: 15px; color: var(--text); font-weight: 600; }
 .field { display: grid; gap: 4px; max-width: 64ch; }

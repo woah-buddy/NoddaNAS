@@ -29,7 +29,7 @@ in the browser.
 
 | | |
 |---|---|
-| Files & folders | Upload, download, folders, rename, move, versions (restore any; each shows who saved it, verified by signature), trash with automatic purge |
+| Files & folders | Upload, download, folders, rename, move, versions (restore any; a signed history shows who saved each one and when, and warns if the server rolls a file back), trash with automatic purge |
 | Backups | Download any file as an encrypted `.fdenc` container and restore it later, anywhere in the same space; `frontdir-cli backup`; read-only WebDAV for rclone/restic mirrors |
 | Disaster recovery | Whole-server backups stay end-to-end encrypted; `frontdir verify-storage` proves a backup is complete and intact without keys; tested rebuild runbook ([DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md)) |
 | Offline recovery | `frontdir-cli decrypt` / `decrypt-tree` turn containers or whole mirrors back into files with just your key backup |

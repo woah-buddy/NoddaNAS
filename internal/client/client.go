@@ -36,6 +36,7 @@ type Client struct {
 	spaces map[string]*e2ee.Space     // space ID -> unlocked space
 	pubs   map[string]*ecdh.PublicKey // space ID -> verified space public key
 	dir    map[string]*e2ee.PublicUser
+	seen   SeenStore // file histories seen (docs/E2EE.md §5c)
 }
 
 // New returns a client. token is an app password (fd_...); pass "" if hc
@@ -46,7 +47,7 @@ func New(baseURL string, hc *http.Client, token string) *Client {
 	}
 	return &Client{base: strings.TrimRight(baseURL, "/"), http: hc, token: token,
 		keys: map[string]*e2ee.NodeKey{}, spaces: map[string]*e2ee.Space{}, pubs: map[string]*ecdh.PublicKey{},
-		dir: map[string]*e2ee.PublicUser{}}
+		dir: map[string]*e2ee.PublicUser{}, seen: &MemorySeen{}}
 }
 
 // APIError is an error returned by the server.
@@ -713,15 +714,36 @@ func (c *Client) Upload(ctx context.Context, parentID, name string, r io.Reader,
 	if err != nil {
 		return nil, err
 	}
+	p, body, err := peekPrefix(body)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := c.nextRecord(ctx, id, p, e2ee.KindSave, true)
+	if err != nil {
+		return nil, err
+	}
 	var n Node
-	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", body, total, map[string]string{"X-FrontDir-Entry": string(hdr)}, &n); err != nil {
+	if err := c.upload(ctx, "POST", "/api/v1/nodes/"+parentID+"/files", body, total,
+		recordHeaders(rec, map[string]string{"X-FrontDir-Entry": string(hdr)}), &n); err != nil {
 		return nil, err
 	}
 	c.mu.Lock()
 	c.keys[id] = nk
 	c.mu.Unlock()
+	c.remember(c.Account(), id, rec, false)
 	n.Name = name
 	return &n, nil
+}
+
+// peekPrefix parses a container's prefix from the start of r and returns a
+// reader that still yields the whole container.
+func peekPrefix(r io.Reader) (*e2ee.Prefix, io.Reader, error) {
+	var head bytes.Buffer
+	p, err := e2ee.ParsePrefix(io.TeeReader(r, &head))
+	if err != nil {
+		return nil, nil, err
+	}
+	return p, io.MultiReader(&head, r), nil
 }
 
 // UploadVersion encrypts r as a new version of an existing file.
@@ -734,9 +756,20 @@ func (c *Client) UploadVersion(ctx context.Context, nodeID, name string, r io.Re
 	if err != nil {
 		return nil, err
 	}
+	p, body, err := peekPrefix(body)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := c.nextRecord(ctx, nodeID, p, e2ee.KindSave, false)
+	if err != nil {
+		return nil, err
+	}
 	var n Node
-	err = c.upload(ctx, "PUT", "/api/v1/nodes/"+nodeID+"/content", body, total, nil, &n)
-	return &n, err
+	if err := c.upload(ctx, "PUT", "/api/v1/nodes/"+nodeID+"/content", body, total, recordHeaders(rec, nil), &n); err != nil {
+		return nil, err
+	}
+	c.remember(c.Account(), nodeID, rec, false)
+	return &n, nil
 }
 
 func (c *Client) upload(ctx context.Context, method, path string, body io.Reader, size int64, hdr map[string]string, out any) error {

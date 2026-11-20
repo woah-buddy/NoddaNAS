@@ -77,6 +77,14 @@ type Version struct {
 	Header   []byte
 	BodyHash []byte
 	Trailer  []byte
+	// Signed history (docs/E2EE.md §5c): the record whoever stored the
+	// version signed, its signature, its position in the file's chain and
+	// its hash (which the next version's record names). Empty for versions
+	// stored before records existed.
+	Record     []byte
+	RecordSig  []byte
+	Seq        int64
+	RecordHash []byte
 }
 
 // User is a FrontDir account, provisioned just-in-time on first sign-in.

@@ -14,6 +14,8 @@
 //	frontdir-cli backup <dir>               save your personal space, still encrypted
 //	frontdir-cli restore <file.fdenc> [folder]  restore one backed-up file
 //	frontdir-cli export-keys <file>         save your (encrypted) key backup
+//	frontdir-cli accept <path>              accept a file's history as the server now
+//	                                        shows it, after a "gone back in time" warning
 //	frontdir-cli mount [--listen 127.0.0.1:8484] [--read-only] [--url-file FILE]
 //	                                        show your files, decrypted, as a local
 //	                                        network drive (WebDAV on this computer only)
@@ -24,6 +26,11 @@
 //	frontdir-cli decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
 //
 // Paths are relative to your personal space, e.g. "Documents/taxes.pdf".
+//
+// The CLI and the drive remember the newest version of each file they have
+// verified, in FRONTDIR_STATE_DIR (default: frontdir in your user
+// configuration directory), and refuse a file whose history the server later
+// shows ending earlier or going a different way (docs/E2EE.md §5c).
 package main
 
 import (
@@ -63,7 +70,7 @@ func main() {
 	switch cmd {
 	case "decrypt", "decrypt-tree":
 		err = offline(cmd, args)
-	case "ls", "get", "put", "mkdir", "teams", "backup", "restore", "export-keys":
+	case "ls", "get", "put", "mkdir", "teams", "backup", "restore", "export-keys", "accept":
 		err = online(ctx, cmd, args)
 	case "mount":
 		err = mount(ctx, args)
@@ -80,7 +87,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: frontdir-cli <command> [args]
 
 online:   ls [path] | get <path> [local] | put <local> [folder] | mkdir <path> | teams
-          backup <dir> | restore <file.fdenc> [folder] | export-keys <file>
+          backup <dir> | restore <file.fdenc> [folder] | export-keys <file> | accept <path>
           mount [--listen 127.0.0.1:8484] [--read-only] [--url-file FILE] [-v]
 offline:  decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
           decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
@@ -130,7 +137,25 @@ func connect(ctx context.Context) (*client.Client, error) {
 	if err := c.Unlock(ctx, pass, false); err != nil {
 		return nil, err
 	}
+	seen, err := openSeen()
+	if err != nil {
+		return nil, err
+	}
+	c.SetSeenStore(seen)
 	return c, nil
+}
+
+// openSeen opens the record of file histories this device has verified.
+func openSeen() (*client.FileSeen, error) {
+	dir := os.Getenv("FRONTDIR_STATE_DIR")
+	if dir == "" {
+		cfg, err := os.UserConfigDir()
+		if err != nil {
+			return nil, fmt.Errorf("cannot find a place to remember file histories (set FRONTDIR_STATE_DIR): %w", err)
+		}
+		dir = filepath.Join(cfg, "frontdir")
+	}
+	return client.OpenFileSeen(filepath.Join(dir, "seen.json"))
 }
 
 func online(ctx context.Context, cmd string, args []string) error {
@@ -230,6 +255,15 @@ func online(ctx context.Context, cmd string, args []string) error {
 			fmt.Println("restored", n.Name)
 		}
 		return err
+	case "accept":
+		n, err := c.Resolve(ctx, arg(0, ""))
+		if err != nil {
+			return err
+		}
+		if err := c.AcceptCurrent(ctx, n.ID); err != nil {
+			return err
+		}
+		fmt.Printf("accepted the current history of %s\n", n.Name)
 	case "export-keys":
 		kb, err := c.ExportKeys(ctx)
 		if err != nil {

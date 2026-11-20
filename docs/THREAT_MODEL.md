@@ -57,6 +57,8 @@ server is still responsible for (access control, integrity of structure, availab
 | Server inserts a team member to obtain the team key | Clients never grant keys automatically; a manager approves each pending member after seeing their fingerprint and verification status; the Go library requires an approval callback | Browser test: database-inserted member is not granted; `TestEndToEnd` (no blind or unapproved grants) |
 | A collaborator attaches a misleading thumbnail to someone else's file (a harmless picture on something else) | Thumbnails are stored per version and per maker, so nobody can overwrite the author's; clients show only the version's verified author's thumbnail (E2EE §5b) or the viewer's own, after verifying the maker's signature; a thumbnail is bound to its node and version | `TestThumbnails` (Go and HTTP), `TestVersionAuthors`, interop `thumbnail-from-go` |
 | Server attributes a version to someone who did not write it (to make a planted or altered version look like a colleague's, or to show a collaborator's thumbnail as the author's) | Every version's author is verified from its header without downloading it: the author's signature over the header and the body hash must check out, after the key commitment ties the header to the node (E2EE §5b); a header carries a fresh salt, so no other body hash verifies with it; altered digests or swapped headers show "cannot verify" and that version cannot be restored from the web app | `TestDigest`, `TestVersionAuthors` (tampered hash, trailer and swapped header), interop `version-author-from-go`, browser test |
+| Server rewrites a file's version history: reorders, inserts, drops or relabels versions (who stored one, when, restore versus save) | Every version carries a record signed by whoever stored it, chained to the previous one (E2EE §5c); the server keeps the chain linear (one version per position) and clients verify it, refusing to save or restore on top of a history that fails | `TestVersionHistory`, `TestVersionRecords` (server refuses misplaced, foreign or forged records; racing uploads), `TestSignedHistory` (tampered time, order, dropped and moved records), interop `history-from-go` |
+| Server rolls a file back to an older version, or shows people different histories | Each device remembers the newest record it verified per file; downloads, the drive, saves and the Versions dialog report "gone back in time" or "history differs" and refuse until the user accepts; detection, not prevention (residual 14) | `TestFreshness`, `TestSignedHistory` (rollback on download, drive, save, after a restart; fork through a third user), browser test |
 | Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
@@ -163,8 +165,12 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
     can act as the user on that computer can read what the drive shows (as they could read files
     the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
     secret; `--url-file` keeps it in a file readable only by the user.
-14. **Version history is the server's account, authorship is not.** Each version's author is
-    verified (E2EE §5b), but when a version was saved, who stored it (the "restored by" name) and
-    which version is current come from the server. A malicious server could present an older,
-    genuine version as the current one, or misname who restored it; it cannot make a version
-    appear to be written by someone who did not write it.
+14. **Rollbacks and forks are detected, not prevented, and only for what you have seen.** Who
+    wrote and who stored each version, when, and in what order are signed (E2EE §5b, §5c). The
+    server can still cut the newest versions off a file, or show different people different
+    histories. A client notices once it is shown an older or different history than one it saw
+    before. A person who never saw the newer history can't tell; the memory is per device (clearing
+    site data or a new device starts afresh); and folder-level changes (hiding a file, undoing a
+    rename or a deletion) are not covered. With one untrusted server and no other channel between
+    users this is the best available ("fork consistency"). After a legitimate restore from backup,
+    users see these warnings for files changed since the backup and accept them.

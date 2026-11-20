@@ -34,7 +34,7 @@ func TestVersionAuthors(t *testing.T) {
 	}
 	f := must[*client.Node](t)(alice.Upload(ctx, docs, "plan.txt", strings.NewReader("alice's first draft"), 19, time.Now()))
 	must[*client.Node](t)(bob.UploadVersion(ctx, f.ID, "plan.txt", strings.NewReader("bob's edit"), 10, time.Now()))
-	vs := must[[]client.Version](t)(alice.Versions(ctx, f.ID))
+	vs := must[*client.History](t)(alice.Versions(ctx, f.ID)).Versions
 	if len(vs) != 2 {
 		t.Fatalf("%d versions", len(vs))
 	}
@@ -47,7 +47,7 @@ func TestVersionAuthors(t *testing.T) {
 	type want struct{ author, uploader string }
 	check := func(c *client.Client, label string, exp []want) []client.Version {
 		t.Helper()
-		vs := must[[]client.Version](t)(c.Versions(ctx, f.ID))
+		vs := must[*client.History](t)(c.Versions(ctx, f.ID)).Versions
 		if len(vs) != len(exp) {
 			t.Fatalf("%s: %d versions, want %d", label, len(vs), len(exp))
 		}
@@ -77,7 +77,7 @@ func TestVersionAuthors(t *testing.T) {
 		if testutil.Exec(t, schema, tamper, bobs) != 1 {
 			t.Fatal("tamper did not apply")
 		}
-		vs := must[[]client.Version](t)(alice.Versions(ctx, f.ID))
+		vs := must[*client.History](t)(alice.Versions(ctx, f.ID)).Versions
 		if vs[1].Author != nil || vs[1].AuthorErr == nil {
 			t.Fatalf("tampered digest still verified (%s)", tamper)
 		}
@@ -95,7 +95,7 @@ func TestVersionAuthors(t *testing.T) {
 	// Swapping headers between versions does not move authorship either:
 	// Alice's header with Bob's body hash verifies for nobody.
 	testutil.Exec(t, schema, `UPDATE versions SET header = (SELECT header FROM versions WHERE id = $2) WHERE id = $1`, bobs, restored)
-	if vs := must[[]client.Version](t)(alice.Versions(ctx, f.ID)); vs[1].Author != nil {
+	if vs := must[*client.History](t)(alice.Versions(ctx, f.ID)).Versions; vs[1].Author != nil {
 		t.Fatalf("version attributed to %s through a swapped header", vs[1].Author.ID)
 	}
 	testutil.Exec(t, schema, `UPDATE versions SET body_hash = NULL WHERE id = $1`, bobs)
@@ -107,7 +107,7 @@ func TestVersionAuthors(t *testing.T) {
 	if testutil.Exec(t, schema, `UPDATE versions SET signer_id = NULL, header = NULL, body_hash = NULL, trailer = NULL`) != 3 {
 		t.Fatal("expected three versions")
 	}
-	for _, v := range must[[]client.Version](t)(alice.Versions(ctx, f.ID)) {
+	for _, v := range must[*client.History](t)(alice.Versions(ctx, f.ID)).Versions {
 		if v.Author != nil || !errors.Is(v.AuthorErr, client.ErrNoDigest) {
 			t.Fatalf("legacy version: %v %v", v.Author, v.AuthorErr)
 		}

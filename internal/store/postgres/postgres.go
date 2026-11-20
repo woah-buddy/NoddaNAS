@@ -679,7 +679,8 @@ const subtreeCTE = `WITH RECURSIVE sub AS (
 		SELECT n.id FROM nodes n JOIN sub ON n.parent_id = sub.id WHERE n.trashed_at IS NULL
 	) `
 
-const versionCols = `id, node_id, space_id, blob_key, size, sha256, created_at, created_by, signer_id, header, body_hash, trailer`
+const versionCols = `id, node_id, space_id, blob_key, size, sha256, created_at, created_by, signer_id, header, body_hash, trailer,
+	record, record_sig, seq, record_hash`
 
 // ListVersionBlobs pages through every stored file version in blob-key
 // order (for storage verification).
@@ -697,12 +698,16 @@ func scanVersions(rows pgx.Rows) ([]*domain.Version, error) {
 	for rows.Next() {
 		v := &domain.Version{}
 		var signer *string
+		var seq *int64
 		if err := rows.Scan(&v.ID, &v.NodeID, &v.SpaceID, &v.BlobKey, &v.Size, &v.SHA256, &v.CreatedAt, &v.CreatedBy,
-			&signer, &v.Header, &v.BodyHash, &v.Trailer); err != nil {
+			&signer, &v.Header, &v.BodyHash, &v.Trailer, &v.Record, &v.RecordSig, &seq, &v.RecordHash); err != nil {
 			return nil, mapErr(err)
 		}
 		if signer != nil {
 			v.SignerID = *signer
+		}
+		if seq != nil {
+			v.Seq = *seq
 		}
 		out = append(out, v)
 	}
@@ -794,9 +799,16 @@ func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Ver
 			}
 			n.Revision = expectedRev + 1
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO versions (`+versionCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		var seq *int64
+		if v.Seq > 0 {
+			seq = &v.Seq
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO versions (`+versionCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 			v.ID, v.NodeID, v.SpaceID, v.BlobKey, v.Size, v.SHA256, v.CreatedAt, v.CreatedBy,
-			v.SignerID, v.Header, v.BodyHash, v.Trailer); err != nil {
+			v.SignerID, v.Header, v.BodyHash, v.Trailer, v.Record, v.RecordSig, seq, v.RecordHash); err != nil {
+			if isUniqueViolation(err, "versions_node_seq") {
+				return domain.E(domain.CodePrecondition, "the file changed while you were saving; reload and retry")
+			}
 			return err
 		}
 		// Atomic quota check: condition and increment in one statement.

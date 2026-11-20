@@ -163,6 +163,9 @@ func (r *readFile) open() error {
 	}
 	rf, err := r.fs.c.OpenRemote(r.ctx, r.e.node.ID)
 	if err != nil {
+		if herr := r.fs.historyProblem(r.e.path, err); herr != nil {
+			return herr
+		}
 		return mapErr(err)
 	}
 	if r.fs.failedVerification(rf.Version) {
@@ -262,6 +265,9 @@ func (w *writeFile) Close() error {
 		}
 	}
 	w.fs.invalidate(w.parent.node.ID)
+	if herr := w.fs.historyProblem(path.Join(w.parent.path, w.name), err); herr != nil {
+		return herr
+	}
 	return mapErr(err)
 }
 

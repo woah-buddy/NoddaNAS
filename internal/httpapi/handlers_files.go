@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -115,6 +116,12 @@ func (s *Server) handleUploadVersion(w http.ResponseWriter, r *http.Request, p s
 
 func (s *Server) upload(w http.ResponseWriter, r *http.Request, p service.Principal, req service.UploadRequest, status int) {
 	req.Size = r.ContentLength
+	// The signed version record (docs/E2EE.md §5c) travels in headers too.
+	var err error
+	if req.Record, req.RecordSig, err = decodeRecord(r.Header.Get("X-FrontDir-Record"), r.Header.Get("X-FrontDir-Record-Sig")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	body := &idleReader{r: r.Body, rc: http.NewResponseController(w), d: time.Minute}
 	n, err := s.svc.Upload(r.Context(), p, req, body)
 	if err != nil {
@@ -183,8 +190,38 @@ func (s *Server) handleListVersions(w http.ResponseWriter, r *http.Request, p se
 	writeJSON(w, http.StatusOK, map[string]any{"versions": out})
 }
 
+// decodeRecord decodes a version record and its signature (base64url).
+// Both empty is allowed here; the service decides whether one is needed.
+func decodeRecord(rec, sig string) ([]byte, []byte, error) {
+	if rec == "" && sig == "" {
+		return nil, nil, nil
+	}
+	if len(rec) > 2048 || len(sig) > 128 {
+		return nil, nil, domain.E(domain.CodeInvalid, "malformed version record")
+	}
+	raw, err1 := base64.RawURLEncoding.Strict().DecodeString(rec)
+	rs, err2 := base64.RawURLEncoding.Strict().DecodeString(sig)
+	if err1 != nil || err2 != nil {
+		return nil, nil, domain.E(domain.CodeInvalid, "malformed version record")
+	}
+	return raw, rs, nil
+}
+
 func (s *Server) handleRestoreVersion(w http.ResponseWriter, r *http.Request, p service.Principal) {
-	n, err := s.svc.RestoreVersion(r.Context(), p, r.PathValue("id"), r.PathValue("vid"))
+	var req struct {
+		Record    string `json:"record"`
+		RecordSig string `json:"recordSig"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	rec, sig, err := decodeRecord(req.Record, req.RecordSig)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	n, err := s.svc.RestoreVersion(r.Context(), p, r.PathValue("id"), r.PathValue("vid"), rec, sig)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -273,6 +310,10 @@ func (s *Server) serveContainer(w http.ResponseWriter, r *http.Request, c *servi
 	h.Set("Content-Disposition", `attachment; filename="`+c.Node.ID+`.fdenc"`)
 	h.Set("ETag", `"`+c.Version.SHA256+`"`)
 	h.Set("X-FrontDir-Version", c.Version.ID)
+	if len(c.Version.Record) > 0 { // so a client can check freshness (docs/E2EE.md §5c)
+		h.Set("X-FrontDir-Record", b64(c.Version.Record))
+		h.Set("X-FrontDir-Record-Sig", b64(c.Version.RecordSig))
+	}
 	iw := &idleWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: time.Minute}
 	http.ServeContent(iw, r, "", c.Version.CreatedAt, c)
 }

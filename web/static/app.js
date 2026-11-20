@@ -631,6 +631,85 @@ async function newFolder(ctx) {
   }, 'Folder created');
 }
 
+// ---- signed version history (E2EE.md §5c) ------------------------------------------------------------
+// Every version carries a record signed by whoever stored it, chained to
+// the one before. This browser remembers, per file, the newest record it
+// verified, and notices if the server later shows a history that ends
+// earlier (gone back in time) or differs (a fork). The memory stays on
+// this device on purpose: kept on the server, it could be rolled back too.
+const SEEN_MAX = 20000;
+const seenKey = () => `frontdir.seen.${S.me.user.id}`;
+function seenAll() {
+  try { return JSON.parse(localStorage.getItem(seenKey()) || '{}') || {}; } catch { return {}; }
+}
+const seenGet = (nodeId) => seenAll()[nodeId] || null;
+function seenSet(nodeId, value) {
+  try {
+    const all = seenAll();
+    delete all[nodeId]; // re-insert: insertion order is recency
+    if (value) all[nodeId] = value;
+    const ids = Object.keys(all);
+    for (const old of ids.slice(0, Math.max(0, ids.length - SEEN_MAX))) delete all[old];
+    localStorage.setItem(seenKey(), JSON.stringify(all));
+  } catch { /* storage unavailable: nothing remembered on this device */ }
+}
+function remember(nodeId, head, force = false) {
+  const cur = seenGet(nodeId);
+  if (force || !cur || head.rec.seq > cur.seq) seenSet(nodeId, E.seenOf(head));
+}
+
+// loadHistory fetches a file's versions and checks their signed history
+// and its freshness. With accept, an internally sound history is
+// remembered as it is (after a rollback or fork warning).
+async function loadHistory(nodeId, accept = false) {
+  const data = await api('GET', `/api/v1/nodes/${nodeId}/versions`);
+  const entries = [];
+  let err = null;
+  for (const v of data.versions) {
+    const e = { v, prefix: v.prefix ? E.unb64u(v.prefix) : null, record: null };
+    if (v.record) { try { e.record = await E.parseVersionRecord(v.record, v.recordSig); } catch (x) { err = err || x; } }
+    entries.push(e);
+  }
+  let head = null;
+  if (!err) { try { head = await E.verifyHistory(nodeId, entries, userKeys); } catch (x) { err = x; } }
+  if (!err && !accept) {
+    try { E.checkFresh(seenGet(nodeId), entries.filter((e) => e.record).map((e) => e.record)); } catch (x) { err = x; }
+  }
+  if (!err && head) remember(nodeId, head, accept);
+  if (!err && !head && accept) seenSet(nodeId, null);
+  return { data, entries, head, err };
+}
+
+// newRecord signs the record for a new version of nodeId (the first, for
+// a new file). It refuses to build on a history that does not check out.
+async function newRecord(nodeId, container, kind, isNew) {
+  const { prefix } = await E.parseContainer(container);
+  let seq = 1, prev = '';
+  if (!isNew) {
+    const hs = await loadHistory(nodeId);
+    if (hs.err) throw new Error(`Not saved: ${hs.err.message} Open Versions to review it.`);
+    if (hs.head) { seq = hs.head.rec.seq + 1; prev = E.b64u(hs.head.hash); }
+  }
+  return E.signVersionRecord(S.acct, { node: nodeId, seq, prev, container: await E.containerId(prefix), kind });
+}
+const recordHeaders = (r) => ({ 'X-FrontDir-Record': E.b64u(r.raw), 'X-FrontDir-Record-Sig': E.b64u(r.sig) });
+
+// checkServed checks the record served with a file's current content.
+async function checkServed(nodeId, headers, prefix) {
+  const seen = seenGet(nodeId);
+  const raw = headers.get('X-FrontDir-Record');
+  if (!raw) { if (seen) throw E.rolledBackError(); return; }
+  const r = await E.parseVersionRecord(raw, headers.get('X-FrontDir-Record-Sig') || '');
+  await E.verifyHistory(nodeId, [{ prefix, record: r }], userKeys);
+  if (!E.checkFreshHead(seen, r)) { // more than one version on: check the chain in between
+    const hs = await loadHistory(nodeId);
+    if (hs.err) throw hs.err;
+    return;
+  }
+  remember(nodeId, r);
+}
+const historyMsg = (e) => (['rolledback', 'forked', 'history'].includes(e.code) ? `${e.message} Open Versions to review it.` : e.message);
+
 async function encryptFor(ctx, blob, nk, name, onProgress) {
   return E.encryptFile(blob, { nk, spaceId: ctx.space.id, spacePub: await spacePub(ctx.space),
     meta: { name, type: blob.type || 'application/octet-stream', mtime: blob.lastModified || Date.now() }, signer: S.acct }, onProgress);
@@ -645,10 +724,12 @@ async function uploadMany(ctx, files) {
       const id = E.newId(), nk = await E.NodeKey.fresh();
       const entry = await (await nodeKey(ctx.folderId)).entry(id, file.name, nk);
       const container = await encryptFor(ctx, file, nk, file.name, (f) => b.set(f / 2));
+      const rec = await newRecord(id, container, 'save', true);
       try {
         const node = await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, container,
-          { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }) }, (f) => b.set(0.5 + f / 2));
+          { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }), ...recordHeaders(rec) }, (f) => b.set(0.5 + f / 2));
         S.keys.set(id, nk);
+        remember(id, rec);
         await attachThumb(id, node?.versionId, container, nk, file, file.name);
       } catch (e) {
         if (e.status !== 409 || e.detail.existingKind !== 'file') throw e;
@@ -657,7 +738,9 @@ async function uploadMany(ctx, files) {
         const existing = e.detail.existingId;
         const ek = await nodeKey(existing);
         const v = await encryptFor(ctx, file, ek, file.name);
-        const node = await send('PUT', `/api/v1/nodes/${existing}/content`, v, { 'Content-Type': 'application/octet-stream' });
+        const vrec = await newRecord(existing, v, 'save', false);
+        const node = await send('PUT', `/api/v1/nodes/${existing}/content`, v, { 'Content-Type': 'application/octet-stream', ...recordHeaders(vrec) });
+        remember(existing, vrec);
         await attachThumb(existing, node?.versionId, v, ek, file, file.name);
       }
     } catch (e) { toast(`${file.name}: ${e.message}`); } finally { b.close(); }
@@ -666,9 +749,12 @@ async function uploadMany(ctx, files) {
   route();
 }
 
+// downloadFile saves a file (or an older version). The current version is
+// checked against the history this browser has seen before.
 async function downloadFile(c, versionId) {
   const path = `/api/v1/nodes/${c.id}/content${versionId ? `?version=${versionId}` : ''}`;
-  await decryptAndSave(c.name, c.plainSize, () => fetch(path, { credentials: 'same-origin' }), await nodeKey(c.id), signerFor);
+  await decryptAndSave(c.name, c.plainSize, () => fetch(path, { credentials: 'same-origin' }), await nodeKey(c.id), signerFor,
+    versionId ? null : c.id);
 }
 
 // ---- thumbnails (E2EE.md §5a) --------------------------------------------------------------------------------
@@ -847,17 +933,19 @@ async function loadThumb(c) {
 const STREAM_FROM = 64 * 1024 * 1024;
 const MEMORY_WARNING = 1536 * 1024 * 1024;
 
-async function decryptAndSave(name, size, fetchContainer, nk, signerFn) {
-  if (size >= STREAM_FROM && await streamToDisk(name, fetchContainer, nk, signerFn)) return;
+async function decryptAndSave(name, size, fetchContainer, nk, signerFn, historyOf = null) {
+  if (size >= STREAM_FROM && await streamToDisk(name, fetchContainer, nk, signerFn, historyOf)) return;
   if (size >= MEMORY_WARNING && !(await confirmBox('Large file', `${name} is ${fmtSize(size)}. This browser cannot save it as a stream, ` +
     'so it has to fit in memory and may fail. frontdir-cli (get, or mount) handles files of any size.', 'Try anyway'))) return;
   const b = busy(`Downloading and decrypting ${name}…`);
   try {
     const r = await fetchContainer();
     if (!r.ok) throw new ApiError(r.status, await r.json().catch(() => null));
-    const res = await E.decryptFile(await r.blob(), nk, signerFn, (f) => b.set(f));
+    const blob = await r.blob();
+    if (historyOf) await checkServed(historyOf, r.headers, (await E.parseContainer(blob)).prefix);
+    const res = await E.decryptFile(blob, nk, signerFn, (f) => b.set(f));
     saveBlob(res.blob, name);
-  } catch (e) { toast(`${name}: ${e.message}`); } finally { b.close(); }
+  } catch (e) { toast(`${name}: ${historyMsg(e)}`); } finally { b.close(); }
 }
 
 // The one Trusted Types policy the page's CSP allows ("frontdir-sw"):
@@ -898,7 +986,7 @@ function downloadWorker() {
 
 // streamToDisk returns false if streaming is unavailable (nothing was
 // saved), and true once it has handled the download, successfully or not.
-async function streamToDisk(name, fetchContainer, nk, signerFn) {
+async function streamToDisk(name, fetchContainer, nk, signerFn, historyOf) {
   const sw = await downloadWorker();
   if (!sw) return false;
   const b = busy(`Decrypting ${name} to your downloads… keep this tab open until it finishes.`);
@@ -908,9 +996,12 @@ async function streamToDisk(name, fetchContainer, nk, signerFn) {
     if (!r.ok) throw new ApiError(r.status, await r.json().catch(() => null));
     const total = Number(r.headers.get('Content-Length')) || undefined;
     dec = await E.openContainerStream(r.body, nk, signerFn, total);
+    if (historyOf) {
+      try { await checkServed(historyOf, r.headers, dec.prefix); } catch (e) { dec.cancel(); throw e; }
+    }
   } catch (e) {
     b.close();
-    toast(`${name}: ${e.message}`);
+    toast(`${name}: ${historyMsg(e)}`);
     return true;
   }
   const id = E.newId();
@@ -973,10 +1064,12 @@ async function restoreBackups(ctx, files) {
       for (;;) {
         const id = E.newId();
         const entry = await (await nodeKey(ctx.folderId)).entry(id, name, nk);
+        const rec = await newRecord(id, file, 'restore', true); // stored again, from a backup
         try {
           await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, file,
-            { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }) });
+            { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }), ...recordHeaders(rec) });
           S.keys.set(id, nk);
+          remember(id, rec);
           toast(`Restored ${name} (signed by ${res.signer.displayName || res.signer.id.slice(0, 8)})`);
           break;
         } catch (e) {
@@ -1011,46 +1104,71 @@ async function trashNode(c, ctx) {
 }
 
 async function versionsDialog(c) {
-  let data, nk;
+  let hs, nk;
   try {
-    data = await api('GET', `/api/v1/nodes/${c.id}/versions`);
+    hs = await loadHistory(c.id);
     nk = await nodeKey(c.id);
   } catch (e) { return toast(e.message); }
-  // Who saved each version, checked from its signature without downloading
-  // it (E2EE.md §5b). A server cannot make this name the wrong person; at
-  // worst it makes the check fail, which we show as a warning.
-  const author = async (v) => {
-    if (!v.prefix) return { pending: true };
+  // Who wrote each version, checked from its signature without downloading
+  // it (E2EE.md §5b), and who stored it and when, from its signed record
+  // (§5c). A server cannot make these name the wrong person; at worst it
+  // makes a check fail, which we show as a warning.
+  const author = async (e) => {
+    const v = e.v;
+    if (!v.prefix || !v.bodyHash) return { pending: true };
     try {
-      const { signer } = await E.versionAuthor(nk, E.unb64u(v.prefix), E.unb64u(v.bodyHash), E.unb64u(v.trailer), userKeys);
+      const { signer } = await E.versionAuthor(nk, e.prefix, E.unb64u(v.bodyHash), E.unb64u(v.trailer), userKeys);
       return { signer };
     } catch { return { failed: true }; }
   };
   const who = (pu) => (pu.id === S.me.user.id ? 'You' : nameOf(pu));
-  const authors = await Promise.all(data.versions.map(author));
-  const uploaders = await Promise.all(data.versions.map((v) => userKeys(v.createdBy).catch(() => null)));
+  const authors = await Promise.all(hs.entries.map(author));
   const reopen = () => { d.close(); versionsDialog(c); };
-  const rows = data.versions.map((v, i) => {
-    const a = authors[i], up = uploaders[i];
+  const restore = async (e) => {
+    d.close();
+    await act(async () => {
+      const cur = await loadHistory(c.id);
+      if (cur.err) throw new Error(historyMsg(cur.err));
+      const rec = await E.signVersionRecord(S.acct, { node: c.id, seq: cur.head ? cur.head.rec.seq + 1 : 1,
+        prev: cur.head ? E.b64u(cur.head.hash) : '', container: await E.containerId(e.prefix), kind: 'restore' });
+      await api('POST', `/api/v1/nodes/${c.id}/versions/${e.v.id}/restore`, { record: E.b64u(rec.raw), recordSig: E.b64u(rec.sig) });
+      remember(c.id, rec);
+    }, 'Version restored');
+  };
+  const rows = hs.entries.map((e, i) => {
+    const a = authors[i], signed = e.record && e.storedBy;
+    const when = h('td', {}, fmtDate(signed ? e.record.rec.at : e.v.createdAt), i === 0 ? ' (current)' : '',
+      signed ? h('span', { class: 'note', title: 'Position in the file’s signed history' }, ` #${e.record.rec.seq}`)
+        : h('span', { class: 'note', title: 'Saved before FrontDir signed each version’s history: this time comes from the server.' }, ' · server time'));
     let by;
     if (a.signer) {
-      const restored = up && v.createdBy !== a.signer.id ? h('span', { class: 'note' }, ` · restored by ${who(up)}`) : null;
+      const restored = signed && e.record.rec.kind === 'restore' ? h('span', { class: 'note' }, ` · restored by ${who(e.storedBy)}`) : null;
       by = h('span', { class: 'version-author' }, who(a.signer), ' ', trustBadge(a.signer, reopen), restored);
     } else if (a.pending) {
       by = h('span', { class: 'note', title: 'This version was saved before FrontDir recorded what is needed to check its author. The server fills this in for older versions in the background.' }, 'Not checked yet');
     } else {
       by = h('span', { class: 'error', title: 'Its signature does not check out: it may have been altered on the server. Do not rely on its contents.' }, '⚠ Cannot verify who saved this');
     }
-    return h('tr', {},
-      h('td', {}, fmtDate(v.createdAt), i === 0 ? ' (current)' : ''),
-      h('td', {}, by),
-      h('td', { class: 'num' }, fmtSize(v.size)),
+    return h('tr', {}, when, h('td', {}, by), h('td', { class: 'num' }, fmtSize(e.v.size)),
       h('td', { class: 'actions' },
-        h('button', { class: 'link', onclick: () => downloadFile(c, v.id) }, 'Download'),
-        i > 0 && !a.failed && h('button', { class: 'link', onclick: async () => { d.close(); await act(() => api('POST', `/api/v1/nodes/${c.id}/versions/${v.id}/restore`), 'Version restored'); } }, 'Restore')));
+        h('button', { class: 'link', onclick: () => downloadFile(c, e.v.id) }, 'Download'),
+        i > 0 && !a.failed && !hs.err && e.prefix && h('button', { class: 'link', onclick: () => restore(e) }, 'Restore')));
   });
+  let warning = null;
+  if (hs.err) {
+    const freshness = hs.err.code === 'rolledback' || hs.err.code === 'forked';
+    const accept = async () => {
+      if (!(await confirmBox('Accept this history?', 'Accept the history as the server shows it now? Do this only if you know why it changed, ' +
+        'for example because your administrator restored the server from a backup. Until you do, this browser will not save over this file.', 'Accept'))) return;
+      const res = await loadHistory(c.id, true);
+      if (res.err) toast(res.err.message); else reopen();
+    };
+    warning = h('div', { class: 'banner history-warning', role: 'alert' },
+      h('span', { class: 'error' }, `⚠ ${hs.err.message}`, freshness ? '' : ' Saving and restoring are disabled for this file.'),
+      freshness && h('button', { onclick: accept }, 'Accept this history…'));
+  }
   const head = h('thead', {}, h('tr', {}, h('th', {}, 'Saved'), h('th', {}, 'By'), h('th', { class: 'num' }, 'Size'), h('th', {})));
-  const d = dialog(`Versions of ${c.name}`, h('table', { class: 'versions' }, head, h('tbody', {}, rows)),
+  const d = dialog(`Versions of ${c.name}`, warning, h('table', { class: 'versions' }, head, h('tbody', {}, rows)),
     h('form', { method: 'dialog', class: 'row' }, h('button', {}, 'Close')));
 }
 

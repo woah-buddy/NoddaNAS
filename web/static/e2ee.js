@@ -581,7 +581,7 @@ export async function openContainerStream(stream, nk, signerFor, totalSize) {
     const hashes = new Uint8Array(32 * n);
     let i = 0, failed = null;
     return {
-      meta, signer, size: h.size,
+      meta, signer, size: h.size, prefix,
       async next() {
         if (failed) throw failed;
         if (i === n) return { done: true, value: undefined };
@@ -690,4 +690,107 @@ export async function versionAuthor(nk, prefix, bodyHash, trailer, signerFor) {
   if (bodyHash.length !== 32 || trailer.length !== TRAILER || td.decode(trailer.subarray(0, 4)) !== 'SIG1') throw authFail();
   await mustVerify(signer.sig, concat(label('container'), NUL, await sha256(prefix), bodyHash), trailer.subarray(4));
   return { header, signer };
+}
+
+// ---- signed version history (spec §5c) ---------------------------------------------------------------
+// Whoever stores a version signs a record about it, and each record names
+// the one before it (a hash chain): the server can no longer reorder,
+// insert, drop or relabel versions. Remembering the newest record seen
+// (checkFresh) catches it showing an older or different history later.
+export const MAX_RECORD = 1024;
+const REC_KEYS = ['v', 'node', 'seq', 'prev', 'container', 'kind', 'at', 'by', 'fp'];
+const isId = (s) => typeof s === 'string' && /^[0-9a-f]{32}$/.test(s);
+const isB32 = (s) => { try { return b64u(unb64u(s)) === s && unb64u(s).length === 32; } catch { return false; } };
+const canonicalRecord = (r) => JSON.stringify(Object.fromEntries(REC_KEYS.map((k) => [k, r[k]])));
+const recordMsg = (raw) => concat(label('version-record'), NUL, raw);
+const historyError = (msg) => Object.assign(new E2EEError(msg), { code: 'history' });
+export const rolledBackError = () => Object.assign(new E2EEError('This file has gone back in time: you have seen a newer version than the server now shows.'), { code: 'rolledback' });
+export const forkedError = () => Object.assign(new E2EEError('This file’s history differs from the one you saw before.'), { code: 'forked' });
+function recordShapeOK(r) {
+  return r.v === 1 && isId(r.node) && isId(r.by) && typeof r.fp === 'string' && /^[0-9a-f]{40}$/.test(r.fp) &&
+    Number.isSafeInteger(r.seq) && r.seq >= 1 && Number.isSafeInteger(r.at) && r.at > 0 && isB32(r.container) &&
+    (r.kind === 'save' || r.kind === 'restore') && ((r.seq === 1 && r.prev === '') || (r.seq > 1 && isB32(r.prev)));
+}
+
+// containerId identifies a container in records: SHA-256 of its prefix.
+export const containerId = async (prefix) => b64u(await sha256(prefix));
+
+// signVersionRecord signs a record about a version as account. Returns
+// { raw, sig, rec, hash } (raw and sig as bytes; send them b64u-encoded).
+export async function signVersionRecord(account, { node, seq, prev, container, kind, at }) {
+  const rec = { v: 1, node, seq, prev, container, kind, at: at ?? Date.now(), by: account.userId, fp: await account.fingerprint() };
+  const raw = utf8(canonicalRecord(rec));
+  if (!recordShapeOK(rec) || raw.length > MAX_RECORD) throw new E2EEError('invalid version record');
+  return { rec, raw, sig: await sign(account.sig.priv, recordMsg(raw)), hash: await sha256(raw) };
+}
+
+// parseVersionRecord checks a stored record's shape and canonical
+// encoding (not its signature). Throws on anything else.
+export async function parseVersionRecord(rawB64, sigB64) {
+  const raw = unb64u(rawB64), sig = unb64u(sigB64);
+  let rec;
+  try { rec = JSON.parse(td.decode(raw)); } catch { throw historyError('malformed version record'); }
+  if (raw.length > MAX_RECORD || sig.length !== 64 || !rec || typeof rec !== 'object' || !recordShapeOK(rec) ||
+      td.decode(raw) !== canonicalRecord(rec)) throw historyError('malformed version record');
+  return { rec, raw, sig, hash: await sha256(raw) };
+}
+
+async function verifyRecord(r, signer) {
+  if (signer.id !== r.rec.by || signer.fp !== r.rec.fp) throw historyError('the record names a different signer');
+  if (!(await verify(signer.sig, recordMsg(r.raw), r.sig))) throw historyError('a version record’s signature does not verify');
+}
+const follows = (r, prev) => r.rec.seq === prev.rec.seq + 1 && r.rec.prev === b64u(prev.hash);
+
+// verifyHistory checks a file's versions, newest first. Each entry is
+// { prefix (bytes), record (from parseVersionRecord) or null }. Entries
+// whose record verifies get storedBy. Returns the newest record or null;
+// throws (code 'history') if the history does not check out.
+export async function verifyHistory(nodeId, entries, signerFor) {
+  let first = null, recorded = 0;
+  const fail = (e) => { first = first || e; };
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i], r = e.record;
+    if (!r) continue;
+    if (i !== recorded) fail(historyError('a version without a signed record appears among signed ones'));
+    recorded++;
+    const header = parsePrefix(e.prefix);
+    if (r.rec.node !== nodeId) { fail(historyError('a version record belongs to another file')); continue; }
+    if (r.rec.container !== (await containerId(e.prefix))) { fail(historyError('a version record is about a different container')); continue; }
+    if (r.rec.kind === 'save' && (header.signer.user !== r.rec.by || header.signer.fp !== r.rec.fp)) {
+      fail(historyError('a version is recorded as saved by someone other than its author')); continue;
+    }
+    try {
+      const signer = await signerFor(r.rec.by);
+      await verifyRecord(r, signer);
+      e.storedBy = signer;
+    } catch (err) { fail(err.code === 'history' ? err : historyError('cannot verify who stored a version')); }
+  }
+  if (recorded === 0 || first) { if (first) throw first; return null; }
+  for (let i = 0; i + 1 < recorded; i++) {
+    if (!follows(entries[i].record, entries[i + 1].record)) throw historyError('versions are missing, reordered or replaced');
+  }
+  if (entries[recorded - 1].record.rec.seq > 1 && recorded !== entries.length) throw historyError('versions are missing before the oldest signed one');
+  return entries[0].record;
+}
+
+// What a client remembers about a file: the newest record it verified.
+export const seenOf = (head) => ({ seq: head.rec.seq, hash: b64u(head.hash) });
+
+// checkFresh compares a verified history (records, newest first) with
+// what was seen before; throws a rolled-back or forked error.
+export function checkFresh(seen, records) {
+  if (!seen) return;
+  if (!records.length || records[0].rec.seq < seen.seq) throw rolledBackError();
+  const r = records.find((x) => x.rec.seq === seen.seq);
+  if (r && b64u(r.hash) !== seen.hash) throw forkedError();
+}
+
+// checkFreshHead is the quick check with only the current record. Returns
+// false when the caller must check the whole history to know.
+export function checkFreshHead(seen, head) {
+  if (!seen) return true;
+  if (!head || head.rec.seq < seen.seq) throw rolledBackError();
+  if (head.rec.seq === seen.seq) { if (b64u(head.hash) !== seen.hash) throw forkedError(); return true; }
+  if (head.rec.seq === seen.seq + 1) { if (head.rec.prev !== seen.hash) throw forkedError(); return true; }
+  return false;
 }

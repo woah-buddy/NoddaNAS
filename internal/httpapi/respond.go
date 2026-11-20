@@ -250,14 +250,22 @@ type versionView struct {
 	Prefix    string    `json:"prefix,omitempty"`
 	BodyHash  string    `json:"bodyHash,omitempty"`
 	Trailer   string    `json:"trailer,omitempty"`
+	Record    string    `json:"record,omitempty"`
+	RecordSig string    `json:"recordSig,omitempty"`
 }
 
 func viewVersion(v *domain.Version) versionView {
 	out := versionView{ID: v.ID, Size: v.Size, SHA256: v.SHA256, CreatedAt: v.CreatedAt, CreatedBy: v.CreatedBy}
-	if len(v.Header) > 0 && len(v.BodyHash) > 0 && len(v.Trailer) > 0 {
+	if len(v.Header) > 0 {
 		out.Prefix = b64(v.Header)
+	}
+	if len(v.BodyHash) > 0 && len(v.Trailer) > 0 {
 		out.BodyHash = b64(v.BodyHash)
 		out.Trailer = b64(v.Trailer)
+	}
+	if len(v.Record) > 0 {
+		out.Record = b64(v.Record)
+		out.RecordSig = b64(v.RecordSig)
 	}
 	return out
 }
