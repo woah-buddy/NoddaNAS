@@ -52,6 +52,25 @@ it only in request bodies):
 | `POST /api/v1/setup/save` | `{"token","revision","set","confirm"}`: change sign-in and access settings only |
 | `POST /api/v1/setup/login` | `{"token","method":"oidc"\|"saml"}` → `{"redirect"}` and the sign-in cookie. Completing that sign-in makes the person an administrator and spends the token. |
 
+## Local accounts (password and one-time code)
+
+Answer JSON; tokens travel in bodies, never URLs. Rate limited like other sign-ins, plus per-account
+lockout. Every failure of the login steps gives the same `401`, whether or not the account exists.
+
+| Method & path | |
+|---|---|
+| `POST /api/v1/auth/local/login` | `{"email","password"}` → `{"ticket"}` for the second step (5 minutes) |
+| `POST /api/v1/auth/local/code` | `{"ticket","code"}` (a TOTP code, or a recovery code) → session cookie |
+| `POST /api/v1/auth/local/invite` | `{"token"}` (from `/invite#token`) → `{"email","displayName","reset"}` |
+| `POST /api/v1/auth/local/enroll` | `{"token","password"}` → `{"ticket","uri","secret","qr"}` (QR code as base64 PNG; nothing takes effect yet) |
+| `POST /api/v1/auth/local/enroll/finish` | `{"ticket","code"}` → `{"recoveryCodes"}` (shown once) and a session cookie; the invite or reset is used up |
+| `POST /api/v1/auth/local/reauth` | *session*. `{"password","code"}` → `204`: "confirm it's you" for administrative changes |
+| `POST /api/v1/admin/local-accounts` | *session*, admin, recent sign-in. `{"email","displayName"?,"admin"?}` → `{"userId","token","expiresAt"}` (invite) |
+| `POST /api/v1/admin/users/{id}/local-reset` | *session*, admin, recent sign-in. Stops the account's sign-in at once → `{"userId","token","expiresAt"}` (reset link) |
+| `POST /api/v1/setup/local` | `{"token","email","displayName"?}` with the setup link's token: turn local accounts on and create the first administrator → invite |
+
+`GET /api/v1/auth/methods` also reports `"local"`, and `GET /api/v1/me` marks local accounts with `"local": true`.
+
 ## Account and keys
 
 | Method & path | |

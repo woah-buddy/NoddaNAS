@@ -15,7 +15,9 @@ any cloud), with no cloud-provider dependencies.
   a self-contained, signed container. One container plus your key backup and passphrase (or
   recovery code) is enough to decrypt or restore it: no server, no database.
 - **Sign in with OIDC or SAML 2.0** (Keycloak, Authentik, Zitadel, Pocket ID, Entra ID, Okta,
-  Shibboleth, Google, ...).
+  Shibboleth, Google, ...), or with optional **local accounts** (password plus an authenticator
+  app, both always required) for guests, outside collaborators, or servers without an identity
+  provider.
 - **Team folders**: owned by no single user, with their own quota. Members are added directly by
   managers (any user can create one) and/or through identity-provider **groups mapped by
   administrators**.
@@ -39,7 +41,7 @@ in the browser.
 | Sharing | Users (read/write, E2EE key sealed to the recipient and signed by you) and public links; one **Shared** page (with me / by me) |
 | Verified people | Compare key fingerprints once, out of band; FrontDir then marks that person ✔ everywhere and warns about swapped keys and look-alike accounts (encrypted list the server cannot read or forge) |
 | Kill switches | Revoke all of your own public links, or (administrators) every link on the server; shell commands for break-glass link revocation and user offboarding |
-| Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain |
+| Sign-in | OIDC (PKCE) and/or SAML (SP-initiated, signed assertions); allowlist by group or email domain; optional local accounts with a password and an authenticator app (both required), for people without an IdP account or servers without an IdP |
 | Clients | Web app (no build step, no npm dependencies) and `frontdir-cli` (Go) |
 | Mount as a drive | `frontdir-cli mount`: your files, decrypted on your computer only, in Finder or File Explorer |
 | Large downloads | Files of any size stream to disk in the browser, decrypted and verified chunk by chunk |
@@ -76,7 +78,7 @@ This is the short version. The [administrator guide](docs/ADMIN_GUIDE.md) covers
 user offboarding and incident response step by step.
 
 Requirements: Docker with Compose, a DNS name pointing at the host, ports 80/443 reachable, and an
-OIDC or SAML identity provider.
+OIDC or SAML identity provider (or none: the setup page can start you with local accounts).
 
 1. **Register FrontDir with your identity provider.**
    - *OIDC*: a confidential client using the authorization-code flow, redirect URI
@@ -160,8 +162,11 @@ as `name.fdenc` and **Restore backup…** puts it back (byte-for-byte unchanged)
   WebCrypto, with a test that checks both agree byte-for-byte in both directions.
 - **One authorization decision point** on the server for every interface; callers who cannot see
   an item get "not found". Authorization and cryptography are separate, independent layers.
-- **No passwords stored, no auth invented**: OIDC or SAML, with server-side sessions in
-  `__Host-` cookies (no tokens in JavaScript), and revocable, optionally read-only app passwords.
+- **Sign-in delegated where possible**: OIDC or SAML, with server-side sessions in `__Host-`
+  cookies (no tokens in JavaScript), and revocable, optionally read-only app passwords. Optional
+  local accounts always need both a password (Argon2id) and a one-time code (TOTP, each code
+  accepted once, secrets encrypted), with lockout and the same answer whether or not an account
+  exists.
 - **SAML done conservatively**: SP-initiated only, signature required, each response bound to a
   single-use request from the same browser, HTTP-POST binding only. Tests forge, replay and send
   unsolicited assertions.
@@ -197,7 +202,7 @@ internal/domain/       core types and client-safe errors
 internal/validate/     the only place untrusted strings become trusted values
 internal/secure/       IDs, tokens, hashing, argon2id
 internal/service/      use cases and the single authorization decision point
-internal/auth/         OIDC, SAML, sessions, app passwords
+internal/auth/         OIDC, SAML, local accounts (password + TOTP), sessions, app passwords
 internal/httpapi/      JSON API, read-only ciphertext WebDAV, public links, static UI
 internal/theme/        theme validation, contrast checks, stylesheet generation, logo sanitizing
 internal/store/        PostgreSQL adapter and migrations

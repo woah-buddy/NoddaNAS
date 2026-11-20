@@ -36,6 +36,7 @@ import (
 	"github.com/woah-buddy/FrontDir/internal/config"
 	"github.com/woah-buddy/FrontDir/internal/domain"
 	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/secure"
 	"github.com/woah-buddy/FrontDir/internal/service"
 	"github.com/woah-buddy/FrontDir/internal/settings"
 	"github.com/woah-buddy/FrontDir/internal/store/postgres"
@@ -68,6 +69,8 @@ func main() {
 		err = verifyStorage(os.Args[2:])
 	case "setup-link":
 		err = setupLink(os.Args[2:])
+	case "reset-mfa":
+		err = resetMFA(os.Args[2:])
 	case "settings":
 		err = settingsCmd(os.Args[2:])
 	case "healthcheck":
@@ -75,7 +78,7 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	default:
-		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, setup-link, settings, healthcheck, version)", cmd)
+		err = fmt.Errorf("unknown command %q (try: serve, migrate, set-quota, revoke-links, revoke-access, revoke-sessions, verify-storage, setup-link, reset-mfa, settings, healthcheck, version)", cmd)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "frontdir:", err)
@@ -118,6 +121,9 @@ func serve() error {
 
 	svc := service.New(store, blobs, cfg.Service, log)
 	am := auth.NewManager(store, svc, cfg.Auth, nil, nil)
+	if err := setLocalSealer(am, cfg); err != nil {
+		return err
+	}
 	// The settings manager merges the environment with settings saved in
 	// the web admin area, applies them to the service and the sign-in
 	// methods, and keeps them current.
@@ -500,5 +506,74 @@ func verifyStorage(args []string) error {
 		return errors.New("storage verification failed")
 	}
 	fmt.Println("OK")
+	return nil
+}
+
+// setLocalSealer gives local accounts the key their TOTP secrets are
+// encrypted with, derived from the settings key (none: no local accounts).
+func setLocalSealer(am *auth.Manager, cfg *config.Config) error {
+	if cfg.SettingsKey == nil {
+		return nil
+	}
+	sealer, err := secure.NewSealer(cfg.SettingsKey, "frontdir/totp-secrets/v1")
+	if err != nil {
+		return err
+	}
+	am.SetLocalSealer(sealer)
+	return nil
+}
+
+// resetMFA is the operator's way back in for a local account whose owner
+// lost their authenticator and recovery codes, or for the last local
+// administrator: it stops the account's current sign-in and prints a link
+// to set a new password and authenticator.
+func resetMFA(args []string) error {
+	if len(args) != 2 || args[0] != "--user" || args[1] == "" {
+		return errors.New("usage: frontdir reset-mfa --user EMAIL|ID")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("configuration:\n%w", err)
+	}
+	ctx := context.Background()
+	store, err := postgres.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	blobs, err := fsblob.New(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	log := newLogger("info")
+	svc := service.New(store, blobs, cfg.Service, log)
+	am := auth.NewManager(store, svc, cfg.Auth, nil, nil)
+	if err := setLocalSealer(am, cfg); err != nil {
+		return err
+	}
+	// Settings saved on the web count too (local accounts may be on there).
+	sm, err := settings.New(cfg, store, svc, am, log)
+	if err != nil {
+		return err
+	}
+	if err := sm.Load(ctx); err != nil {
+		return err
+	}
+	u, err := svc.OperatorFindUser(ctx, args[1])
+	if err != nil {
+		return fmt.Errorf("%s: %w", args[1], err)
+	}
+	if u.Issuer != domain.IssuerLocal {
+		return fmt.Errorf("%s signs in through an identity provider; reset their sign-in there", u.Email)
+	}
+	token, exp, err := am.NewLocalInvite(ctx, u, "operator", true)
+	if err != nil {
+		return err
+	}
+	log.Warn("audit", "event", "operator.local.reset", "actor", "cli", "target", u.ID)
+	fmt.Printf("%s can no longer sign in with their old password, authenticator or recovery codes, and every\n"+
+		"session of theirs has ended. Give them this link to set new ones:\n\n  %s/invite#%s\n\n"+
+		"It works once, until %s. Treat it like a password. Their files stay encrypted with their own\n"+
+		"passphrase, which this does not change.\n", u.Email, cfg.PublicURL.String(), token, exp.Format(time.RFC1123))
 	return nil
 }

@@ -272,10 +272,17 @@ func (s *Service) requireAdmin(ctx context.Context, p Principal) error {
 	if err != nil {
 		return err
 	}
-	if !u.Admin || p.ReadOnly {
+	if !s.IsAdmin(u) || p.ReadOnly {
 		return domain.E(domain.CodeForbidden, "administrators only")
 	}
 	return nil
+}
+
+// IsAdmin reports whether an account currently has administrator rights. A
+// local account's appointment counts only while local administrators are
+// allowed (always, without an identity provider).
+func (s *Service) IsAdmin(u *domain.User) bool {
+	return u.Admin && (u.Issuer != domain.IssuerLocal || s.conf().LocalAdmins)
 }
 
 func (s *Service) teamForAdmin(ctx context.Context, p Principal, spaceID string) (*domain.Space, error) {

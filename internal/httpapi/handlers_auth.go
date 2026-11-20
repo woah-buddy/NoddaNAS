@@ -16,7 +16,8 @@ import (
 
 func (s *Server) handleAuthMethods(w http.ResponseWriter, r *http.Request) {
 	oidc, saml := s.auth.Methods()
-	writeJSON(w, http.StatusOK, map[string]bool{"oidc": oidc, "saml": saml, "setup": !oidc && !saml})
+	local := s.auth.LocalEnabled()
+	writeJSON(w, http.StatusOK, map[string]bool{"oidc": oidc, "saml": saml, "local": local, "setup": !oidc && !saml && !local})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -97,15 +98,10 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, res *auth.L
 			return
 		}
 	}
-	_ = s.auth.EndSession(r) // never reuse a pre-existing session
-	cookie, err := s.auth.StartSession(r.Context(), res)
-	if err != nil {
+	if err := s.startSession(w, r, res, method); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	s.log.InfoContext(r.Context(), "audit", "event", "login.success", "method", method, "user", res.User.ID,
-		"reauth", !res.ReauthAt.IsZero(), "ip", s.clientIP(r).String())
-	http.SetCookie(w, cookie)
 	http.Redirect(w, r, res.ReturnTo, http.StatusSeeOther)
 }
 
@@ -140,7 +136,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, p service.Prin
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":          userView{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName, Admin: u.Admin, Keys: viewKeys(u.Keys)},
+		"user": userView{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName, Admin: s.svc.IsAdmin(u), Keys: viewKeys(u.Keys),
+			Local: u.Issuer == domain.IssuerLocal},
 		"personalSpace": viewSpace(sp, domain.RoleManage, nil),
 		"readOnly":      p.ReadOnly,
 	})

@@ -155,3 +155,8 @@ textarea { font: 13px/1.4 ui-monospace, monospace; padding: 6px 8px; border: 1px
   td.actions { margin-left: -8px; }
   td.actions > :not(.link, a):first-child { margin-left: 8px; }
 }
+/* Local accounts. */
+.local-signin { margin-top: 16px; text-align: left; max-width: 360px; margin-inline: auto; }
+img.qr { image-rendering: pixelated; background: #fff; padding: 8px; border-radius: 8px; max-width: 100%; height: auto; }
+.recovery-codes { white-space: pre; font-family: ui-monospace, monospace; }
+.setup-local { margin-top: 24px; }

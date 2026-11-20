@@ -390,6 +390,7 @@ async function route() {
   const path = location.pathname;
   if (path === '/s') return publicLink();
   if (path === '/m') return mailboxDropPage();
+  if (path === '/invite') return invitePage();
   if (path === '/setup') return setupView();
   try {
     if (!S.me) {
@@ -451,12 +452,155 @@ async function signIn() {
         h('code', {}, 'frontdir setup-link'), ' on the server (for Docker Compose: ',
         h('code', {}, 'docker compose exec frontdir frontdir setup-link'), ').')));
   }
+  const idp = methods.oidc || methods.saml;
   main.replaceChildren(h('div', { class: 'panel center' },
     h('h1', {}, branding.name), h('p', {}, 'Private, end-to-end encrypted file storage.'),
     err && h('p', { class: 'error' }, err === 'not_allowed' ? `Your account is not permitted to use ${branding.name}.` : 'Sign-in failed. Please try again.'),
-    h('div', { class: 'toolbar centered' },
+    idp && h('div', { class: 'toolbar centered' },
       methods.oidc && h('a', { class: 'button primary', href: `/auth/login?return_to=${rt}` }, 'Sign in'),
-      methods.saml && h('a', { class: 'button' + (methods.oidc ? '' : ' primary'), href: `/auth/saml/login?return_to=${rt}` }, 'Sign in with SAML'))));
+      methods.saml && h('a', { class: 'button' + (methods.oidc ? '' : ' primary'), href: `/auth/saml/login?return_to=${rt}` }, 'Sign in with SAML')),
+    methods.local && localSignInForm(idp)));
+}
+
+// ---- local accounts: email, password and a one-time code ----------------------------------------------
+// The login password is a different secret from the encryption passphrase:
+// the server sees the first and must never learn the second. It is kept in
+// memory for this tab only, to refuse it as a passphrase.
+function localSignInForm(withIdp) {
+  const email = h('input', { type: 'email', autocomplete: 'username', required: true });
+  const pw = h('input', { type: 'password', autocomplete: 'current-password', required: true });
+  const msg = h('p', { class: 'error', role: 'alert' });
+  const box = h('div', { class: 'local-signin' });
+  const codeStep = (ticket) => {
+    msg.textContent = '';
+    const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 24, placeholder: '123456' });
+    box.replaceChildren(h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        await api('POST', '/api/v1/auth/local/code', { ticket, code: code.value });
+        enterApp(location.pathname); // in place: keeps the sign-in password in memory for the passphrase check
+      } catch (x) { msg.textContent = x.message; code.value = ''; code.focus(); }
+    } },
+    h('label', {}, 'One-time code from your authenticator app', code),
+    h('p', { class: 'note' }, 'Lost your phone? Type one of your recovery codes instead.'),
+    msg, h('div', { class: 'row' }, h('button', { class: 'primary' }, 'Sign in'))));
+    code.focus();
+  };
+  box.append(withIdp ? h('p', { class: 'note' }, 'Or, with a local account:') : null,
+    h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const { ticket } = await api('POST', '/api/v1/auth/local/login', { email: email.value, password: pw.value });
+        S.loginPassword = pw.value;
+        codeStep(ticket);
+      } catch (x) { msg.textContent = x.message; }
+    } },
+    h('label', {}, 'Email', email), h('label', {}, 'Password', pw), msg,
+    h('div', { class: 'row' }, h('button', { class: withIdp ? '' : 'primary' }, 'Continue'))));
+  return box;
+}
+
+// enterApp continues into the app after a local sign-in, without a reload.
+function enterApp(path) {
+  S.me = null;
+  history.replaceState(null, '', path || '/');
+  route();
+}
+
+// The invite or reset link: set a password, add the authenticator, confirm
+// it with a code, then keep the recovery codes.
+async function invitePage() {
+  document.getElementById('nav').hidden = true;
+  const token = location.hash.slice(1);
+  if (token) history.replaceState(null, '', '/invite');
+  const panel = h('div', { class: 'panel narrow' });
+  main.replaceChildren(panel);
+  let info;
+  try {
+    if (!token) throw new Error('Open the link exactly as you received it, including the part after #.');
+    info = await api('POST', '/api/v1/auth/local/invite', { token });
+  } catch (e) {
+    return panel.replaceChildren(h('h1', {}, 'Link not valid'), h('p', {}, e.message));
+  }
+  const p1 = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: 12 });
+  const p2 = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const msg = h('p', { class: 'error', role: 'alert' });
+  panel.replaceChildren(h('h1', {}, info.reset ? 'Set a new sign-in' : `Welcome to ${branding.name}`),
+    h('p', {}, `For ${info.displayName || info.email} (${info.email}).`),
+    h('p', { class: 'note' }, 'Step 1 of 3: choose a sign-in password. At least 12 characters; a few unrelated words work well. ',
+      'Later you also choose an encryption passphrase for your files: it must be different.'),
+    h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      if (p1.value !== p2.value) { msg.textContent = 'The passwords do not match.'; return; }
+      try {
+        const en = await api('POST', '/api/v1/auth/local/enroll', { token, password: p1.value });
+        S.loginPassword = p1.value;
+        enrollStep(panel, en, info);
+      } catch (x) { msg.textContent = x.message; }
+    } }, h('label', {}, 'Password', p1), h('label', {}, 'Repeat it', p2), msg,
+    h('div', { class: 'row' }, h('button', { class: 'primary' }, 'Continue'))));
+  p1.focus();
+}
+
+function enrollStep(panel, en, info) {
+  const bytes = Uint8Array.from(atob(en.qr), (c) => c.charCodeAt(0));
+  const img = h('img', { class: 'qr', alt: 'QR code for your authenticator app', width: 240, height: 240 });
+  img.src = URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
+  const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 6, placeholder: '123456' });
+  const msg = h('p', { class: 'error', role: 'alert' });
+  panel.replaceChildren(h('h1', {}, 'Add your authenticator'),
+    h('p', { class: 'note' }, 'Step 2 of 3: scan this with an authenticator app (for example 2FAS, Aegis, Google or Microsoft Authenticator, 1Password), then type the code it shows. ',
+      'Every sign-in asks for one.'),
+    h('div', { class: 'center' }, img),
+    h('details', {}, h('summary', {}, 'Can’t scan? Type the key instead'), h('div', { class: 'secret' }, en.secret.match(/.{1,4}/g).join(' '))),
+    h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const { recoveryCodes } = await api('POST', '/api/v1/auth/local/enroll/finish', { ticket: en.ticket, code: code.value });
+        URL.revokeObjectURL(img.src);
+        recoveryStep(panel, recoveryCodes, info);
+      } catch (x) { msg.textContent = x.message; code.value = ''; code.focus(); }
+    } }, h('label', {}, 'Code from the app', code), msg, h('div', { class: 'row' }, h('button', { class: 'primary' }, 'Confirm'))));
+  code.focus();
+}
+
+function recoveryStep(panel, codes, info) {
+  const ok = h('input', { type: 'checkbox', required: true });
+  panel.replaceChildren(h('h1', {}, 'Save your recovery codes'),
+    h('p', { class: 'note' }, 'Step 3 of 3: if you lose your phone, each of these signs you in once instead of a one-time code. ',
+      'Keep them somewhere safe, apart from your password. They are shown only now.'),
+    h('div', { class: 'secret recovery-codes' }, codes.join('\n')),
+    h('div', { class: 'row' }, h('button', { type: 'button', onclick: async () => {
+      try { await navigator.clipboard.writeText(codes.join('\n')); toast('Copied'); } catch { toast('Copy failed: select and copy manually'); }
+    } }, 'Copy')),
+    h('form', { class: 'stack', onsubmit: (e) => { e.preventDefault(); enterApp('/'); } },
+      h('label', { class: 'check' }, ok, ' I have saved them'),
+      h('div', { class: 'row' }, h('button', { class: 'primary' }, info.reset ? 'Continue' : 'Continue to set up encryption'))));
+}
+
+// confirmItsYou gets a fresh confirmation of who you are before an
+// administrative change: password and code for a local account, a trip to
+// the identity provider otherwise. Resolves true once confirmed here.
+async function confirmItsYou(why) {
+  if (!S.me.user.local) {
+    if (await confirmBox('Confirm it’s you', `${why} You will be sent to your identity provider and brought back here.`, 'Continue')) location.assign(reauthURL());
+    return false;
+  }
+  return new Promise((resolve) => {
+    const pw = h('input', { type: 'password', autocomplete: 'current-password', required: true });
+    const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', required: true, maxlength: 24 });
+    const msg = h('p', { class: 'error', role: 'alert' });
+    const d = dialog('Confirm it’s you', h('p', { class: 'note' }, why),
+      h('form', { class: 'stack', onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          await api('POST', '/api/v1/auth/local/reauth', { password: pw.value, code: code.value });
+          resolve(true); d.close();
+        } catch (x) { msg.textContent = x.message; }
+      } }, h('label', {}, 'Password', pw), h('label', {}, 'One-time code (or a recovery code)', code), msg,
+      h('div', { class: 'row' }, h('button', { type: 'button', onclick: () => { resolve(false); d.close(); } }, 'Cancel'), h('button', { class: 'primary' }, 'Confirm'))));
+    d.addEventListener('cancel', () => resolve(false));
+  });
 }
 
 function setupKeys() {
@@ -470,6 +614,9 @@ function setupKeys() {
     h('form', { class: 'stack', onsubmit: async (e) => {
       e.preventDefault();
       if (p1.value !== p2.value) { msg.textContent = 'The passphrases do not match.'; return; }
+      if (S.loginPassword && p1.value === S.loginPassword) {
+        msg.textContent = 'Use a different passphrase from your sign-in password: the server sees your password, and must never learn this.'; return;
+      }
       msg.textContent = '';
       const b = busy('Generating keys…');
       try {
@@ -544,6 +691,7 @@ function unlockScreen() {
 }
 
 async function changePassphrase(np) {
+  if (S.loginPassword && np === S.loginPassword) throw new Error('Use a different passphrase from your sign-in password: the server sees your password, and must never learn this.');
   const nb = await E.changePassphrase(S.acct, S.bundle, np);
   await api('PUT', '/api/v1/keys', { bundle: JSON.stringify(nb) });
   S.bundle = nb;
@@ -1640,7 +1788,7 @@ async function signOut() {
 // change needs a recent sign-in ("confirm it's you", like sudo asking for
 // your password again). The page shows the rules so nobody is surprised.
 const ADMIN_TABS = [['people', 'People'], ['settings', 'Storage & sharing'], ['sign-in', 'Sign-in'], ['branding', 'Branding'], ['emergency', 'Emergency']];
-const TAB_GROUPS = { settings: ['storage', 'sharing', 'sessions'], 'sign-in': ['oidc', 'saml', 'access'], branding: ['branding'] };
+const TAB_GROUPS = { settings: ['storage', 'sharing', 'sessions'], 'sign-in': ['oidc', 'saml', 'local', 'access'], branding: ['branding'] };
 const reauthURL = () => `/auth/reauth?return_to=${encodeURIComponent(location.pathname)}`;
 
 async function adminView(tab) {
@@ -1666,8 +1814,10 @@ async function adminView(tab) {
 function reauthBanner(s) {
   if (s.recent) return h('p', { class: 'banner ok' }, `Identity confirmed: you can make changes until ${new Date(s.recentUntil).toLocaleTimeString()}.`);
   return h('div', { class: 'banner' },
-    h('span', {}, `You can look around. To change anything, confirm it’s you: your identity provider asks you to sign in again (even if you are signed in there), then brings you back. It lasts ${s.window.replace(/m0s$/, ' minutes')}.`),
-    h('button', { class: 'primary', onclick: () => location.assign(reauthURL()) }, 'Confirm it’s you'));
+    h('span', {}, S.me.user.local
+      ? `You can look around. To change anything, confirm it’s you with your password and a one-time code. It lasts ${s.window.replace(/m0s$/, ' minutes')}.`
+      : `You can look around. To change anything, confirm it’s you: your identity provider asks you to sign in again (even if you are signed in there), then brings you back. It lasts ${s.window.replace(/m0s$/, ' minutes')}.`),
+    h('button', { class: 'primary', onclick: async () => { if (await confirmItsYou('Changes in the admin area need a recent confirmation.')) route(); } }, 'Confirm it’s you'));
 }
 
 // adminChange runs a change and reports whether it worked. A change refused
@@ -1679,7 +1829,7 @@ async function adminChange(fn, ok) {
     return true;
   } catch (e) {
     if (e.code === 'reauth_required') {
-      if (await confirmBox('Confirm it’s you', 'This change needs a recent sign-in. You will be sent to your identity provider and brought back here.', 'Continue')) location.assign(reauthURL());
+      if (await confirmItsYou('This change needs a recent sign-in.')) return adminChange(fn, ok);
     } else toast(e.message);
     return false;
   }
@@ -1719,14 +1869,43 @@ async function peopleTab(body) {
           if (!(await confirmBox(make ? 'Make administrator' : 'Remove administrator', text, make ? 'Make administrator' : 'Remove'))) return;
           if (await adminChange(() => api('PUT', `/api/v1/admin/users/${u.id}/admin`, { admin: make }), 'Done')) load();
         } }, u.adminGranted ? 'Remove administrator' : 'Make administrator'),
+        !me && u.signIn === 'local' && h('button', { class: 'link', onclick: async () => {
+          if (!(await confirmBox('Reset sign-in', `${name}’s password, authenticator and recovery codes stop working now, and they are signed out everywhere. ` +
+            'You get a link to give them, to set new ones. Their files stay encrypted with their own passphrase, which this does not change.', 'Reset sign-in'))) return;
+          await adminChange(async () => {
+            const r = await api('POST', `/api/v1/admin/users/${u.id}/local-reset`);
+            showSecret('Reset link', `Give this to ${name} over a channel you trust. It works once, until ${fmtDate(r.expiresAt)}.`, `${location.origin}/invite#${r.token}`);
+          });
+        } }, 'Reset sign-in…'),
         !me && h('button', { class: 'link danger', onclick: async () => {
           if (!(await confirmBox('Revoke access', `Sign ${name} out of every browser and delete their app passwords? Their files and shares stay. ` +
-            'They can sign in again unless you also remove them at your identity provider, so do that first.', 'Revoke access'))) return;
+            (u.signIn === 'local' ? 'Their password and authenticator stop working too, until you reset their sign-in.'
+              : 'They can sign in again unless you also remove them at your identity provider, so do that first.'), 'Revoke access'))) return;
           await adminChange(() => api('POST', `/api/v1/admin/users/${u.id}/revoke-access`), `${name} was signed out everywhere`);
         } }, 'Revoke access')));
   };
+  const methods = await api('GET', '/api/v1/auth/methods').catch(() => ({}));
+  const addLocal = async () => {
+    const email = h('input', { type: 'email', required: true });
+    const dname = h('input', { maxlength: 128 });
+    const adm = h('input', { type: 'checkbox' });
+    const d = dialog('Add a local account', h('p', { class: 'note' }, 'For someone without an account at your identity provider. ',
+      'You get an invite link to give them; with it they set a password and add an authenticator app. Both are needed to sign in.'),
+    h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      const done = await adminChange(async () => {
+        const r = await api('POST', '/api/v1/admin/local-accounts', { email: email.value, displayName: dname.value, admin: adm.checked });
+        d.close();
+        showSecret('Invite link', `Give this to ${email.value} over a channel you trust. It works once, until ${fmtDate(r.expiresAt)}.`, `${location.origin}/invite#${r.token}`);
+      });
+      if (done) load();
+    } }, h('label', {}, 'Email (they sign in with it)', email), h('label', {}, 'Name', dname),
+    h('label', { class: 'check' }, adm, ' Administrator'),
+    h('div', { class: 'row' }, h('button', { type: 'button', onclick: () => d.close() }, 'Cancel'), h('button', { class: 'primary' }, 'Create'))));
+  };
   body.replaceChildren(
-    h('form', { class: 'toolbar', onsubmit: (e) => { e.preventDefault(); load().catch((err) => toast(err.message)); } }, search, h('button', {}, 'Search')),
+    h('form', { class: 'toolbar', onsubmit: (e) => { e.preventDefault(); load().catch((err) => toast(err.message)); } }, search, h('button', {}, 'Search'),
+      methods.local && h('button', { type: 'button', onclick: addLocal }, 'Add local account…')),
     h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Person'), h('th', {}, 'Sign-in'), h('th', {}, 'Role'), h('th', { class: 'num' }, 'Storage'), h('th', {}))), rows),
     h('p', { class: 'note' }, 'Administrators come from the administrator groups (Sign-in tab) or are appointed here. Nobody can change their own administrator rights, so the last administrator cannot lock everyone out by accident. ' +
       'New people get the default storage from the Storage & sharing tab.'));
@@ -1789,6 +1968,7 @@ function settingsForm(v, groups, save, done) {
           continue;
         }
         if (err.code === 'reauth_required') {
+          if (S.me?.user?.local) { if (await confirmItsYou('Saving needs a recent sign-in.')) continue; return; }
           if (await confirmBox('Confirm it’s you', 'Saving needs a recent sign-in. Your changes here are not kept: you will be sent to your identity provider and brought back to this page.', 'Continue')) location.assign(reauthURL());
           return;
         }
@@ -1919,7 +2099,7 @@ async function setupView() {
     } catch (e) { toast(e.message); }
   };
   panel.append(...[
-    h('p', {}, `${branding.name} never stores passwords: your identity provider (Keycloak, Authentik, Zitadel, Entra ID, Okta, Google and others) signs people in, with its own multi-factor authentication.`),
+    h('p', {}, `Your identity provider (Keycloak, Authentik, Zitadel, Entra ID, Okta, Google and others) signs people in, with its own multi-factor authentication; ${branding.name} then stores no passwords. Without one, use local accounts (at the bottom).`),
     h('p', { class: 'note' }, 'Step 1: configure OpenID Connect or SAML below (or both); it is tried against your identity provider before it is saved. ' +
       'Step 2: sign in through this page. You become the first administrator and this link stops working.'),
     (oidc || saml) && h('div', { class: 'banner' }, h('span', {}, 'Sign-in is configured. Finish setup by signing in:'),
@@ -1927,7 +2107,26 @@ async function setupView() {
       saml && h('button', { class: oidc ? '' : 'primary', onclick: () => finish('saml') }, 'Sign in with SAML to finish')),
     settingsForm(v, ['oidc', 'saml', 'access'],
       (set, confirm) => api('POST', '/api/v1/setup/save', { token: setupToken, revision: v.revision, set, confirm }), () => setupView()),
+    setupLocalForm(),
   ].filter(Boolean));
+}
+
+// No identity provider: the first administrator can be a local account
+// (password and one-time code).
+function setupLocalForm() {
+  const email = h('input', { type: 'email', required: true, autocomplete: 'email' });
+  const dname = h('input', { maxlength: 128, autocomplete: 'name' });
+  return h('details', { class: 'setup-local' }, h('summary', {}, 'No identity provider? Start with a local administrator account'),
+    h('p', { class: 'note' }, 'Local accounts sign in with an email, a password and a one-time code from an authenticator app. ',
+      'This turns them on, makes you the first administrator, and uses up this setup link. You can add an identity provider later.'),
+    h('form', { class: 'stack', onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('POST', '/api/v1/setup/local', { token: setupToken, email: email.value, displayName: dname.value });
+        location.assign(`/invite#${r.token}`);
+      } catch (x) { toast(x.message); }
+    } }, h('label', {}, 'Your email', email), h('label', {}, 'Your name', dname),
+    h('div', { class: 'row' }, h('button', { class: 'primary' }, 'Create my account'))));
 }
 
 // ---- file mailboxes (E2EE.md §6a) -------------------------------------------------------------------------

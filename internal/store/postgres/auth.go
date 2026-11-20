@@ -131,6 +131,7 @@ func (s *Store) DeleteExpiredAuth(ctx context.Context, now time.Time) error {
 		"DELETE FROM login_requests WHERE expires_at < $1",
 		"DELETE FROM sessions WHERE expires_at < $1",
 		"DELETE FROM app_passwords WHERE expires_at IS NOT NULL AND expires_at < $1",
+		"DELETE FROM local_tickets WHERE expires_at < $1",
 	} {
 		if _, err := s.db.Exec(ctx, q, now); err != nil {
 			return mapErr(err)

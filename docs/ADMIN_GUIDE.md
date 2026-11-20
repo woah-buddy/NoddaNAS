@@ -59,7 +59,7 @@ and who shares with whom. Protect the database and its backups accordingly. See
 | PostgreSQL 16 or newer | Compose file (`postgres:18-alpine`), a managed service, or an operator such as CloudNativePG | Holds users, the folder tree, encrypted names, wrapped keys and shares |
 | Storage for file containers | A local volume, or `ReadWriteMany` storage on Kubernetes for multiple replicas | Holds only ciphertext |
 | HTTPS reverse proxy | Compose file (Caddy, automatic certificates) or your own | TLS is required (plain HTTP is accepted only for `localhost`) |
-| Identity provider | Yours: any OIDC provider and/or SAML 2.0 IdP | FrontDir stores no passwords |
+| Identity provider | Yours: any OIDC provider and/or SAML 2.0 IdP; or none, with [local accounts](#local-accounts-1) | With an IdP, FrontDir stores no passwords |
 
 ### Sizing
 
@@ -594,7 +594,14 @@ skipped: skipping a broken "allowed groups" would open sign-in to everyone.
 | `FRONTDIR_SAML_NAME_ATTRIBUTES` | `displayName`, `name`, `cn`, and standard URIs | Display name attributes |
 | `FRONTDIR_SAML_GROUP_ATTRIBUTES` | `groups`, `memberOf`, `eduPersonAffiliation`, and standard URIs | Group attributes |
 
-With neither OIDC nor SAML configured (here or on the web), FrontDir starts in **setup mode**:
+### Local accounts
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FRONTDIR_LOCAL_ACCOUNTS` | `false` | Allow accounts that sign in with an email, a password and a one-time code from an authenticator app (both always required). Needs `FRONTDIR_SETTINGS_KEY`. See [§12](#local-accounts-1). |
+| `FRONTDIR_LOCAL_ADMINS` | `false` | Whether local accounts can be administrators. Always the case when neither OIDC nor SAML is configured. |
+
+With neither OIDC nor SAML nor local accounts configured (here or on the web), FrontDir starts in **setup mode**:
 the sign-in page explains that the server is not set up, and `frontdir setup-link` creates the
 link to set it up ([§3](#3-install-with-docker-compose) step 7).
 
@@ -877,6 +884,7 @@ FrontDir writes one JSON object per line to standard output (`docker compose log
 | App passwords | `app_password.create`, `app_password.revoke` |
 | Files | `file.upload`, `file.download`, `file.version_restore`, `folder.create`, `node.update`, `node.trash`, `node.restore`, `node.purge_requested`, `node.purged`, `trash.empty` |
 | Sharing | `share.user.create`, `share.link.create`, `share.delete`, `link.download`, `link.password_failed`, `share.link.revoke_all` |
+| Local accounts | `local.user_created`, `local.invite.issued`, `local.reset.issued`, `local.enrolled`, `local.login_failed`, `local.recovery_code_used`, `login.reauth`, `operator.local.reset` |
 | File mailboxes | `mailbox.create`, `mailbox.close`, `mailbox.drop`, `mailbox.password_failed`, `mailbox.drop_file`, `mailbox.drop_discard`, `mailbox.expired` |
 | Team folders | `team.create`, `team.delete`, `team.member_role`, `team.member_remove`, `team.key_grant`, `team.group_map`, `team.group_unmap`, `space.quota`, `space.purged` |
 | Emergency and maintenance actions | `admin.links.revoke_all` (web), `operator.links.revoke_user`, `operator.links.revoke_all`, `operator.access.revoke`, `operator.sessions.revoke_all`, `operator.storage.verify` (server shell) |
@@ -931,6 +939,42 @@ effect immediately for everyone; removing a person from the group at the IdP tak
 next sign-in, so also revoke their access (below) to make it immediate. Administrators cannot read
 anyone's files: those stay end-to-end encrypted.
 
+### Local accounts
+
+Local accounts are for people without an account at your identity provider (guests, outside
+collaborators), or for a server that has no identity provider at all. They sign in with an email
+address, a password and a one-time code from an authenticator app; **both are always required**.
+FrontDir stores the password as an Argon2id hash and the authenticator's secret encrypted with a
+key derived from `FRONTDIR_SETTINGS_KEY` (which local accounts therefore need).
+
+- **Turn them on:** Admin → Sign-in → *Local accounts* (or `FRONTDIR_LOCAL_ACCOUNTS=true`). A
+  server set up without an identity provider has them on already: the setup page's *No identity
+  provider?* option creates the first administrator as a local account.
+- **Add someone:** Admin → People → **Add local account…**, with their email. You get a one-time
+  invite link (valid for 7 days) to pass on over a channel you trust. With it they choose a
+  password (at least 12 characters, not a well-known one, not containing their email), scan a QR
+  code into their authenticator app, confirm it with a first code, and save ten single-use
+  recovery codes. Until they confirm the code, nothing takes effect.
+- **Administrators:** a local account can be an administrator only when no identity provider is
+  configured, or when *Local accounts can be administrators* (`FRONTDIR_LOCAL_ADMINS`) is on. If
+  you later add an identity provider, local administrators lose their rights until you allow
+  them. "Confirm it's you" for a local administrator asks for the password and a code.
+- **Lost phone:** they sign in with a recovery code instead of a code. Lost both: Admin → People →
+  **Reset sign-in…** next to them. Their password, authenticator and recovery codes stop working
+  at once, they are signed out everywhere, and you get a reset link (valid for 24 hours) to give
+  them. Nobody resets their own sign-in there. If no administrator can sign in, the operator can:
+
+  ```sh
+  docker compose exec frontdir /frontdir reset-mfa --user alice@example.com   # prints a reset link
+  ```
+
+- **Their files:** a reset changes how they sign in, not their encryption passphrase. Their files
+  stay readable with it (or their recovery code), and unreadable to you, as for every account.
+- **Password and passphrase are different secrets.** The server sees the sign-in password; it must
+  never learn the encryption passphrase. The web app refuses a passphrase equal to the password.
+- **Abuse:** ten wrong passwords or codes lock an account for 15 minutes, on top of the per-address
+  sign-in rate limit. The sign-in form answers the same way whether or not an account exists.
+
 ### Quotas
 
 Under Admin → People, choose **Storage…** next to the person. Or from the shell:
@@ -957,7 +1001,8 @@ Do these in order:
 1. **Disable or remove the user at the IdP,** or remove them from the allowed groups. This stops
    new sign-ins. Do it first, or they could simply sign in again.
 2. **Cut off existing access:** Admin → People → **Revoke access** (ends their sessions and deletes
-   their app passwords), or from the shell, which also revokes their public links:
+   their app passwords; for a local account it also removes their password and authenticator, so
+   step 1 is not needed for them), or from the shell, which also revokes their public links:
 
    ```sh
    docker compose exec frontdir /frontdir revoke-access --user alice@example.com   # or --user <id>

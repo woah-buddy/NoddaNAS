@@ -48,6 +48,9 @@ server is still responsible for (access control, integrity of structure, availab
 | Forged or tampered SAML assertion | XML signature required and verified (crewjam/saml); audience, issuer, destination, validity window | e2e: tampered NameID rejected |
 | Replayed SAML response | Each response must answer an AuthnRequest whose ID is stored server-side and consumed once, from the same browser | e2e: replay rejected |
 | Unsolicited (IdP-initiated) SAML, login CSRF | IdP-initiated SSO disabled; no binding cookie → rejected | e2e: unsolicited rejected |
+| Guessing a local account's password, or a one-time code | Both factors are always required; Argon2id password hashes; ten failures (passwords and codes together) lock the account for 15 minutes, on top of the per-address sign-in limit; each sign-in ticket allows five codes; the same answer and the same work whether or not the account exists | `TestLocalAccounts` (lockout, ticket limit, enumeration) |
+| Replaying a one-time code, or a recovery code | A code is accepted only for a time step after the last one used (stored per account, checked atomically); recovery codes are deleted when used | `TestVerifyTOTP`, `TestLocalAccounts` |
+| Intercepting or reusing an invite or reset link | 256-bit token in the URL fragment, stored hashed, single use, 7 days (invite) or 24 hours (reset); the password and authenticator take effect only after the first code from the app confirms them; a reset stops the old password, authenticator, recovery codes and sessions at once | `TestLocalAccounts`, `TestSetupWithLocalAdmin` |
 | Anyone the IdP knows signs in | Group / verified-email-domain policy for both OIDC and SAML; startup warning if open | e2e: policy test |
 | Stolen or unattended administrator session changes settings, appoints administrators or switches the identity provider | Every admin-area change needs a recent re-authentication at the IdP (OIDC `prompt=login` + `max_age=0` with `auth_time` checked; SAML `ForceAuthn` with `AuthnInstant` checked), valid 15 minutes; app passwords never qualify; settings set in the environment are locked; every change audited | `TestSetupLinkAndWebSettings` (stale `auth_time` refused), `TestUpdateRules` |
 | Switching the IdP to take over existing accounts | Accounts are keyed by (issuer, subject): a new IdP only creates new, empty accounts; switching or removing a provider requires explicit confirmation naming how many accounts it strands | `TestSignInChangesAreCheckedAndConfirmed` |
@@ -108,6 +111,7 @@ events (identifiers only; never names, tokens or passwords).
 | Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
 | Thumbnails leak content or metadata | Made on the uploader's device and re-encoded (no EXIF or GPS), encrypted under a key derived from the file key and that version's salt; the server sees only that a version has one and its size (documented in E2EE.md, "What the server can still see"); rendered only as `<img>` WebP or JPEG, never SVG | `TestThumbnails`, browser test |
 | Server-side request forgery through IdP URLs entered on the web (reaching cloud metadata or internal services, reading their responses) | All IdP traffic uses one client that refuses link-local, metadata, unspecified, multicast and (except on localhost deployments) loopback addresses, checked before sending and again on the address actually dialled (DNS rebinding); 1 MiB response cap, 20 s timeout, at most three redirects and never https→http; errors describe the failure and never echo the response | `TestIdPClientRefusesInternalAddresses`, `TestIdPChecksNeverEchoTheRemote` |
+| Local accounts' secrets in a database dump | Passwords are Argon2id hashes; TOTP secrets are AES-256-GCM encrypted under a key derived from the settings key (not in the database), bound to the account; recovery codes (80 bits) are stored hashed | `TestLocalAccounts` (stored forms) |
 | OIDC client secret in a database dump | Secrets saved on the web are AES-256-GCM encrypted under a key that lives only in the server's environment, bound to the setting name; never returned by the API or logged | `TestSecretBox`, `TestSignInChangesAreCheckedAndConfirmed` |
 
 ### Denial of service
@@ -126,6 +130,7 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
 | Read-only credential writes | Capped at read in authorization | `TestReadOnlyAndCycles` |
 | App password replaces keys or mints credentials | Key setup/changes and credential management require an interactive session | e2e "credential scoping" |
 | Non-admin maps groups to team folders | Admin check on every mapping change | `TestTeamFolders`, e2e |
+| A local account keeps administrator rights after an identity provider takes over administration | A local account counts as an administrator only while no identity provider is configured or local administrators are explicitly allowed; checked on every request | `TestLocalAccounts` |
 | An administrator entrenches themselves, or the last one locks everyone out | Nobody changes their own administrator appointment or demotes themselves through the administrator groups; removing a group applies to everyone at once | `TestAdminGroupsApplyImmediatelyAndGuardSelf` |
 | Team left without a key holder | Last key-holding manager cannot leave or be demoted | `TestTeamFolders` |
 | Container escape impact | Distroless, non-root, read-only FS, no capabilities, seccomp | `Dockerfile`, `deploy/` |
@@ -185,3 +190,11 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
     before they are encrypted (residual 2, with no fallback in the browser). `frontdir-cli drop`
     encrypts locally. Anyone who obtains a mailbox link can send files and read its title until
     it expires or is closed, and what a sender says about themselves is unverified.
+16. **Local accounts are as strong as their owners' phones and their administrators.** One-time
+    codes can be phished in real time by a site that relays them (passkeys would not be); an invite
+    or reset link is a bearer credential until used; and an administrator who issues a reset to
+    the wrong person hands them the account (though not its files, which stay encrypted with the
+    owner's passphrase). With an identity provider, its own controls apply instead. FrontDir
+    checks passwords against a short list of common ones, not a full breached-password list, and
+    the web app's check that the sign-in password differs from the encryption passphrase works
+    only in the tab where the password was typed.
