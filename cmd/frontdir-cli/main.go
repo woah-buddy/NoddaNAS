@@ -20,6 +20,13 @@
 //	                                        show your files, decrypted, as a local
 //	                                        network drive (WebDAV on this computer only)
 //
+// Sending to someone's file mailbox (no account needed):
+//
+//	frontdir-cli drop <mailbox-link> <file>... [--name N] [--email E] [--message M]
+//	                                        encrypt the files to the mailbox and send
+//	                                        them; a password, if the mailbox has one, is
+//	                                        read from FRONTDIR_MAILBOX_PASSWORD_FILE or prompted
+//
 // Offline (no server, no network):
 //
 //	frontdir-cli decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
@@ -50,6 +57,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/woah-buddy/FrontDir/internal/client"
+	"github.com/woah-buddy/FrontDir/internal/e2ee"
 )
 
 func main() {
@@ -74,6 +82,8 @@ func main() {
 		err = online(ctx, cmd, args)
 	case "mount":
 		err = mount(ctx, args)
+	case "drop":
+		err = drop(ctx, args)
 	default:
 		usage()
 	}
@@ -89,6 +99,7 @@ func usage() {
 online:   ls [path] | get <path> [local] | put <local> [folder] | mkdir <path> | teams
           backup <dir> | restore <file.fdenc> [folder] | export-keys <file> | accept <path>
           mount [--listen 127.0.0.1:8484] [--read-only] [--url-file FILE] [-v]
+mailbox:  drop <mailbox-link> <file>... [--name N] [--email E] [--message M]
 offline:  decrypt <file.fdenc> <out> --keys <keys.json> [--recovery]
           decrypt-tree <backup-dir> <out-dir> --keys <keys.json> [--recovery]
 
@@ -419,4 +430,70 @@ func writeAtomically(dst string, fn func(io.Writer) error) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), dst) // #nosec G703 -- the destination the user asked for
+}
+
+// drop sends files to a file mailbox (docs/E2EE.md §6a). It needs no account:
+// the link's fragment holds the access token and the public key the files
+// are encrypted to, here, before they leave this computer.
+func drop(ctx context.Context, args []string) error {
+	fl := flag.NewFlagSet("drop", flag.ExitOnError)
+	name := fl.String("name", "", "your name, shown to the recipient (unverified)")
+	email := fl.String("email", "", "your email, shown to the recipient (unverified)")
+	message := fl.String("message", "", "a message for the recipient")
+	var pos []string
+	for len(args) > 0 { // flags may come before or after the link and files
+		if err := fl.Parse(args); err != nil {
+			return err
+		}
+		if fl.NArg() == 0 {
+			break
+		}
+		pos, args = append(pos, fl.Arg(0)), fl.Args()[1:]
+	}
+	if len(pos) < 2 {
+		return errors.New("usage: frontdir-cli drop <mailbox-link> <file> [more files]")
+	}
+	link, files := pos[0], pos[1:]
+	base, _, _, err := client.ParseMailboxLink(link)
+	if err != nil {
+		return err
+	}
+	c := client.New(base, &http.Client{}, "")
+	password := ""
+	mb, err := c.OpenMailboxLink(ctx, link, "")
+	var ae *client.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusUnauthorized {
+		if password, err = secret("FRONTDIR_MAILBOX_PASSWORD_FILE", "Mailbox password: "); err != nil {
+			return err
+		}
+		mb, err = c.OpenMailboxLink(ctx, link, password)
+	}
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return errors.New("no such mailbox: the link is wrong, or the mailbox was removed")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Sending to %q (for %s). You will not be able to see or retrieve what you send.\n", mb.Title, mb.Owner)
+	note := &e2ee.DropNote{Name: *name, Email: *email, Message: *message}
+	for _, path := range files {
+		if err := dropOne(ctx, c, link, password, path, note); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		fmt.Fprintln(os.Stderr, "sent", filepath.Base(path))
+	}
+	return nil
+}
+
+func dropOne(ctx context.Context, c *client.Client, link, password, path string, note *e2ee.DropNote) error {
+	f, err := os.Open(path) // #nosec G304 -- the file the user asked to send
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	return c.DropFile(ctx, link, password, filepath.Base(path), f, st.Size(), note)
 }

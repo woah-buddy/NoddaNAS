@@ -40,6 +40,10 @@ func (s *Service) checkRecord(ctx context.Context, p Principal, req *UploadReque
 		return nil, domain.E(domain.CodeInvalid, "a version you did not encrypt can only be recorded as a restore")
 	case req.restore && r.Kind != e2ee.KindRestore:
 		return nil, domain.E(domain.CodeInvalid, "a restore must be recorded as one")
+	case (req.dropID != "") != (r.Kind == e2ee.KindDrop):
+		return nil, domain.E(domain.CodeInvalid, "only filing a mailbox drop is recorded as a drop")
+	case r.Kind == e2ee.KindDrop && prefix.Signer.User != p.UserID:
+		return nil, domain.E(domain.CodeInvalid, "whoever files a drop signs its container")
 	}
 	u, err := s.store.GetUser(ctx, p.UserID)
 	if err != nil {

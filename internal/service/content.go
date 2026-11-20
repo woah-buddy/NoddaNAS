@@ -30,7 +30,9 @@ type UploadRequest struct {
 	// The signed version record (docs/E2EE.md §5c) and its signature.
 	Record, RecordSig []byte
 
-	restore bool // a server-side restore: the record must say so
+	restore  bool   // a server-side restore: the record must say so
+	dropID   string // filing this mailbox drop: the record must say so, and the drop is consumed
+	dropSize int64  // its size, already charged to the space and refunded on filing
 }
 
 type uploadTarget struct {
@@ -132,7 +134,7 @@ func (s *Service) Upload(ctx context.Context, p Principal, req UploadRequest, bo
 		return nil, domain.E(domain.CodeInvalid, "Content-Length does not match the container's declared size")
 	case total > s.conf().MaxFileSize:
 		return nil, domain.E(domain.CodeTooLarge, "file exceeds the maximum size")
-	case total > target.space.QuotaBytes-target.space.UsedBytes:
+	case total > target.space.QuotaBytes-target.space.UsedBytes+req.dropSize:
 		return nil, domain.E(domain.CodeQuota, "storage quota exceeded") // advisory; the binding check is atomic
 	}
 
@@ -193,7 +195,7 @@ func (s *Service) commit(ctx context.Context, p Principal, t *uploadTarget, req 
 	}
 	v.NodeID = n.ID
 	n.Size, n.PlainSize, n.SHA256, n.VersionID, n.ModifiedAt, n.ModifiedBy = v.Size, plainSize, v.SHA256, v.ID, v.CreatedAt, p.UserID
-	if err := s.store.CommitContent(ctx, &n, v, isNew, rev); err != nil {
+	if err := s.store.CommitContent(ctx, &n, v, isNew, rev, req.dropID); err != nil {
 		if isNew {
 			return nil, s.nameConflict(ctx, err, n.ParentID, n.NameHash)
 		}

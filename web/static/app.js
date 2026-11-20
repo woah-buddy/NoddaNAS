@@ -389,6 +389,7 @@ window.addEventListener('popstate', route);
 async function route() {
   const path = location.pathname;
   if (path === '/s') return publicLink();
+  if (path === '/m') return mailboxDropPage();
   if (path === '/setup') return setupView();
   try {
     if (!S.me) {
@@ -406,11 +407,13 @@ async function route() {
     if (!S.me.user.keys) return setupKeys();
     if (!S.acct) return unlockScreen();
     if (!S.contacts) await loadContacts();
+    if (!S.autoFiled) { S.autoFiled = true; autoFileDrops(); } // once per session, in the background
     document.getElementById('nav').hidden = false;
     renderQuota();
     markNav(path);
     if (path === '/shared') return await sharedWithMeView();
     if (path === '/shared/by-me') return await sharedByMeView();
+    if (path === '/mailboxes') return await mailboxesView();
     if (path === '/teams') return await teamsView();
     if (path.startsWith('/teams/')) return await teamView(path.split('/')[2]);
     if (path === '/trash' || path.startsWith('/trash/')) return await trashView(path.split('/')[2] || S.me.personalSpace.id);
@@ -581,6 +584,7 @@ async function folderView(id) {
       canWrite && children.some((c) => c.kind === 'file' && !c.hasThumbnail && thumbable(c.name)) &&
         h('button', { title: 'Make previews for the images and videos here. Others see previews you make only on files you uploaded.',
           onclick: () => makeThumbnails(ctx, children) }, 'Make thumbnails'),
+      canWrite && h('button', { title: 'A link anyone can send files to this folder with, without seeing anything in it', onclick: () => mailboxesDialog(ctx) }, 'Mailbox…'),
       canWrite && h('button', { onclick: () => newFolder(ctx) }, 'New folder'),
       canWrite && h('button', { onclick: async () => restoreBackups(ctx, await pickFiles('.fdenc,.ndne')) }, 'Restore backup…'),
       canWrite && h('button', { class: 'primary', onclick: async () => uploadMany(ctx, await pickFiles('')) }, 'Upload')),
@@ -1141,7 +1145,10 @@ async function versionsDialog(c) {
       signed ? h('span', { class: 'note', title: 'Position in the file’s signed history' }, ` #${e.record.rec.seq}`)
         : h('span', { class: 'note', title: 'Saved before FrontDir signed each version’s history: this time comes from the server.' }, ' · server time'));
     let by;
-    if (a.signer) {
+    if (a.signer && signed && e.record.rec.kind === 'drop') { // written by an anonymous sender; signed by whoever filed it
+      by = h('span', { class: 'version-author', title: 'Sent anonymously to a file mailbox. The person who filed it signed it; nobody vouches for who wrote it.' },
+        'Sent to a mailbox', h('span', { class: 'note' }, ` · filed by ${who(e.storedBy)}`));
+    } else if (a.signer) {
       const restored = signed && e.record.rec.kind === 'restore' ? h('span', { class: 'note' }, ` · restored by ${who(e.storedBy)}`) : null;
       by = h('span', { class: 'version-author' }, who(a.signer), ' ', trustBadge(a.signer, reopen), restored);
     } else if (a.pending) {
@@ -1921,6 +1928,246 @@ async function setupView() {
     settingsForm(v, ['oidc', 'saml', 'access'],
       (set, confirm) => api('POST', '/api/v1/setup/save', { token: setupToken, revision: v.revision, set, confirm }), () => setupView()),
   ].filter(Boolean));
+}
+
+// ---- file mailboxes (E2EE.md §6a) -------------------------------------------------------------------------
+// A mailbox is a link anyone can send files to a folder with, and nobody can
+// read anything through. Its public key lives only in the link's fragment;
+// drops are encrypted to it. Its private key is wrapped under the folder's
+// key, so whoever can write to the folder opens drops and files them.
+const DAY = 24 * 3600 * 1000;
+
+async function openMailboxFor(m) {
+  try {
+    const box = await E.openMailbox(m.id, await nodeKey(m.nodeId), m.boxKey);
+    return { box, title: (await E.openMailboxInfo(m.id, box.key.pub, m.info)).title };
+  } catch { return { box: null, title: '⚠ cannot be opened' }; }
+}
+const mailboxState = (m) => (m.accepting ? `Open until ${fmtDate(m.expiresAt)}` : m.closedAt ? 'Closed' : 'Expired');
+
+function mailboxRow(m, title, refresh, showFolder) {
+  return h('tr', {},
+    h('td', {}, h('strong', {}, title), showFolder && h('div', {}, h('a', { href: `/f/${m.nodeId}`, 'data-nav': '' }, 'Open the folder'))),
+    h('td', { 'data-label': 'Status' }, mailboxState(m), m.hasPassword ? ' · password' : '', m.autoFile ? ' · files automatically' : ''),
+    h('td', { 'data-label': 'Waiting' }, m.pendingFiles ? `${m.pendingFiles} (${fmtSize(m.pendingBytes)})` : 'none'),
+    h('td', { class: 'actions' },
+      h('button', { class: 'link', onclick: () => inboxDialog(m, refresh) }, 'Inbox'),
+      m.accepting && h('button', { class: 'link danger', onclick: async () => {
+        if (!(await confirmBox('Close mailbox', `Close “${title}”? Its link stops working at once. Files already sent stay in its inbox.`, 'Close mailbox'))) return;
+        try { await api('POST', `/api/v1/mailboxes/${m.id}/close`); await refresh(); } catch (e) { toast(e.message); }
+      } }, 'Close')));
+}
+
+async function mailboxesDialog(ctx) {
+  const list = h('tbody');
+  const refresh = async () => {
+    const { mailboxes } = await api('GET', `/api/v1/nodes/${ctx.folderId}/mailboxes`);
+    const rows = [];
+    for (const m of mailboxes) rows.push(mailboxRow(m, (await openMailboxFor(m)).title, refresh, false));
+    list.replaceChildren(...(rows.length ? rows : [h('tr', {}, h('td', { class: 'note' }, 'No mailboxes on this folder yet.'))]));
+  };
+  const quota = ctx.space.quotaBytes || 0;
+  const title = h('input', { required: true, maxlength: 200, placeholder: 'e.g. Receipts for the 2026 tax return' });
+  const days = h('input', { type: 'number', min: 1, max: 365, value: 14, required: true });
+  const capMB = h('input', { type: 'number', min: 1, value: Math.min(1024, Math.max(1, Math.floor(quota / 1048576))), required: true });
+  const files = h('input', { type: 'number', min: 1, max: 100000, value: 100, required: true });
+  const pw = h('input', { type: 'password', placeholder: 'optional, 10+ characters', autocomplete: 'new-password' });
+  const auto = h('input', { type: 'checkbox' });
+  const d = dialog('File mailboxes', h('p', { class: 'note' }, 'Anyone with a mailbox link can send files into this folder. ',
+    'They cannot see what is here, or anything sent before, and cannot get back what they sent. ',
+    'Files wait in the mailbox’s inbox until someone who can write here files them.'),
+  h('table', {}, list),
+  h('h3', {}, 'New mailbox'),
+  h('form', { class: 'stack', onsubmit: async (e) => {
+    e.preventDefault();
+    try {
+      const id = E.newId(), box = await E.newMailbox(id);
+      const info = await E.sealMailboxInfo(id, box.key.pub, { title: title.value.trim(), owner: S.me.user.displayName || '' });
+      const res = await api('POST', `/api/v1/nodes/${ctx.folderId}/mailboxes`, {
+        id, boxKey: await E.wrapMailbox(box, await nodeKey(ctx.folderId)), info, password: pw.value,
+        expiresAt: new Date(Date.now() + Number(days.value) * DAY).toISOString(), maxBytes: Math.round(Number(capMB.value) * 1048576),
+        maxFiles: Number(files.value), autoFile: auto.checked });
+      d.close();
+      showSecret('Mailbox link', 'Copy it now: it is not shown again. Anyone with this link can send files into this folder; nobody can read anything through it. ' +
+        (pw.value ? 'Send the password separately.' : ''), `${location.origin}/m#${res.token}.${E.b64u(box.key.pub)}`);
+    } catch (err) { toast(err.message); }
+  } },
+  h('label', {}, 'Title (senders see it)', title),
+  h('div', { class: 'row' }, h('label', {}, 'Open for (days)', days), h('label', {}, 'Total size limit (MB)', capMB), h('label', {}, 'At most files', files)),
+  h('label', {}, 'Password', pw),
+  h('label', { class: 'check' }, auto, ' File what arrives automatically, the next time someone who can write here opens FrontDir'),
+  h('div', { class: 'row' }, h('button', { type: 'button', onclick: () => d.close() }, 'Close'), h('button', { class: 'primary' }, 'Create link'))));
+  await refresh().catch((e) => toast(e.message));
+}
+
+async function mailboxesView() {
+  const list = h('tbody');
+  const refresh = async () => {
+    const { mailboxes } = await api('GET', '/api/v1/mailboxes');
+    const rows = [];
+    for (const m of mailboxes) rows.push(mailboxRow(m, (await openMailboxFor(m)).title, refresh, true));
+    list.replaceChildren(...(rows.length ? rows : [h('tr', {}, h('td', { class: 'empty' }, 'You have no mailboxes. Open a folder and choose Mailbox… to make one.'))]));
+  };
+  main.replaceChildren(h('div', { class: 'panel' }, h('h1', {}, 'Mailboxes'),
+    h('p', { class: 'note' }, 'Mailboxes you opened. Each is a link anyone can send files to a folder with; nobody can read anything through it.'),
+    h('table', {}, list)));
+  await refresh();
+}
+
+// Pending drops, decrypted here with the mailbox's key.
+async function loadInbox(m) {
+  const data = await api('GET', `/api/v1/mailboxes/${m.id}`);
+  const { box, title } = await openMailboxFor(data.mailbox);
+  const items = [];
+  for (const d of data.drops) {
+    let o = null;
+    if (box) { try { o = await E.openDrop(box, d.header); } catch { /* shown as unopenable */ } }
+    items.push({ d, o });
+  }
+  return { m: data.mailbox, title, items };
+}
+
+// fileDrop turns a drop into a file in the mailbox's folder: the drop's key
+// is wrapped under the folder and a container header signed by you goes
+// around its unchanged body (nothing is uploaded again). A taken name gets
+// a number.
+async function fileDrop(m, it) {
+  const where = await pathTo(m.nodeId);
+  const prefix = await E.fileDropPrefix(it.o, { spaceId: where.space.id, spacePub: await spacePub(where.space), signer: S.acct });
+  const trailer = await E.fileDropTrailer(S.acct, prefix, E.unb64u(it.d.bodyHash));
+  const container = await E.containerId(prefix);
+  const base = it.o.meta.name || 'dropped file';
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : base.replace(/(\.[^.]*)?$/, ` (${n})$1`);
+    const id = E.newId();
+    const entry = await (await nodeKey(m.nodeId)).entry(id, name, it.o.nk);
+    const rec = await E.signVersionRecord(S.acct, { node: id, seq: 1, prev: '', container, kind: 'drop' });
+    try {
+      await api('POST', `/api/v1/mailboxes/${m.id}/drops/${it.d.id}/file`, { id, ...entry, prefix: E.b64u(prefix),
+        trailer: E.b64u(trailer), record: E.b64u(rec.raw), recordSig: E.b64u(rec.sig) });
+      S.keys.set(id, it.o.nk);
+      remember(id, rec);
+      return name;
+    } catch (e) {
+      if (e.status !== 409 || n >= 50) throw e;
+    }
+  }
+}
+
+async function inboxDialog(m0, onChange) {
+  let inbox;
+  try { inbox = await loadInbox(m0); } catch (e) { return toast(e.message); }
+  const { m, title, items } = inbox;
+  const reopen = async () => { d.close(); if (onChange) await onChange().catch(() => {}); };
+  const act1 = (label, fn) => async () => { try { await fn(); toast(label); } catch (e) { toast(e.message); } await reopen(); inboxDialog(m, onChange); };
+  const rows = items.map((it) => {
+    const note = it.o?.note;
+    return h('tr', {},
+      h('td', {}, it.o ? h('strong', {}, it.o.meta.name) : h('span', { class: 'error' }, '⚠ This drop cannot be opened'),
+        note && h('div', { class: 'note', title: 'Typed by the sender. FrontDir cannot verify it.' },
+          `Says it’s from ${[note.name, note.email && `<${note.email}>`].filter(Boolean).join(' ') || 'someone'} (unverified)`,
+          note.message ? `: “${note.message}”` : '')),
+      h('td', { class: 'num' }, fmtSize(it.d.plainSize)),
+      h('td', { 'data-label': 'Received' }, fmtDate(it.d.createdAt)),
+      h('td', { class: 'actions' },
+        it.o && h('button', { class: 'link', title: 'Download and decrypt it to look at it first', onclick: async () => {
+          const b = busy(`Decrypting ${it.o.meta.name}…`);
+          try { saveBlob(await E.decryptDropBody(it.o, await apiBlob(`/api/v1/mailboxes/${m.id}/drops/${it.d.id}/content`)), it.o.meta.name); }
+          catch (e) { toast(e.message); } finally { b.close(); }
+        } }, 'Download'),
+        it.o && h('button', { class: 'link', onclick: act1('Filed', () => fileDrop(m, it)) }, 'File'),
+        h('button', { class: 'link danger', onclick: async () => {
+          if (!(await confirmBox('Discard', `Discard ${it.o ? `“${it.o.meta.name}”` : 'this drop'}? It is deleted for good.`, 'Discard'))) return;
+          await act1('Discarded', () => api('DELETE', `/api/v1/mailboxes/${m.id}/drops/${it.d.id}`))();
+        } }, 'Discard')));
+  });
+  const openable = items.filter((it) => it.o);
+  const d = dialog(`Inbox: ${title}`,
+    h('p', { class: 'note' }, 'Files sent with this mailbox’s link. Treat them like email attachments from strangers: ',
+      'the sender is anonymous, and FrontDir cannot scan encrypted files. Filing puts a file in the folder, signed by you as the one who filed it.'),
+    h('table', {}, h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { class: 'empty' }, 'Nothing waiting.')))),
+    h('form', { method: 'dialog', class: 'row' },
+      openable.length > 1 && h('button', { type: 'button', onclick: act1(`Filed ${openable.length} files`, async () => { for (const it of openable) await fileDrop(m, it); }) }, 'File all'),
+      h('button', {}, 'Close')));
+}
+
+// autoFileDrops files what arrived in your mailboxes that file automatically.
+async function autoFileDrops() {
+  try {
+    const { mailboxes } = await api('GET', '/api/v1/mailboxes');
+    let filed = 0;
+    for (const m of mailboxes.filter((x) => x.autoFile && x.pendingFiles > 0)) {
+      const { items } = await loadInbox(m);
+      for (const it of items.filter((x) => x.o)) { try { await fileDrop(m, it); filed++; } catch { /* left in the inbox */ } }
+    }
+    if (filed) toast(`Filed ${filed} file${filed === 1 ? '' : 's'} sent to your mailboxes`);
+  } catch { /* try again next session */ }
+}
+
+// The sender's page: anyone with the link, no account. They learn the
+// mailbox's title and limits, and nothing about what is in it.
+async function mailboxDropPage(password = '') {
+  document.getElementById('nav').hidden = true;
+  const [token, pubB64] = location.hash.slice(1).split('.');
+  let v, info, pub;
+  try {
+    if (!token || !pubB64) throw new Error('This link is incomplete. Make sure you copied all of it.');
+    pub = E.unb64u(pubB64);
+    if (pub.length !== 32) throw new Error('This link is incomplete. Make sure you copied all of it.');
+    v = await api('POST', '/api/v1/public/mailbox', { token, password });
+  } catch (e) {
+    if (e.status === 401) return mailboxPasswordPrompt(e.detail?.reason === 'password_wrong');
+    return main.replaceChildren(h('div', { class: 'panel center' }, h('h1', {}, 'Mailbox unavailable'), h('p', {}, e.message)));
+  }
+  try { info = await E.openMailboxInfo(v.id, pub, v.info); } catch {
+    return main.replaceChildren(h('div', { class: 'panel center' }, h('h1', {}, 'This link does not match its mailbox'),
+      h('p', {}, 'Nothing was sent. Ask whoever gave you the link for a new one.')));
+  }
+  const name = h('input', { maxlength: 200, autocomplete: 'name' });
+  const email = h('input', { type: 'email', maxlength: 200, autocomplete: 'email' });
+  const message = h('textarea', { maxlength: 2000, rows: 3 });
+  const picker = h('input', { type: 'file', multiple: true, required: true });
+  const sent = h('ul', { class: 'sent-list' });
+  const status = h('p', { class: 'note' }, `Up to ${fmtSize(Math.min(v.maxFileSize, v.remainingBytes))} more, at most ${v.filesLeft} more file${v.filesLeft === 1 ? '' : 's'}. `,
+    `Open until ${fmtDate(v.expiresAt)}.`);
+  const form = h('form', { class: 'stack', onsubmit: async (e) => {
+    e.preventDefault();
+    const note = { name: name.value.trim(), email: email.value.trim(), message: message.value.trim() };
+    for (const file of Array.from(picker.files)) {
+      const b = busy(`Encrypting and sending ${file.name}…`);
+      try {
+        if (file.size > v.maxFileSize) throw new Error('This file is larger than the server accepts.');
+        const { header, body } = await E.encryptDrop(file, { mailboxId: v.id, dropId: E.newId(), pub,
+          meta: { name: file.name, type: file.type || 'application/octet-stream', mtime: file.lastModified || Date.now() }, note }, (f) => b.set(f / 2));
+        await send('POST', '/api/v1/public/mailbox/drop', body, { 'Content-Type': 'application/octet-stream',
+          'X-FrontDir-Mailbox': token, 'X-FrontDir-Mailbox-Password': password, 'X-FrontDir-Drop': JSON.stringify(header) }, (f) => b.set(0.5 + f / 2));
+        sent.append(h('li', {}, `✓ ${file.name} sent`));
+      } catch (err) {
+        sent.append(h('li', { class: 'error' }, `${file.name}: ${err.message}`));
+        b.close();
+        break;
+      }
+      b.close();
+    }
+    picker.value = '';
+  } },
+  h('label', {}, 'Files', picker),
+  h('details', {}, h('summary', {}, 'Add your name or a message (optional)'),
+    h('p', { class: 'note' }, 'The recipient sees this next to your files. Nothing checks it, so they may confirm it with you.'),
+    h('label', {}, 'Your name', name), h('label', {}, 'Your email', email), h('label', {}, 'Message', message)),
+  h('div', { class: 'row' }, h('button', { class: 'primary' }, 'Send')));
+  main.replaceChildren(h('div', { class: 'panel narrow' },
+    h('h1', {}, info.title), info.owner && h('p', {}, `For ${info.owner}`), status, form, sent,
+    h('p', { class: 'note' }, '🔒 Files are encrypted in your browser, to a key only the recipient holds, before they leave this device. ',
+      'After sending you cannot see or retrieve them, or anything else sent here.')));
+}
+
+function mailboxPasswordPrompt(wrong) {
+  const pw = h('input', { type: 'password', required: true, autocomplete: 'off' });
+  main.replaceChildren(h('div', { class: 'panel center' }, h('h1', {}, 'Password required'),
+    wrong && h('p', { class: 'error' }, 'Wrong password.'),
+    h('form', { class: 'toolbar centered', onsubmit: (e) => { e.preventDefault(); mailboxDropPage(pw.value); } }, pw, h('button', { class: 'primary' }, 'Open'))));
+  pw.focus();
 }
 
 // ---- public links ------------------------------------------------------------------------------------------------

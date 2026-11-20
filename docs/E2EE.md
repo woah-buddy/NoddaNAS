@@ -287,7 +287,7 @@ sig    = Ed25519(by's key, "L/version-record" \0 || record bytes)
 | `seq` | position in the file's history: 1 for the first recorded version, then +1 each time |
 | `prev` | `b64u(SHA-256(previous record's bytes))`; `""` exactly when `seq` is 1 |
 | `container` | `b64u(SHA-256(prefix))`: which container this version is. The prefix holds a fresh salt, and the author's signature ties it to the body |
-| `kind` | `"save"` (the signer encrypted this container, so `by` and `fp` must equal the header's `signer`) or `"restore"` (the signer stored an existing container again, from the history or a backup) |
+| `kind` | `"save"` (the signer encrypted this container, so `by` and `fp` must equal the header's `signer`), `"restore"` (the signer stored an existing container again, from the history or a backup) or `"drop"` (the signer filed a file sent to a mailbox, §6a: they signed its container, an anonymous sender wrote it; only as `seq` 1, and `by` must equal the header's `signer` as for a save) |
 | `at` | the signer's clock, Unix milliseconds |
 | `by`, `fp` | the signer's user ID and key fingerprint |
 
@@ -366,6 +366,76 @@ everything else. Browsers keep it in local storage (the most recent 20,000 files
   nodeId)`. The `token` (server-side, hashed) gates access, rate limiting and expiry; `LS`
   decrypts.
 
+## 6a. File mailboxes
+
+A file mailbox is a link anyone can send files to a folder with, and nobody can read anything
+through. It is one-way twice over: the link's credential is accepted only by the endpoints that
+describe the mailbox and take a file, which reveal nothing about what is already there; and every
+file is encrypted to a key the sender never holds, so not even its ciphertext is any use to them.
+
+**Keys.** The creator's client makes an X25519 key pair for the mailbox.
+
+```
+link    = /m#<token>.<b64u(boxPub)>                    the fragment never reaches the server
+boxKey  = GCM(HKDF(NK_folder, info="L/mailbox/key"), boxPriv, aad = "L/mailbox/key" \0 mailboxId)
+info    = GCM(HKDF(boxPub, info="L/mailbox/info"), JSON{"title","owner"}, aad = "L/mailbox/info" \0 mailboxId)
+```
+
+The server stores `boxKey` and `info`. Whoever can read the folder (who holds `NK_folder`) can
+open the mailbox's private key. The description is readable with the public key, so senders see
+the title and whose mailbox it is, while the server, which never sees the public key, can neither
+read nor forge it. The `token` (256 bits, stored hashed) gates the endpoints, the optional
+password, the limits and expiry, as for public links.
+
+**A drop** is one file, encrypted in the sender's browser (or by `frontdir-cli drop`):
+
+```
+NK, salt   fresh; content, meta and commit keys derived as for containers (§5)
+header = JSON{"v":1, "id", "size", "salt", "commit",
+              "key":  b64u(Seal(boxPub, NK, ctx = "L/mailbox/drop" \0 mailboxId \0 dropId)),
+              "meta": as in containers,
+              "note": b64u(GCM(HKDF(NK, salt, info="L/drop/note"), JSON{"name","email","message"},
+                           aad = "L/drop/note" \0 dropId))       optional}
+body   = the STREAM chunks of §5
+```
+
+The sender's client picks `dropId`, which binds the sealed key to this drop. The server checks the
+header's shape and the body's exact length, computes the body hash `BH` (§5b), and stores both,
+charging the folder's space quota and the mailbox's caps in one transaction. Drops carry no
+signature: the sender is anonymous, and AES-GCM already stops the server altering, reordering,
+truncating or swapping anything in a drop without detection.
+
+**Filing.** A drop cannot land in the folder by itself: putting a file in the tree needs the
+folder's key, and anyone holding that key can read the whole folder. So drops wait in the
+mailbox's inbox until someone with write access to the folder files them. Their client:
+
+1. unwraps `boxPriv` with `NK_folder`, opens the sealed `NK`, checks the key commitment against
+   the header, and decrypts the metadata and note;
+2. builds a container prefix with the same `salt`, `commit` and `size`, `NK` sealed to the space
+   (§5 `owner.key`), the metadata with the sender's note kept as `meta.from`, and itself as signer;
+3. signs `"L/container" \0 || SHA-256(prefix) || BH` (the server's `BH` for the drop: if it lied,
+   the filed file simply fails verification when read);
+4. wraps `NK` under the folder and encrypts the name as for any new file, and signs a `drop`
+   version record (§5c).
+
+The server splices prefix, stored body and trailer into a container, runs every upload check on
+it, and removes the drop, refunding its size, in the same transaction that stores the file.
+Nothing is uploaded again. Anyone reading the file later verifies it as usual; its history says
+it arrived through a mailbox and who filed it.
+
+**Limits and abuse.** Anyone with the link can send anything, so every mailbox must have an expiry
+date and a total size cap (and has a file-count cap). Drops count against the folder's space quota
+from the moment they arrive. Mailboxes can be closed at any time; the per-user and instance-wide
+link kill switches close them too. Unfiled drops of closed or expired mailboxes are deleted after
+the trash retention period. The server cannot scan drops: the web app never renders a drop's
+contents in its own pages, drops carry no thumbnails, and the sender's note is shown as
+unverified.
+
+**Limits of the design.** A sender trusts the JavaScript the server sends (residual risk 2); a
+server that served a malicious page could read what the sender encrypts. `frontdir-cli drop`
+avoids that. The server sees that a mailbox exists, when drops arrive, their sizes and the
+sender's network address. Anyone who learns a link can drop into it and read its title.
+
 ## 7. Trash
 
 Trashing a node attaches `restoreKey = Seal(spacePub, JSON{"nk","name","kind"}, ctx = "L/trash" \0
@@ -420,5 +490,7 @@ grants) is detected by the AADs, commitments and signatures above.
 Tree shape, node and space IDs, which user created what, sizes (to within chunk and padding
 granularity), timestamps, sharing relationships, team memberships, and access patterns. It also
 sees which file versions have a thumbnail (a hint that they are images or videos) and the
-thumbnail's size, but not the thumbnail. It can
+thumbnail's size, but not the thumbnail. For mailboxes (§6a) it sees that they exist, their
+limits, and when drops of what size arrive and from which network address, but not names,
+contents, notes or titles. It can
 also delete or withhold data (availability is not protected by cryptography).

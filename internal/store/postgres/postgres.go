@@ -780,8 +780,17 @@ func (s *Store) DeleteSubtree(ctx context.Context, rootID string) error {
 
 // ---- content -------------------------------------------------------------------------
 
-func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Version, isNew bool, expectedRev int64) error {
+// CommitContent stores a new file or version. With dropID, it also files
+// that mailbox drop: the drop's row goes and its size is refunded in the
+// same transaction that charges the new version, so filing never needs
+// room for the file twice.
+func (s *Store) CommitContent(ctx context.Context, n *domain.Node, v *domain.Version, isNew bool, expectedRev int64, dropID string) error {
 	return mapErr(pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		if dropID != "" {
+			if err := consumeDrop(ctx, tx, dropID, v.SpaceID); err != nil {
+				return err
+			}
+		}
 		if isNew {
 			if err := insertNode(ctx, tx, n); err != nil {
 				return err

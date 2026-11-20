@@ -45,6 +45,11 @@ dialog::backdrop { background: rgb(0 0 0 / 40%); }
 dialog h2 { margin-top: 0; font-size: 18px; }
 form.stack { display: grid; gap: 10px; }
 form.stack label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+form.stack label.check { display: flex; align-items: flex-start; gap: 8px; }
+form.stack .row label { flex: 1 1 8em; }
+form.stack details { display: grid; gap: 8px; }
+form.stack details[open] label { margin-top: 8px; }
+.sent-list { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 4px; }
 .row { display: flex; gap: 8px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .secret { font-family: ui-monospace, monospace; word-break: break-all; background: var(--bg);
           border: 1px solid var(--line); padding: 8px; border-radius: 7px; }

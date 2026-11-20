@@ -51,6 +51,9 @@ type Meta struct {
 	Name  string `json:"name"`
 	Type  string `json:"type"`
 	MTime int64  `json:"mtime"` // Unix milliseconds
+	// From is what the anonymous sender of a file dropped into a mailbox
+	// said about themselves (§6a), kept when it was filed. Unverified.
+	From *DropNote `json:"from,omitempty"`
 }
 
 // Chunks returns the number of chunks for a plaintext size.

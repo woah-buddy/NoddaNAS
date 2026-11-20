@@ -184,6 +184,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/nodes/{id}/trash", s.authed(s.handleTrashNode))
 	mux.HandleFunc("GET /api/v1/nodes/{id}/versions", s.authed(s.handleListVersions))
 	mux.HandleFunc("GET /api/v1/nodes/{id}/thumbnail", s.authed(s.handleGetThumbnails))
+	// File mailboxes (docs/E2EE.md §6a): managed by whoever can write to the folder.
+	mux.HandleFunc("POST /api/v1/nodes/{id}/mailboxes", s.authed(s.handleCreateMailbox))
+	mux.HandleFunc("GET /api/v1/nodes/{id}/mailboxes", s.authed(s.handleFolderMailboxes))
+	mux.HandleFunc("GET /api/v1/mailboxes", s.authed(s.handleMyMailboxes))
+	mux.HandleFunc("GET /api/v1/mailboxes/{id}", s.authed(s.handleInbox))
+	mux.HandleFunc("POST /api/v1/mailboxes/{id}/close", s.authed(s.handleCloseMailbox))
+	mux.HandleFunc("GET /api/v1/mailboxes/{id}/drops/{did}/content", s.authed(s.handleDropContent))
+	mux.HandleFunc("DELETE /api/v1/mailboxes/{id}/drops/{did}", s.authed(s.handleDiscardDrop))
+	mux.HandleFunc("POST /api/v1/mailboxes/{id}/drops/{did}/file", s.authed(s.handleFileDrop))
 	mux.HandleFunc("PUT /api/v1/nodes/{id}/thumbnail", s.authed(s.handlePutThumbnail))
 	mux.HandleFunc("POST /api/v1/nodes/{id}/versions/{vid}/restore", s.authed(s.handleRestoreVersion))
 	mux.HandleFunc("POST /api/v1/trash/{id}/restore", s.authed(s.handleRestoreTrash))
@@ -206,6 +215,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/public/node", s.public(s.handlePublicNode))
 	mux.HandleFunc("POST /api/v1/public/download", s.public(s.handlePublicDownload))
 	mux.HandleFunc("POST /api/v1/public/signer", s.public(s.handlePublicSigner))
+	// Mailbox senders (anonymous): describe the mailbox, and drop. Nothing
+	// else accepts a mailbox token, so there is no way to read through one.
+	mux.HandleFunc("POST /api/v1/public/mailbox", s.public(s.handlePublicMailbox))
+	mux.HandleFunc("POST /api/v1/public/mailbox/drop", s.public(s.handleDrop))
 
 	// Anything else under /api is an unknown endpoint.
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

@@ -14,8 +14,8 @@ import (
 
 const purgeLease = 10 * time.Minute
 
-// RunMaintenance expires old trash, purges scheduled nodes and fills in
-// missing version digests. It returns how many nodes were purged.
+// RunMaintenance expires old trash, purges scheduled nodes, deletes the
+// leftovers of finished mailboxes and fills in missing version digests. It returns how many nodes were purged.
 func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error) {
 	if n, err := s.store.ExpireTrash(ctx, s.now().Add(-s.conf().TrashRetention)); err != nil {
 		return 0, err
@@ -49,6 +49,9 @@ func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error
 			break
 		}
 	}
+	if err := s.expireMailboxes(ctx); err != nil && ctx.Err() == nil {
+		s.log.ErrorContext(ctx, "mailbox expiry", "err", err)
+	}
 	if err := s.backfillDigests(ctx, digestsPerRun); err != nil && ctx.Err() == nil {
 		s.log.ErrorContext(ctx, "version digests", "err", err)
 	}
@@ -58,6 +61,9 @@ func (s *Service) RunMaintenance(ctx context.Context, maxPurges int) (int, error
 // purgeSpace permanently deletes a deleted team space: blobs first, then
 // rows, so an interrupted purge is simply resumed.
 func (s *Service) purgeSpace(ctx context.Context, sp *domain.Space) error {
+	if err := s.purgeDrops(ctx, func() ([]*domain.Drop, error) { return s.store.SpaceDrops(ctx, sp.ID, 200) }); err != nil {
+		return err
+	}
 	for ctx.Err() == nil {
 		versions, err := s.store.SpaceVersions(ctx, sp.ID, 200)
 		if err != nil {
@@ -90,6 +96,10 @@ func (s *Service) purgeSpace(ctx context.Context, sp *domain.Space) error {
 // Blobs are deleted before their rows: if we stopped in between, the rows
 // (and so the work) would still be found and retried.
 func (s *Service) purge(ctx context.Context, n *domain.Node) error {
+	// Mailboxes on the folders go with them, their pending drops first.
+	if err := s.purgeDrops(ctx, func() ([]*domain.Drop, error) { return s.store.SubtreeDrops(ctx, n.ID, 200) }); err != nil {
+		return err
+	}
 	for ctx.Err() == nil {
 		versions, err := s.store.SubtreeVersions(ctx, n.ID, 200)
 		if err != nil {

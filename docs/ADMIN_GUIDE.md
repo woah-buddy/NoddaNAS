@@ -877,6 +877,7 @@ FrontDir writes one JSON object per line to standard output (`docker compose log
 | App passwords | `app_password.create`, `app_password.revoke` |
 | Files | `file.upload`, `file.download`, `file.version_restore`, `folder.create`, `node.update`, `node.trash`, `node.restore`, `node.purge_requested`, `node.purged`, `trash.empty` |
 | Sharing | `share.user.create`, `share.link.create`, `share.delete`, `link.download`, `link.password_failed`, `share.link.revoke_all` |
+| File mailboxes | `mailbox.create`, `mailbox.close`, `mailbox.drop`, `mailbox.password_failed`, `mailbox.drop_file`, `mailbox.drop_discard`, `mailbox.expired` |
 | Team folders | `team.create`, `team.delete`, `team.member_role`, `team.member_remove`, `team.key_grant`, `team.group_map`, `team.group_unmap`, `space.quota`, `space.purged` |
 | Emergency and maintenance actions | `admin.links.revoke_all` (web), `operator.links.revoke_user`, `operator.links.revoke_all`, `operator.access.revoke`, `operator.sessions.revoke_all`, `operator.storage.verify` (server shell) |
 
@@ -995,6 +996,11 @@ JavaScript to the web app. That is the main residual risk of browser-based end-t
 Revocation is immediate and permanent. The server deletes the link's token and its wrapped key,
 so the secret in already-shared URLs no longer unlocks anything. People who need access again get
 a new link. Sharing with specific people and team folders is unaffected.
+
+Every one of these also **closes file mailboxes** (the same people's, or everyone's): their links
+stop accepting files at once. Files already sent stay in the mailboxes' inboxes, to be filed or
+discarded, until they expire with the trash retention period. One mailbox can be closed from
+**Mailboxes** or the folder's **Mailbox…** dialog by anyone who can write to the folder.
 
 The web switch for everyone requires an administrator with an interactive session and a recent
 sign-in (an app password cannot use it). The shell commands work even if the web app is down or every
