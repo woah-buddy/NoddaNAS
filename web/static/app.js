@@ -981,10 +981,10 @@ async function sharedByMeView() {
     const st = Object.hasOwn(LINK_STATUS, x.share.status) ? x.share.status : 'active';
     return h('tr', {}, h('td', {}, label(x)),
       h('td', {}, h('span', { class: st === 'active' ? '' : 'note' }, LINK_STATUS[st])),
-      h('td', { class: 'num' }, fmtDate(x.share.createdAt)),
-      h('td', { class: 'num' }, x.share.expiresAt ? fmtDate(x.share.expiresAt) : 'Never'),
-      h('td', { class: 'num' }, x.share.maxDownloads ? `${x.share.downloads || 0} of ${x.share.maxDownloads}` : String(x.share.downloads || 0)),
-      h('td', {}, x.share.hasPassword ? 'Password' : 'None'),
+      h('td', { class: 'num', 'data-label': 'Created' }, fmtDate(x.share.createdAt)),
+      h('td', { class: 'num', 'data-label': 'Expires' }, x.share.expiresAt ? fmtDate(x.share.expiresAt) : 'Never'),
+      h('td', { class: 'num', 'data-label': 'Downloads' }, x.share.maxDownloads ? `${x.share.downloads || 0} of ${x.share.maxDownloads}` : String(x.share.downloads || 0)),
+      h('td', { 'data-label': 'Protection' }, x.share.hasPassword ? 'Password' : 'None'),
       h('td', { class: 'actions' }, revoke(x, 'Revoke link', `The public link to “${x.name}” stops working immediately for everyone who has it.`)));
   });
   const peopleRows = await Promise.all(people.map(async (x) => {
@@ -992,7 +992,7 @@ async function sharedByMeView() {
     const who = pu ? nameOf(pu) : 'Unknown user';
     return h('tr', {}, h('td', {}, label(x)), h('td', {}, who, ' ', trustBadge(pu)),
       h('td', {}, x.share.permission === 'write' ? 'Can edit' : 'Can view'),
-      h('td', { class: 'num' }, fmtDate(x.share.createdAt)),
+      h('td', { class: 'num', 'data-label': 'Shared' }, fmtDate(x.share.createdAt)),
       h('td', { class: 'actions' }, revoke(x, 'Stop sharing', `${who} loses access to “${x.name}”.`)));
   }));
 
@@ -1377,9 +1377,9 @@ async function peopleTab(body) {
     return h('tr', {},
       h('td', {}, name, me ? ' (you)' : '', u.email && u.displayName ? h('div', { class: 'note' }, u.email) : null,
         u.keysSetUp ? null : h('div', { class: 'note' }, 'Has not set up encryption yet')),
-      h('td', {}, u.signIn.toUpperCase()),
+      h('td', { 'data-label': 'Sign-in' }, u.signIn.toUpperCase()),
       h('td', {}, role),
-      h('td', { class: 'num' }, `${fmtSize(u.usedBytes)} of ${fmtSize(u.quotaBytes)}`),
+      h('td', { class: 'num', 'data-label': 'Storage' }, `${fmtSize(u.usedBytes)} of ${fmtSize(u.quotaBytes)}`),
       h('td', { class: 'actions' },
         h('button', { class: 'link', onclick: async () => {
           const size = await prompt(`Storage for ${name}`, 'Personal storage, e.g. 20GiB', exactSize(u.quotaBytes));
