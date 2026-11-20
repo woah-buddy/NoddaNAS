@@ -615,3 +615,56 @@ export async function openContainerStream(stream, nk, signerFor, totalSize) {
     throw e;
   }
 }
+
+// ---- thumbnails (spec §5a) -------------------------------------------------------------------------
+// A small encrypted record attached to one version of a file, beside its
+// container, so a thumbnail can be added without rewriting the file. The
+// key comes from NK and that version's salt; the record is bound to the
+// node and signed by whoever made it. Show it only if thumbAuthorOK.
+export const MAX_THUMB_BYTES = 24 * 1024;
+export const MAX_THUMB_SIDE = 512;
+const THUMB_TYPES = ['image/webp', 'image/jpeg'];
+
+// parsePrefix reads a container's header from its first bytes.
+export function parsePrefix(bytes) {
+  if (bytes.length < 12 || td.decode(bytes.subarray(0, 8)) !== MAGIC) throw new E2EEError('not a FrontDir encrypted file');
+  const hl = new DataView(bytes.buffer, bytes.byteOffset).getUint32(8);
+  if (hl === 0 || hl > 65536 || bytes.length < 12 + hl) throw new E2EEError('malformed container');
+  const h = JSON.parse(td.decode(bytes.subarray(12, 12 + hl)));
+  if (h.v !== 1 || h.alg !== ALG || !Number.isSafeInteger(h.size) || h.size < 0) throw new E2EEError('unsupported container');
+  return h;
+}
+
+// The thumbnail key; checking the key commitment first ties the header to NK.
+async function thumbKey(nk, header) {
+  const salt = unb64u(header.salt);
+  const fk = await fileKeys(nk, salt);
+  if (!ctEqual(fk.commit, unb64u(header.commit))) throw authFail();
+  return { key: await hkdf(nk.raw, salt, 'file/thumb'), salt };
+}
+const thumbSigMsg = async (nodeId, salt, ct) => concat(label('thumb-sig', nodeId), NUL, salt, await sha256(ct));
+const thumbShapeOK = (t, bytes) => THUMB_TYPES.includes(t.type) && Number.isInteger(t.w) && Number.isInteger(t.h) &&
+  t.w >= 1 && t.h >= 1 && t.w <= MAX_THUMB_SIDE && t.h <= MAX_THUMB_SIDE && bytes.length > 0 && bytes.length <= MAX_THUMB_BYTES;
+
+export async function sealThumb(creator, nodeId, header, nk, { type, w, h, bytes }) {
+  if (!thumbShapeOK({ type, w, h }, bytes)) throw new E2EEError('thumbnail must be a small WebP or JPEG');
+  const { key, salt } = await thumbKey(nk, header);
+  const ct = await gcmSeal(key, utf8(JSON.stringify({ type, w, h, data: b64u(bytes) })), label('file/thumb', nodeId));
+  return { enc: b64u(ct), sig: b64u(await sign(creator.sig.priv, await thumbSigMsg(nodeId, salt, ct))) };
+}
+
+// openThumb verifies a record against the user who made it and decrypts it.
+export async function openThumb(maker, nodeId, header, nk, rec) {
+  const { key, salt } = await thumbKey(nk, header);
+  const ct = unb64u(rec.enc);
+  await mustVerify(maker.sig, await thumbSigMsg(nodeId, salt, ct), unb64u(rec.sig));
+  const t = JSON.parse(td.decode(await gcmOpen(key, ct, label('file/thumb', nodeId))));
+  const bytes = unb64u(t.data);
+  if (!thumbShapeOK(t, bytes)) throw authFail();
+  return { type: t.type, w: t.w, h: t.h, bytes };
+}
+
+// The display rule: made by the version's author (as its header names
+// them, same fingerprint) or by the viewer.
+export const thumbAuthorOK = (header, maker, viewerId) =>
+  maker.id === viewerId || (maker.id === header.signer.user && maker.fp === header.signer.fp);

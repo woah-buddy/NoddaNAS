@@ -55,6 +55,7 @@ server is still responsible for (access control, integrity of structure, availab
 | Capturing another user's shares via their email | Accounts keyed by (issuer, subject); emails recorded only if verified and unclaimed; SAML emails trusted only if configured | `service/users.go` |
 | Forged key grant (anyone can seal to a public key) | Every share, team grant and trash seal is signed by its granter; clients verify | `e2ee` tests: forged grant/share rejected |
 | Server inserts a team member to obtain the team key | Clients never grant keys automatically; a manager approves each pending member after seeing their fingerprint and verification status; the Go library requires an approval callback | Browser test: database-inserted member is not granted; `TestEndToEnd` (no blind or unapproved grants) |
+| A collaborator attaches a misleading thumbnail to someone else's file (a harmless picture on something else) | Thumbnails are stored per version and per maker, so nobody can overwrite the author's; clients show only the version author's thumbnail (the header's signer, same fingerprint) or the viewer's own, after verifying the maker's signature; a thumbnail is bound to its node and version | `TestThumbnails` (Go and HTTP), interop `thumbnail-from-go` |
 | Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
@@ -98,6 +99,7 @@ events (identifiers only; never names, tokens or passwords).
 | Streaming releases plaintext before the signature is checked | Each chunk is AES-GCM-authenticated before release; the last chunk is withheld until the signature verifies, and a failure aborts the download (the browser discards it) or fails the copy from the drive | `TestStreamingVerifier`, interop `container-stream-*`, `TestDecryptingGateway` |
 | The local drive (`frontdir-cli mount`) exposes plaintext to other users of the computer, to web pages, or to the network | Loopback only, with no option otherwise; a random 256-bit token in every path; loopback `Host` required (DNS rebinding) and browser requests (`Origin`, `Sec-Fetch-Site`) refused; inert response headers; upload buffers that spill to disk are encrypted under a key held in memory | `TestDecryptingGateway`, `TestListenIsLoopbackOnly`, `TestSpoolSpillsEncrypted` |
 | Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
+| Thumbnails leak content or metadata | Made on the uploader's device and re-encoded (no EXIF or GPS), encrypted under a key derived from the file key and that version's salt; the server sees only that a version has one and its size (documented in E2EE.md, "What the server can still see"); rendered only as `<img>` WebP or JPEG, never SVG | `TestThumbnails`, browser test |
 | Server-side request forgery through IdP URLs entered on the web (reaching cloud metadata or internal services, reading their responses) | All IdP traffic uses one client that refuses link-local, metadata, unspecified, multicast and (except on localhost deployments) loopback addresses, checked before sending and again on the address actually dialled (DNS rebinding); 1 MiB response cap, 20 s timeout, at most three redirects and never https→http; errors describe the failure and never echo the response | `TestIdPClientRefusesInternalAddresses`, `TestIdPChecksNeverEchoTheRemote` |
 | OIDC client secret in a database dump | Secrets saved on the web are AES-256-GCM encrypted under a key that lives only in the server's environment, bound to the setting name; never returned by the API or logged | `TestSecretBox`, `TestSignInChangesAreCheckedAndConfirmed` |
 
@@ -159,3 +161,9 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
    can act as the user on that computer can read what the drive shows (as they could read files
    the user had downloaded). Stop it (Ctrl+C) when it is not needed. The drive's address is a
    secret; `--url-file` keeps it in a file readable only by the user.
+12. **Thumbnail attribution rests on the header until the file is downloaded.** The author a
+   thumbnail is checked against is the signer the container header names, and the header's
+   signature is verified only when the whole file is read. A server colluding with a key-holding
+   collaborator could relabel a header so that collaborator's thumbnail is shown as the author's;
+   downloading the file then fails its signature check. It needs both parties and changes only a
+   preview.

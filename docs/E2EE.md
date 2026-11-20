@@ -198,6 +198,38 @@ Why each part exists:
 The server parses only `v`, `alg`, `size` and `owner.space`, checks the total length, and stores
 the bytes as they are.
 
+## 5a. Thumbnails
+
+A thumbnail is a small encrypted record attached to **one version** of a file, stored beside its
+container rather than inside it. That way a thumbnail can be added to an existing file without
+rewriting the file or touching its author's signature (which covers the whole header).
+
+```
+tk  = HKDF(NK, salt, info="L/file/thumb")        salt: that version's container salt
+ct  = GCM(tk, JSON{"type", "w", "h", "data"}, aad = "L/file/thumb" \0 nodeId)
+sig = Ed25519(makerSigPriv, "L/thumb-sig" \0 nodeId \0 || salt || SHA-256(ct))
+```
+
+`type` is `image/webp` or `image/jpeg`, `w` and `h` are at most 512, and `data` is `b64u` of at
+most 24 KiB of image bytes. The server stores `{enc: b64u(ct), sig, maker}` per version and per
+maker, and parses none of it.
+
+- Only key holders can make a thumbnail (`tk` needs `NK`), the salt ties it to exactly one
+  version (another version's key differs), and the AAD ties it to the node.
+- Before deriving `tk`, readers check the header's key commitment against `NK`, so the header
+  that supplies the salt and the author belongs to this node.
+- **Display rule:** a thumbnail is shown only if its maker is the version's author (the signer the
+  container header names, with the same key fingerprint) or the viewer. A collaborator with write
+  access can attach a thumbnail to someone else's file, but only they will ever see it. Records
+  are stored per maker, so nobody can overwrite the author's thumbnail.
+- Thumbnails are generated on the uploader's device from the plaintext, re-encoded, so photo
+  metadata (EXIF, GPS) is not carried over. Clients render them only as `<img>` images of the two
+  allowed types, never as SVG or a document.
+- Residual: the author named in the header is fully verified only when the whole file is
+  downloaded (the signature covers the header). A server colluding with a key-holding collaborator
+  could therefore relabel a version's header to show that collaborator's thumbnail as the
+  author's, until someone downloads the file and the signature fails.
+
 ## 6. Shares and links
 
 - **User share:** client-chosen `shareId`; `sealedKey = Seal(recipientEncPub, JSON{"nk","name"},
@@ -262,5 +294,7 @@ grants) is detected by the AADs, commitments and signatures above.
 ## What the server can still see
 
 Tree shape, node and space IDs, which user created what, sizes (to within chunk and padding
-granularity), timestamps, sharing relationships, team memberships, and access patterns. It can
+granularity), timestamps, sharing relationships, team memberships, and access patterns. It also
+sees which file versions have a thumbnail (a hint that they are images or videos) and the
+thumbnail's size, but not the thumbnail. It can
 also delete or withhold data (availability is not protected by cryptography).

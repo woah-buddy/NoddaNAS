@@ -194,6 +194,14 @@ ordinary browser download. The worker fetches nothing and keeps nothing; the pag
 Registering it needs a Trusted Types script URL, so the CSP allows exactly one policy,
 `frontdir-sw`, which can only produce that one constant URL.
 
+Thumbnails ([E2EE.md §5a](E2EE.md#5a-thumbnails)) are made in the browser when an image or video
+is uploaded (`createImageBitmap`, or a frame captured from a `<video>` loaded from the local file,
+which is why the CSP allows `media-src blob:`), or later with **Make thumbnails** on a folder.
+Each is a small record encrypted for one version and stored beside the container, so adding one
+never rewrites a file. Folder listings carry a `hasThumbnail` hint; only rows on screen fetch
+theirs, four at a time, and a preview is shown only if made by the version's author or by the
+viewer.
+
 ## Local drive (`frontdir-cli mount`)
 
 `internal/davgw` is a WebDAV server that runs on the user's computer with their unlocked keys and

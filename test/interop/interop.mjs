@@ -95,6 +95,14 @@ const result = await page.evaluate(async () => {
     try { await E.openContainerStream(pieces(cut), child, goSigner, cut.length); return false; } catch { /* length checked up front */ }
     return err !== null;
   });
+  await check('thumbnail-from-go', async () => {
+    const header = E.parsePrefix(E.unb64u(v.container));
+    const goUser = await goSigner();
+    const t = await E.openThumb(goUser, v.childId, header, child, v.thumb);
+    let moved = false;
+    try { await E.openThumb(goUser, 'f'.repeat(32), header, child, v.thumb); moved = true; } catch { /* bound to the node */ }
+    return !moved && E.b64u(t.bytes) === v.thumb.data && t.w === 64 && E.thumbAuthorOK(header, goUser, 'someone else');
+  });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
   await check('open-contacts', async () => {
     const c = await E.openContacts(goAcct, v.contacts);
@@ -143,6 +151,8 @@ const result = await page.evaluate(async () => {
     teamSecret: E.b64u(team.secret), teamGrant: await team.grant(account, goPub), teamName: await team.encryptName('Team ✓'),
     linkSecret: E.b64u(linkSecret), linkKey: await E.linkKey(linkSecret, v.shareId, v.childId, 'Linked', jsChild),
     trash: await E.trashKey(account, E.unb64u(v.spacePub), v.childId, 'trashed.txt', 'file', jsChild),
+    thumb: await E.sealThumb(account, v.childId, E.parsePrefix(new Uint8Array(await container.arrayBuffer())), jsChild,
+      { type: 'image/webp', w: 32, h: 24, bytes: new TextEncoder().encode('browser thumbnail') }),
     contacts: await E.sealContacts(account, { v: 1, contacts: { ['d'.repeat(32)]: { fp: 'e'.repeat(40), name: 'From the browser \u2713', verifiedAt: 2 } } }),
   };
   return out;

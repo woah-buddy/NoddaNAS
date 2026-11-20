@@ -471,3 +471,46 @@ func TestStreamingVerifier(t *testing.T) {
 		t.Fatal("verifier accepted a signer the header does not name")
 	}
 }
+
+func TestThumbnails(t *testing.T) {
+	f := newFixture(t, 100)
+	k, _ := f.prefix.Keys(f.nk)
+	node := strings.Repeat("e", 32)
+	img := []byte("\xff\xd8\xff pretend jpeg")
+	enc, sig, err := SealThumb(f.alice, node, f.prefix, k, img, "image/jpeg", 256, 171)
+	if err != nil {
+		t.Fatal(err)
+	}
+	th, got, err := OpenThumb(f.alice.Public(), node, f.prefix, k, enc, sig)
+	if err != nil || !bytes.Equal(got, img) || th.W != 256 || th.Type != "image/jpeg" {
+		t.Fatalf("open: %v", err)
+	}
+	// Bound to the node, to the version (salt), and to its maker.
+	if _, _, err := OpenThumb(f.alice.Public(), strings.Repeat("f", 32), f.prefix, k, enc, sig); err == nil {
+		t.Fatal("thumbnail moved to another node")
+	}
+	other := newFixture(t, 100)
+	ok, _ := other.prefix.Keys(other.nk)
+	if _, _, err := OpenThumb(other.alice.Public(), node, other.prefix, ok, enc, sig); err == nil {
+		t.Fatal("thumbnail moved to another version")
+	}
+	mallory, _, _ := mustAccount(t, strings.Repeat("c", 32))
+	if _, _, err := OpenThumb(mallory.Public(), node, f.prefix, k, enc, sig); err == nil {
+		t.Fatal("thumbnail attributed to someone who did not sign it")
+	}
+	// The display rule: the version's author, or the viewer; nobody else.
+	if !ThumbAuthorOK(f.prefix, f.alice.Public(), "viewer") || ThumbAuthorOK(f.prefix, mallory.Public(), "viewer") ||
+		!ThumbAuthorOK(f.prefix, mallory.Public(), mallory.UserID) {
+		t.Fatal("display rule wrong")
+	}
+	// Shape limits.
+	for _, bad := range []struct {
+		typ  string
+		w, h int
+		n    int
+	}{{"image/png", 10, 10, 10}, {"image/svg+xml", 10, 10, 10}, {"image/jpeg", 0, 10, 10}, {"image/jpeg", 10, 600, 10}, {"image/jpeg", 10, 10, MaxThumbBytes + 1}} {
+		if _, _, err := SealThumb(f.alice, node, f.prefix, k, make([]byte, bad.n), bad.typ, bad.w, bad.h); err == nil {
+			t.Errorf("accepted %+v", bad)
+		}
+	}
+}

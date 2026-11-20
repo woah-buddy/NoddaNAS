@@ -119,6 +119,8 @@ type nodeView struct {
 	RestoreSig string     `json:"restoreSig,omitempty"`
 	Permission string     `json:"permission,omitempty"`
 	CanModify  *bool      `json:"canModify,omitempty"`
+	VersionID  string     `json:"versionId,omitempty"`
+	HasThumb   bool       `json:"hasThumbnail,omitempty"`
 }
 
 func viewNode(n *domain.Node) nodeView {
@@ -127,6 +129,7 @@ func viewNode(n *domain.Node) nodeView {
 		NameHash: n.NameHash, WrappedKey: n.WrappedKey, Size: n.Size, PlainSize: n.PlainSize, SHA256: n.SHA256, CreatedAt: n.CreatedAt,
 		CreatedBy: n.CreatedBy, ModifiedAt: n.ModifiedAt, ModifiedBy: n.ModifiedBy, Revision: n.Revision,
 		TrashedAt: n.TrashedAt, TrashedBy: n.TrashedBy, RestoreKey: n.RestoreKey, RestoreSig: n.RestoreSig,
+		VersionID: n.VersionID, HasThumb: n.HasThumbnail,
 	}
 }
 

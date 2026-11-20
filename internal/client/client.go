@@ -533,7 +533,11 @@ type Node struct {
 	TrashedBy  string    `json:"trashedBy"`
 	RestoreKey string    `json:"restoreKey"`
 	RestoreSig string    `json:"restoreSig"`
-	Name       string    `json:"-"` // decrypted
+	VersionID  string    `json:"versionId"`
+	// HasThumbnail is the server's hint that a thumbnail may be shown;
+	// Client.Thumbnail verifies before returning one.
+	HasThumbnail bool   `json:"hasThumbnail"`
+	Name         string `json:"-"` // decrypted
 }
 
 type pathResp struct {

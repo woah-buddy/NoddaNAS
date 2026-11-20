@@ -37,6 +37,13 @@ func TestBrowserInterop(t *testing.T) {
 	r, _, _ := NewWriter(strings.NewReader(plain), WriteParams{Size: int64(len(plain)), NodeKey: child, SpaceID: spaceID,
 		SpacePub: space.Priv.PublicKey(), Meta: Meta{Name: "Résumé ✓.txt", Type: "text/plain", MTime: 1}, Signer: acct})
 	container, _ := io.ReadAll(r)
+	cp, _ := ParsePrefix(bytes.NewReader(container))
+	ck, _ := cp.Keys(child)
+	thumbImg := []byte("\xff\xd8\xff thumbnail from Go")
+	thumbEnc, thumbSig, err := SealThumb(acct, childID, cp, ck, thumbImg, "image/jpeg", 64, 48)
+	if err != nil {
+		t.Fatal(err)
+	}
 	hashKey := NewNodeKey()
 	hashNames := []string{"Report.PDF", "report.pdf", "İstanbul", "ΣΟΦΟΣ", "ΌΣΟΣ ΧΡΌΝΟΣ", "STRASSE", "straße", "ǅemal",
 		"ﬀ", "é", "é", "Ⅻ", "ΑΣ.txt", "日本語", "😀 emoji"}
@@ -54,6 +61,7 @@ func TestBrowserInterop(t *testing.T) {
 		"plaintext": plain, "hashKeyRaw": B64(hashKey.Raw()), "hashNames": hashNames,
 		"jsSpaceId": strings.Repeat("8", 32), "teamId": strings.Repeat("9", 32), "shareId": strings.Repeat("a", 32),
 		"contacts": sealedContacts, "contactId": contactID, "contactFp": contactFP,
+		"thumb": map[string]string{"enc": thumbEnc, "sig": thumbSig, "data": B64(thumbImg)},
 	}
 	vjson, _ := json.Marshal(vectors)
 
@@ -125,6 +133,7 @@ func TestBrowserInterop(t *testing.T) {
 		LinkKey      string            `json:"linkKey"`
 		Trash        map[string]string `json:"trash"`
 		Contacts     string            `json:"contacts"`
+		Thumb        map[string]string `json:"thumb"`
 	}
 	if err := json.Unmarshal(res.JS, &js); err != nil {
 		t.Fatal(err)
@@ -179,6 +188,10 @@ func TestBrowserInterop(t *testing.T) {
 	}
 	if nk, err := p.OwnerNodeKey(jsSpace); err != nil || B64(nk.Raw()) != js.ChildRaw {
 		t.Fatalf("owner seal: %v", err)
+	}
+	if th, img, err := OpenThumb(jsPub, js.ChildID, p, k, js.Thumb["enc"], js.Thumb["sig"]); err != nil ||
+		string(img) != "browser thumbnail" || th.Type != "image/webp" || th.W != 32 || !ThumbAuthorOK(p, jsPub, "someone else") {
+		t.Fatalf("Go cannot open the browser's thumbnail: %v", err)
 	}
 	nk, name, err := OpenShare(acct, jsPub, strings.Repeat("a", 32), js.ChildID, "write", js.Share["sealedKey"], js.Share["sig"])
 	if err != nil || name != "Shared folder" || B64(nk.Raw()) != js.ChildRaw {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -275,4 +276,42 @@ func (s *Server) serveContainer(w http.ResponseWriter, r *http.Request, c *servi
 	h.Set("X-FrontDir-Version", c.Version.ID)
 	iw := &idleWriter{ResponseWriter: w, rc: http.NewResponseController(w), d: time.Minute}
 	http.ServeContent(iw, r, "", c.Version.CreatedAt, c)
+}
+
+// ---- thumbnails (docs/E2EE.md §5a) ------------------------------------------------------
+
+func (s *Server) handleGetThumbnails(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	set, err := s.svc.Thumbnails(r.Context(), p, r.PathValue("id"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	type thumbView struct {
+		Maker string `json:"maker"`
+		Enc   string `json:"enc"`
+		Sig   string `json:"sig"`
+	}
+	out := make([]thumbView, len(set.Thumbnails))
+	for i, t := range set.Thumbnails {
+		out[i] = thumbView{Maker: t.MakerID, Enc: t.Enc, Sig: t.Sig}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versionId": set.VersionID,
+		"prefix": base64.RawURLEncoding.EncodeToString(set.Prefix), "thumbnails": out})
+}
+
+func (s *Server) handlePutThumbnail(w http.ResponseWriter, r *http.Request, p service.Principal) {
+	var req struct {
+		VersionID string `json:"versionId"`
+		Enc       string `json:"enc"`
+		Sig       string `json:"sig"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.svc.AttachThumbnail(r.Context(), p, r.PathValue("id"), req.VersionID, req.Enc, req.Sig); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

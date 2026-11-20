@@ -40,10 +40,24 @@ type Node struct {
 	TrashedBy  string
 	RestoreKey string // node key + name sealed to the space, for restoring from trash
 	RestoreSig string
+
+	// HasThumbnail is a listing hint: the current version has a thumbnail
+	// by its uploader or by the caller. Clients verify before showing one.
+	HasThumbnail bool
 }
 
 // IsRoot reports whether the node is a space's root folder.
 func (n *Node) IsRoot() bool { return n.ParentID == "" }
+
+// Thumbnail is a client-encrypted preview attached to one file version
+// (docs/E2EE.md §5a). Enc and Sig are opaque to the server.
+type Thumbnail struct {
+	VersionID string
+	MakerID   string
+	Enc       string
+	Sig       string
+	CreatedAt time.Time
+}
 
 // Version is one stored, client-encrypted container.
 type Version struct {

@@ -578,6 +578,9 @@ async function folderView(id) {
   const rows = children.map((c) => fileRow(c, ctx));
   const panel = h('div', { class: 'panel dropzone' },
     h('div', { class: 'toolbar' }, h('div', { class: 'crumbs' }, ...crumbs),
+      canWrite && children.some((c) => c.kind === 'file' && !c.hasThumbnail && thumbable(c.name)) &&
+        h('button', { title: 'Make previews for the images and videos here. Others see previews you make only on files you uploaded.',
+          onclick: () => makeThumbnails(ctx, children) }, 'Make thumbnails'),
       canWrite && h('button', { onclick: () => newFolder(ctx) }, 'New folder'),
       canWrite && h('button', { onclick: async () => restoreBackups(ctx, await pickFiles('.fdenc,.ndne')) }, 'Restore backup…'),
       canWrite && h('button', { class: 'primary', onclick: async () => uploadMany(ctx, await pickFiles('')) }, 'Upload')),
@@ -598,7 +601,7 @@ function fileRow(c, ctx) {
     ? h('a', { href: `/f/${c.id}`, 'data-nav': '' }, c.name)
     : h('a', { href: '#', onclick: (e) => { e.preventDefault(); downloadFile(c); } }, c.name);
   return h('tr', {},
-    h('td', {}, h('div', { class: 'name' }, h('span', { class: 'icon', 'aria-hidden': 'true' }, c.kind === 'folder' ? '📁' : '📄'), name)),
+    h('td', {}, h('div', { class: 'name' }, c.kind === 'folder' ? h('span', { class: 'icon', 'aria-hidden': 'true' }, '📁') : thumbSlot(c), name)),
     h('td', { class: 'num' }, c.kind === 'file' ? fmtSize(c.plainSize) : ''),
     h('td', { class: 'num' }, fmtDate(c.modifiedAt)),
     h('td', { class: 'actions' },
@@ -643,9 +646,10 @@ async function uploadMany(ctx, files) {
       const entry = await (await nodeKey(ctx.folderId)).entry(id, file.name, nk);
       const container = await encryptFor(ctx, file, nk, file.name, (f) => b.set(f / 2));
       try {
-        await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, container,
+        const node = await send('POST', `/api/v1/nodes/${ctx.folderId}/files`, container,
           { 'Content-Type': 'application/octet-stream', 'X-FrontDir-Entry': JSON.stringify({ id, ...entry }) }, (f) => b.set(0.5 + f / 2));
         S.keys.set(id, nk);
+        await attachThumb(id, node?.versionId, container, nk, file, file.name);
       } catch (e) {
         if (e.status !== 409 || e.detail.existingKind !== 'file') throw e;
         b.close();
@@ -653,7 +657,8 @@ async function uploadMany(ctx, files) {
         const existing = e.detail.existingId;
         const ek = await nodeKey(existing);
         const v = await encryptFor(ctx, file, ek, file.name);
-        await send('PUT', `/api/v1/nodes/${existing}/content`, v, { 'Content-Type': 'application/octet-stream' });
+        const node = await send('PUT', `/api/v1/nodes/${existing}/content`, v, { 'Content-Type': 'application/octet-stream' });
+        await attachThumb(existing, node?.versionId, v, ek, file, file.name);
       }
     } catch (e) { toast(`${file.name}: ${e.message}`); } finally { b.close(); }
   }
@@ -664,6 +669,164 @@ async function uploadMany(ctx, files) {
 async function downloadFile(c, versionId) {
   const path = `/api/v1/nodes/${c.id}/content${versionId ? `?version=${versionId}` : ''}`;
   await decryptAndSave(c.name, c.plainSize, () => fetch(path, { credentials: 'same-origin' }), await nodeKey(c.id), signerFor);
+}
+
+// ---- thumbnails (E2EE.md §5a) --------------------------------------------------------------------------------
+// Made on this device from the plaintext when a file is uploaded (or with
+// "Make thumbnails"), re-encoded so no photo metadata survives, encrypted
+// for that one version and signed. Shown only if made by the version's
+// author or by you, and only ever as an <img> of a WebP or JPEG.
+const THUMB_SIDE = 256;
+const THUMB_MAX_SOURCE = 256 * 1024 * 1024;
+const IMAGE_EXT = /\.(jpe?g|png|gif|webp|avif|bmp)$/i;
+const VIDEO_EXT = /\.(mp4|m4v|mov|webm|ogv)$/i;
+const thumbable = (name) => IMAGE_EXT.test(name) || VIDEO_EXT.test(name);
+
+// videoFrame grabs a frame about a second in (or 10% into a short clip).
+function videoFrame(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    v.playsInline = true;
+    let finished = false;
+    const done = (err, val) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      v.removeAttribute('src');
+      v.load();
+      if (err) reject(err); else resolve(val);
+    };
+    const timer = setTimeout(() => done(new Error('video did not load in time')), 8000);
+    v.addEventListener('error', () => done(new Error('this browser cannot play the video')));
+    v.addEventListener('loadedmetadata', () => { v.currentTime = Math.min(1, (v.duration || 0) * 0.1); });
+    v.addEventListener('seeked', () => createImageBitmap(v).then((bmp) => done(null, bmp), done));
+    v.src = url;
+  });
+}
+
+// renderThumb returns { type, w, h, bytes } or null if no preview can be made.
+async function renderThumb(blob, name) {
+  let bmp;
+  try {
+    if (IMAGE_EXT.test(name)) bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    else if (VIDEO_EXT.test(name)) bmp = await videoFrame(blob);
+    else return null;
+    const scale = Math.min(1, THUMB_SIDE / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), ht = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = ht;
+    canvas.getContext('2d').drawImage(bmp, 0, 0, w, ht);
+    for (const [type, q] of [['image/webp', 0.75], ['image/jpeg', 0.8], ['image/jpeg', 0.5]]) {
+      const out = await new Promise((r) => canvas.toBlob(r, type, q));
+      if (out && out.type === type && out.size <= E.MAX_THUMB_BYTES) return { type, w, h: ht, bytes: new Uint8Array(await out.arrayBuffer()) };
+    }
+  } catch { /* no preview for this file */ } finally { bmp?.close?.(); }
+  return null;
+}
+
+// attachThumb makes and uploads a thumbnail for a version just written (or
+// downloaded). Failures are silent: a missing preview is not an error.
+async function attachThumb(nodeId, versionId, container, nk, source, name) {
+  if (!versionId || !thumbable(name) || source.size > THUMB_MAX_SOURCE) return false;
+  try {
+    const t = await renderThumb(source, name);
+    if (!t) return false;
+    const header = E.parsePrefix(new Uint8Array(await container.slice(0, 12 + 65536).arrayBuffer()));
+    await api('PUT', `/api/v1/nodes/${nodeId}/thumbnail`, { versionId, ...(await E.sealThumb(S.acct, nodeId, header, nk, t)) });
+    return true;
+  } catch { return false; }
+}
+
+async function makeThumbnails(ctx, children) {
+  const todo = children.filter((c) => c.kind === 'file' && !c.hasThumbnail && thumbable(c.name) && c.plainSize <= THUMB_MAX_SOURCE);
+  const b = busy(`Making thumbnails (0 of ${todo.length})…`);
+  let made = 0;
+  for (const [i, c] of todo.entries()) {
+    b.set(i / todo.length);
+    try {
+      const container = await apiBlob(`/api/v1/nodes/${c.id}/content?version=${c.versionId}`);
+      const nk = await nodeKey(c.id);
+      const res = await E.decryptFile(container, nk, signerFor); // verified before anything is rendered
+      if (await attachThumb(c.id, c.versionId, container, nk, res.blob, c.name)) made++;
+    } catch { /* skip this one */ }
+  }
+  b.close();
+  toast(`Made ${made} thumbnail${made === 1 ? '' : 's'}${made < todo.length ? `; ${todo.length - made} could not be previewed` : ''}`);
+  route();
+}
+
+// Display: only rows on screen load, at most four at a time; previews are
+// cached per version and released when evicted or when you lock.
+const thumbCache = new Map(); // versionId -> object URL ('' if none)
+const thumbWaiting = [];
+let thumbBusy = 0;
+function clearThumbs() {
+  for (const url of thumbCache.values()) if (url) URL.revokeObjectURL(url);
+  thumbCache.clear();
+}
+const thumbObserver = 'IntersectionObserver' in window ? new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    thumbObserver.unobserve(e.target);
+    thumbWaiting.push(e.target);
+  }
+  pumpThumbs();
+}, { rootMargin: '200px' }) : null;
+
+function thumbSlot(c) {
+  const icon = h('span', { class: 'icon', 'aria-hidden': 'true' }, '📄');
+  if (!c.hasThumbnail || !c.versionId || !thumbObserver) return icon;
+  icon.fileNode = c;
+  const cached = thumbCache.get(c.versionId);
+  if (cached) return thumbImg(cached);
+  if (cached === undefined) thumbObserver.observe(icon);
+  return icon;
+}
+const thumbImg = (url) => h('img', { class: 'thumb', src: url, alt: '', loading: 'lazy', decoding: 'async' });
+
+async function pumpThumbs() {
+  while (thumbBusy < 4 && thumbWaiting.length) {
+    const slot = thumbWaiting.shift();
+    thumbBusy++;
+    loadThumb(slot.fileNode).then((url) => {
+      if (url && slot.isConnected) slot.replaceWith(thumbImg(url));
+    }).finally(() => { thumbBusy--; pumpThumbs(); });
+  }
+}
+
+async function loadThumb(c) {
+  if (thumbCache.has(c.versionId)) return thumbCache.get(c.versionId);
+  let url = '';
+  try {
+    const r = await api('GET', `/api/v1/nodes/${c.id}/thumbnail`);
+    const header = E.parsePrefix(E.unb64u(r.prefix));
+    const nk = await nodeKey(c.id);
+    const me = S.me.user.id;
+    outer: for (const want of [header.signer.user, me]) { // the author's first, then your own
+      for (const t of r.thumbnails) {
+        if (t.maker !== want) continue;
+        try {
+          const maker = await userKeys(t.maker);
+          if (!E.thumbAuthorOK(header, maker, me)) continue;
+          const th = await E.openThumb(maker, c.id, header, nk, t);
+          url = URL.createObjectURL(new Blob([th.bytes], { type: th.type }));
+          break outer;
+        } catch { /* not this one */ }
+      }
+    }
+  } catch { /* no preview */ }
+  thumbCache.set(c.versionId, url);
+  if (thumbCache.size > 500) { // evict the oldest
+    const [k, old] = thumbCache.entries().next().value;
+    thumbCache.delete(k);
+    if (old) URL.revokeObjectURL(old);
+  }
+  return url;
 }
 
 // ---- saving decrypted files --------------------------------------------------------------------------------
@@ -1238,7 +1401,7 @@ async function settingsView() {
         if (np) { try { await changePassphrase(np); } catch (e) { toast(e.message); } }
       } }, 'Change passphrase'),
       h('button', { onclick: exportKeys }, 'Download key backup'),
-      h('button', { onclick: () => { S.acct = null; S.contacts = null; S.keys.clear(); S.spaces.clear(); route(); } }, 'Lock now')),
+      h('button', { onclick: () => { S.acct = null; S.contacts = null; S.keys.clear(); S.spaces.clear(); clearThumbs(); route(); } }, 'Lock now')),
     h('p', { class: 'note' }, 'The key backup is encrypted: it opens only with your passphrase or recovery code. With it, any backed-up file (.fdenc) or WebDAV mirror can be decrypted offline using the frontdir-cli tool.'),
     h('h2', {}, 'Verified people'),
     h('p', { class: 'note' }, 'People whose key fingerprints you compared with them directly. FrontDir marks them ✔ wherever they appear and warns you about other accounts that imitate them. This list is encrypted with your own key: the server cannot read or change it.'),

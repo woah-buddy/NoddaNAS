@@ -18,7 +18,9 @@ import (
 // returns the constant "/dl/sw.js" and throws for anything else: it is what
 // registering the download worker requires. It cannot produce HTML, script
 // or any other URL.
-const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self'; " +
+// media-src allows blob: so that a video the user is uploading can be
+// loaded (from their own disk, in memory) to capture a thumbnail frame.
+const uiCSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; " +
 	"connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; manifest-src 'self'; " +
 	"require-trusted-types-for 'script'; trusted-types frontdir-sw"
 

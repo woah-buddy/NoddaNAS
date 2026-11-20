@@ -42,6 +42,7 @@ in the browser.
 | Clients | Web app (no build step, no npm dependencies) and `frontdir-cli` (Go) |
 | Mount as a drive | `frontdir-cli mount`: your files, decrypted on your computer only, in Finder or File Explorer |
 | Large downloads | Files of any size stream to disk in the browser, decrypted and verified chunk by chunk |
+| Thumbnails | Previews of images and videos, made on your device, encrypted like everything else, and shown only if made by the file's author or by you |
 | Theming | Light, dark, high-contrast and system modes with accent colors per user; operator name, logo, palette and accents, all validated for safety and contrast ([THEMING.md](docs/THEMING.md)) |
 
 Not included (yet): calendar/contacts, document editing, the Nextcloud sync protocol, a plaintext
