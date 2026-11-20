@@ -44,6 +44,11 @@ type Config struct {
 	MaxPageSize      int
 	AdminGroups      []string // IdP groups whose members are administrators
 	TeamCreation     bool     // whether any user may create team folders
+	// Local accounts (password and one-time code). LocalAdmins: whether
+	// they can be administrators (always, when there is no identity
+	// provider to administer through).
+	LocalAccounts bool
+	LocalAdmins   bool
 }
 
 // DefaultConfig returns safe defaults.

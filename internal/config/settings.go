@@ -58,6 +58,7 @@ var Groups = []struct{ ID, Label string }{
 	{"sessions", "Sessions"},
 	{"oidc", "OpenID Connect sign-in"},
 	{"saml", "SAML sign-in"},
+	{"local", "Local accounts"},
 	{"branding", "Branding"},
 }
 
@@ -122,6 +123,11 @@ var Registry = []Setting{
 		Label: "Name attributes", Help: "Empty: common names (displayName, cn, ...)."},
 	{Key: "SAML_GROUP_ATTRIBUTES", Env: "FRONTDIR_SAML_GROUP_ATTRIBUTES", Group: "saml", Kind: "list", Max: 2048,
 		Label: "Group attributes", Help: "Empty: common names (groups, memberOf, ...)."},
+
+	{Key: "LOCAL_ACCOUNTS", Env: "FRONTDIR_LOCAL_ACCOUNTS", Group: "local", Kind: "bool", Default: "false", Max: 8,
+		Label: "Allow local accounts", Help: "Accounts that sign in with an email, a password and a one-time code from an authenticator app, both always required. Administrators create them and pass on an invite link. For people without an account at your identity provider, or a server without one. Needs FRONTDIR_SETTINGS_KEY."},
+	{Key: "LOCAL_ADMINS", Env: "FRONTDIR_LOCAL_ADMINS", Group: "local", Kind: "bool", Default: "false", Max: 8,
+		Label: "Local accounts can be administrators", Help: "Always the case when no identity provider is configured. With one, administrators normally come from it."},
 
 	{Key: "BRAND_NAME", Env: "FRONTDIR_BRAND_NAME", Group: "branding", Kind: "text", Default: "FrontDir", Max: 256,
 		Label: "Name", Help: "Shown in the header and the browser tab."},
@@ -275,7 +281,7 @@ type Runtime struct {
 }
 
 // SignIn reports whether at least one sign-in method is configured.
-func (r *Runtime) SignIn() bool { return r.OIDC != nil || r.SAML != nil }
+func (r *Runtime) SignIn() bool { return r.OIDC != nil || r.SAML != nil || r.Service.LocalAccounts }
 
 // Build validates v and derives the runtime configuration. Every problem is
 // reported (as a FieldError), not just the first. It does no network I/O.
@@ -318,10 +324,14 @@ func Build(v Values, fixed *Config) (*Runtime, error) {
 	if sc.LinkDefaultTTL > sc.LinkMaxTTL {
 		b.fail("LINK_DEFAULT_TTL", "must not be longer than the longest link lifetime (%s)", fmtDuration(sc.LinkMaxTTL))
 	}
-	rt.Service = sc
-
 	rt.OIDC = b.oidc(rt.Policy, fixed)
 	rt.SAML = b.saml(rt.Policy, fixed)
+	sc.LocalAccounts = b.boolean("LOCAL_ACCOUNTS", false)
+	sc.LocalAdmins = b.boolean("LOCAL_ADMINS", false) || (rt.OIDC == nil && rt.SAML == nil)
+	if sc.LocalAccounts && (fixed == nil || fixed.SettingsKey == nil) {
+		b.fail("LOCAL_ACCOUNTS", "needs FRONTDIR_SETTINGS_KEY: the one-time-code secrets are encrypted with it")
+	}
+	rt.Service = sc
 	rt.Theme = b.theme()
 	if len(b.errs) > 0 {
 		return nil, errors.Join(b.errs...)

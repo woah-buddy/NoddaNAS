@@ -65,7 +65,38 @@ func (m *Manager) setupHash(ctx context.Context, token string) (string, error) {
 
 // setupGroups are the settings the setup link may change.
 func setupGroups(s config.Setting) bool {
-	return s.Group == "oidc" || s.Group == "saml" || s.Group == "access"
+	return s.Group == "oidc" || s.Group == "saml" || s.Group == "local" || s.Group == "access"
+}
+
+// SetupLocal finishes setup with a local administrator instead of an
+// identity provider: it turns local accounts on (unless the environment
+// already does, or forbids it), creates the account as an administrator,
+// and uses up the setup link. The caller issues the account's invite.
+func (m *Manager) SetupLocal(ctx context.Context, token, email, name string) (*domain.User, error) {
+	hash, err := m.setupHash(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	if !m.rt.Load().Service.LocalAccounts {
+		if err := m.updateLocked(ctx, &actor{id: "setup-link"}, UpdateRequest{Revision: m.rev, Set: map[string]string{"LOCAL_ACCOUNTS": "true"}}, setupGroups); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+	}
+	m.mu.Unlock()
+	u, err := m.svc.CreateLocalUser(ctx, "setup-link", email, name, true)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := m.ClaimSetup(ctx, hash, u.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errBadSetupToken
+	}
+	return m.svc.UserByID(ctx, u.ID)
 }
 
 // SetupView returns the sign-in settings for the setup page.

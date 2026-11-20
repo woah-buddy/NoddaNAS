@@ -68,7 +68,7 @@ type adminUserView struct {
 	ID           string    `json:"id"`
 	DisplayName  string    `json:"displayName"`
 	Email        string    `json:"email,omitempty"`
-	SignIn       string    `json:"signIn"` // "oidc" or "saml"
+	SignIn       string    `json:"signIn"` // "oidc", "saml" or "local"
 	Admin        bool      `json:"admin"`
 	AdminGranted bool      `json:"adminGranted"`
 	KeysSetUp    bool      `json:"keysSetUp"`
@@ -86,8 +86,11 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request, p 
 	out := make([]adminUserView, len(users))
 	for i, u := range users {
 		method := "oidc"
-		if len(u.Issuer) > 5 && u.Issuer[:5] == "saml:" {
+		switch {
+		case len(u.Issuer) > 5 && u.Issuer[:5] == "saml:":
 			method = "saml"
+		case u.Issuer == domain.IssuerLocal:
+			method = "local"
 		}
 		out[i] = adminUserView{ID: u.ID, DisplayName: u.DisplayName, Email: u.Email, SignIn: method, Admin: u.Admin,
 			AdminGranted: u.AdminGranted, KeysSetUp: u.KeysSetUp, QuotaBytes: u.QuotaBytes, UsedBytes: u.UsedBytes, CreatedAt: u.CreatedAt}

@@ -121,6 +121,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
 	// "Confirm it's you": sign in again at the IdP before administrative changes.
 	mux.HandleFunc("GET /auth/reauth", s.rateLimited(s.loginLimit, s.sessionOnly(s.handleReauth)))
+	// Local accounts: email and password, then a one-time code; invites and
+	// resets set both. Same budget as other sign-ins, plus per-account lockout.
+	mux.HandleFunc("POST /api/v1/auth/local/login", s.rateLimited(s.loginLimit, s.handleLocalLogin))
+	mux.HandleFunc("POST /api/v1/auth/local/code", s.rateLimited(s.loginLimit, s.handleLocalCode))
+	mux.HandleFunc("POST /api/v1/auth/local/invite", s.rateLimited(s.loginLimit, s.handleLocalInvite))
+	mux.HandleFunc("POST /api/v1/auth/local/enroll", s.rateLimited(s.loginLimit, s.handleLocalEnroll))
+	mux.HandleFunc("POST /api/v1/auth/local/enroll/finish", s.rateLimited(s.loginLimit, s.handleLocalEnrollFinish))
+	mux.HandleFunc("POST /api/v1/auth/local/reauth", s.rateLimited(s.loginLimit, s.sessionOnly(s.handleLocalReauth)))
 
 	// First-time setup with the one-time link from `frontdir setup-link`.
 	// The token is 256 random bits, so the public budget is plenty against
@@ -128,6 +136,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/setup/view", s.public(s.handleSetupView))
 	mux.HandleFunc("POST /api/v1/setup/save", s.public(s.handleSetupSave))
 	mux.HandleFunc("POST /api/v1/setup/login", s.public(s.handleSetupLogin))
+	mux.HandleFunc("POST /api/v1/setup/local", s.public(s.handleSetupLocal))
 
 	// Account, E2EE keys and the public-key directory.
 	mux.HandleFunc("GET /api/v1/me", s.authed(s.handleMe))
@@ -170,6 +179,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/admin/users/{id}/admin", s.sessionOnly(s.handleAdminSetAdmin))
 	mux.HandleFunc("PUT /api/v1/admin/users/{id}/quota", s.sessionOnly(s.handleAdminSetUserQuota))
 	mux.HandleFunc("POST /api/v1/admin/users/{id}/revoke-access", s.sessionOnly(s.handleAdminRevokeAccess))
+	mux.HandleFunc("POST /api/v1/admin/local-accounts", s.sessionOnly(s.handleAdminCreateLocal))
+	mux.HandleFunc("POST /api/v1/admin/users/{id}/local-reset", s.sessionOnly(s.handleAdminLocalReset))
 	mux.HandleFunc("POST /api/v1/admin/sessions/revoke-all", s.sessionOnly(s.handleAdminEndAllSessions))
 
 	// Files and folders (names, keys and content are client-encrypted).

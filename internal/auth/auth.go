@@ -1,9 +1,11 @@
 // Package auth authenticates callers and turns them into service.Principals.
 //
-// FrontDir deliberately does not store user passwords or implement MFA. It
-// delegates sign-in to an external OpenID Connect provider (Keycloak,
-// Authentik, Zitadel, Pocket ID, Entra ID, Google, ...), which already does
-// those things well. Two credential types exist on the FrontDir side:
+// Sign-in is preferably delegated to an external identity provider (OpenID
+// Connect: Keycloak, Authentik, Zitadel, Pocket ID, Entra ID, Google, ...;
+// or SAML), which already does it well. For people without an account
+// there, or servers without one, optional local accounts (local.go) sign
+// in with a password and a one-time code from an authenticator app, both
+// always required. Two credential types exist on the FrontDir side:
 //
 //   - Browser sessions (backend-for-frontend pattern): the server completes
 //     the OIDC code flow itself (PKCE + state + nonce) and gives the browser
@@ -128,11 +130,12 @@ const (
 // Its configuration (session lifetimes, sign-in methods) can be replaced
 // while the server runs; each request works with one consistent snapshot.
 type Manager struct {
-	store Store
-	svc   *service.Service
-	log   *slog.Logger
-	now   func() time.Time
-	state atomic.Pointer[authState]
+	store  Store
+	svc    *service.Service
+	log    *slog.Logger
+	clock  atomic.Pointer[func() time.Time]
+	state  atomic.Pointer[authState]
+	sealer atomic.Pointer[secure.Sealer] // encrypts local accounts' TOTP secrets
 }
 
 type authState struct {
@@ -144,12 +147,23 @@ type authState struct {
 // NewManager wires a Manager. Either sign-in method may be nil; with
 // neither, the server is in setup mode.
 func NewManager(store Store, svc *service.Service, cfg Config, oidc *OIDC, saml *SAML) *Manager {
-	m := &Manager{store: store, svc: svc, log: slog.Default(), now: func() time.Time { return time.Now().UTC() }}
+	m := &Manager{store: store, svc: svc, log: slog.Default()}
 	m.state.Store(&authState{cfg: cfg, oidc: oidc, saml: saml})
 	return m
 }
 
 func (m *Manager) st() *authState { return m.state.Load() }
+
+// SetClock replaces the manager's clock. Tests use it to hold time still
+// across one-time-code steps.
+func (m *Manager) SetClock(now func() time.Time) { m.clock.Store(&now) }
+
+func (m *Manager) now() time.Time {
+	if c := m.clock.Load(); c != nil {
+		return (*c)()
+	}
+	return time.Now().UTC()
+}
 
 // Reconfigure replaces session lifetimes and sign-in methods. A method
 // whose configuration did not change keeps its client (and the IdP
@@ -337,11 +351,16 @@ func (m *Manager) EndAllSessions(ctx context.Context, userID string) error {
 }
 
 // RevokeUserCredentials ends every session and deletes every app password
-// of a user (operator offboarding). It does not stop new sign-ins: that is
-// the identity provider's decision, so remove the user there first.
+// of a user (operator offboarding). For a local account it also removes
+// the password and authenticator, so it cannot sign in again until reset;
+// for an identity-provider account, new sign-ins are the provider's
+// decision, so remove the user there first.
 func (m *Manager) RevokeUserCredentials(ctx context.Context, userID string) (appPasswords int64, err error) {
 	if userID == "" {
 		return 0, domain.E(domain.CodeInvalid, "user required")
+	}
+	if err := m.DisableLocal(ctx, userID); err != nil {
+		return 0, err
 	}
 	if err := m.store.DeleteUserSessions(ctx, userID); err != nil {
 		return 0, err

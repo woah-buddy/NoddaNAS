@@ -35,6 +35,7 @@ import (
 	"github.com/woah-buddy/FrontDir/internal/client"
 	"github.com/woah-buddy/FrontDir/internal/e2ee"
 	"github.com/woah-buddy/FrontDir/internal/httpapi"
+	"github.com/woah-buddy/FrontDir/internal/secure"
 	"github.com/woah-buddy/FrontDir/internal/service"
 	"github.com/woah-buddy/FrontDir/internal/store/postgres"
 	"github.com/woah-buddy/FrontDir/internal/testutil"
@@ -186,6 +187,9 @@ type harnessOpts struct {
 	dataDir string
 	oidc    *fakeOIDC
 	logs    io.Writer // the server's JSON log stream
+	// Local accounts on (with a test key for their TOTP secrets), and
+	// whether they may be administrators.
+	local, localAdmins bool
 }
 
 func newHarness(t *testing.T) *harness { return newHarnessWith(t, harnessOpts{}) }
@@ -212,6 +216,7 @@ func newHarnessWith(t *testing.T, o harnessOpts) *harness {
 	log := slog.New(slog.NewJSONHandler(o.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	cfg := service.DefaultConfig()
 	cfg.AdminGroups = []string{"nas-admins"}
+	cfg.LocalAccounts, cfg.LocalAdmins = o.local, o.localAdmins
 	svc := service.New(store, blobs, cfg, log)
 	h := &harness{t: t, svc: svc, oidc: o.oidc, saml: newSAMLIdP(t)}
 	var handler http.Handler
@@ -226,6 +231,13 @@ func newHarnessWith(t *testing.T, o harnessOpts) *harness {
 	samlSP := auth.NewSAML(auth.SAMLConfig{MetadataURL: h.base + "/auth/saml/metadata", ACSURL: h.base + "/auth/saml/acs",
 		IDPMetadata: idpMD, TrustEmail: true, Policy: policy, AllowLoopback: true})
 	am := auth.NewManager(store, svc, auth.Config{SessionIdle: time.Hour, SessionAbsolute: 24 * time.Hour}, oidc, samlSP)
+	if o.local {
+		sealer, err := secure.NewSealer(make([]byte, 32), "test/totp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		am.SetLocalSealer(sealer)
+	}
 	h.am = am
 	handler = httpapi.New(svc, am, httpapi.Config{PublicURL: pub, EnableWebDAV: true,
 		RateLimits: httpapi.RateLimits{Login: 6000, Public: 6000, AuthFailures: 6000}}, log, web.Static(), store, blobs).Handler()

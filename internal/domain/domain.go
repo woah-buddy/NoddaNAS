@@ -87,6 +87,10 @@ type Version struct {
 	RecordHash []byte
 }
 
+// IssuerLocal marks local accounts (password and one-time code), as
+// opposed to accounts from an identity provider.
+const IssuerLocal = "local"
+
 // User is a FrontDir account, provisioned just-in-time on first sign-in.
 type User struct {
 	ID              string // internal random ID; never the IdP subject

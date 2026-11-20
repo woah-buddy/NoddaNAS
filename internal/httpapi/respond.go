@@ -305,4 +305,5 @@ type userView struct {
 	DisplayName string    `json:"displayName"`
 	Admin       bool      `json:"admin,omitempty"`
 	Keys        *keysView `json:"keys,omitempty"`
+	Local       bool      `json:"local,omitempty"` // a local account (password and one-time code)
 }
