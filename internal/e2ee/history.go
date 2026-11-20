@@ -25,7 +25,9 @@ import (
 // container's prefix, which identifies one container (it holds a fresh
 // salt, and the author's signature ties it to the body); kind is "save"
 // (the signer encrypted it) or "restore" (the signer stored an existing
-// container again); at is the signer's clock, in Unix milliseconds.
+// container again) or "drop" (the signer filed a file dropped into a
+// mailbox, §6a, always a new file); at is the signer's clock, in Unix
+// milliseconds.
 //
 // With the chain, the server can no longer reorder versions, slip one in,
 // drop one from the middle, or relabel who stored one or when. It can
@@ -38,6 +40,9 @@ import (
 const (
 	KindSave    = "save"
 	KindRestore = "restore"
+	// KindDrop: the signer filed a file dropped into a mailbox (§6a). They
+	// signed its container, but an anonymous sender wrote its contents.
+	KindDrop = "drop"
 )
 
 // MaxRecordLen bounds a record's encoded size.
@@ -132,7 +137,7 @@ func (r *VersionRecord) validate(n int) error {
 	b32 := func(s string) bool { b, err := UnB64(s); return err == nil && len(b) == 32 && B64(b) == s }
 	ok := n <= MaxRecordLen && r.V == 1 && isID(r.Node) && isID(r.By) && isHex40(r.FP) &&
 		r.Seq >= 1 && r.Seq <= maxSafeInt && r.At > 0 && r.At <= maxSafeInt && b32(r.Container) &&
-		(r.Kind == KindSave || r.Kind == KindRestore) &&
+		(r.Kind == KindSave || r.Kind == KindRestore || (r.Kind == KindDrop && r.Seq == 1)) &&
 		((r.Seq == 1 && r.Prev == "") || (r.Seq > 1 && b32(r.Prev)))
 	if !ok {
 		return historyErr("malformed version record")
@@ -216,7 +221,7 @@ func VerifyHistory(nodeID string, entries []HistoryEntry, signerFor func(userID 
 		case e.Prefix == nil || subtle.ConstantTimeCompare([]byte(r.Container), []byte(B64(e.Prefix.Hash()))) != 1:
 			fail(historyErr("a version record is about a different container"))
 			continue
-		case r.Kind == KindSave && (e.Prefix.Signer.User != r.By || e.Prefix.Signer.FP != r.FP):
+		case (r.Kind == KindSave || r.Kind == KindDrop) && (e.Prefix.Signer.User != r.By || e.Prefix.Signer.FP != r.FP):
 			fail(historyErr("a version is recorded as saved by someone other than its author"))
 			continue
 		}

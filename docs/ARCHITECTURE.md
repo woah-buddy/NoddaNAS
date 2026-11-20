@@ -172,6 +172,9 @@ Trash expiry, permanent deletion and team-folder deletion run in each replica, c
 with `FOR UPDATE SKIP LOCKED` plus a lease. Purges delete blobs before rows, so an interrupted
 purge is simply resumed; quota is refunded exactly once per version.
 
+The worker also deletes the unfiled drops of file mailboxes that closed or expired more than the
+trash retention ago (blobs first, then rows, refunding the space), and then the mailboxes.
+
 The worker also computes version digests (E2EE.md §5b) for versions stored before uploads
 recorded them, a few per run, reading the stored ciphertext; no keys are involved. Replicas may
 occasionally digest the same version; the result is identical and only the first write is kept.

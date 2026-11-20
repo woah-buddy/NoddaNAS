@@ -709,7 +709,8 @@ export const forkedError = () => Object.assign(new E2EEError('This file’s hist
 function recordShapeOK(r) {
   return r.v === 1 && isId(r.node) && isId(r.by) && typeof r.fp === 'string' && /^[0-9a-f]{40}$/.test(r.fp) &&
     Number.isSafeInteger(r.seq) && r.seq >= 1 && Number.isSafeInteger(r.at) && r.at > 0 && isB32(r.container) &&
-    (r.kind === 'save' || r.kind === 'restore') && ((r.seq === 1 && r.prev === '') || (r.seq > 1 && isB32(r.prev)));
+    (r.kind === 'save' || r.kind === 'restore' || (r.kind === 'drop' && r.seq === 1)) &&
+    ((r.seq === 1 && r.prev === '') || (r.seq > 1 && isB32(r.prev)));
 }
 
 // containerId identifies a container in records: SHA-256 of its prefix.
@@ -756,7 +757,7 @@ export async function verifyHistory(nodeId, entries, signerFor) {
     const header = parsePrefix(e.prefix);
     if (r.rec.node !== nodeId) { fail(historyError('a version record belongs to another file')); continue; }
     if (r.rec.container !== (await containerId(e.prefix))) { fail(historyError('a version record is about a different container')); continue; }
-    if (r.rec.kind === 'save' && (header.signer.user !== r.rec.by || header.signer.fp !== r.rec.fp)) {
+    if ((r.rec.kind === 'save' || r.rec.kind === 'drop') && (header.signer.user !== r.rec.by || header.signer.fp !== r.rec.fp)) {
       fail(historyError('a version is recorded as saved by someone other than its author')); continue;
     }
     try {
@@ -793,4 +794,120 @@ export function checkFreshHead(seen, head) {
   if (head.rec.seq === seen.seq) { if (b64u(head.hash) !== seen.hash) throw forkedError(); return true; }
   if (head.rec.seq === seen.seq + 1) { if (head.rec.prev !== seen.hash) throw forkedError(); return true; }
   return false;
+}
+
+// ---- file mailboxes (spec §6a) ---------------------------------------------------------------------------
+// A link anyone can drop files into but nobody can read through. The link
+// carries the mailbox's public key in its fragment; every drop is sealed
+// to it. The private key is wrapped under the target folder's key, so
+// whoever can read the folder opens the drops and files them.
+const MAX_INFO = 200, MAX_NOTE = 2000;
+const runes = (s) => [...(s || '')].length;
+
+// newMailbox returns { id, raw, key: { priv, pub } } for a fresh key pair.
+export async function newMailbox(id) {
+  const raw = random(32);
+  return { id, raw, key: await x25519(raw) };
+}
+export async function wrapMailbox(box, folderNk) {
+  return b64u(await gcmSeal(await hkdf(folderNk.raw, null, 'mailbox/key'), box.raw, label('mailbox/key', box.id)));
+}
+export async function openMailbox(id, folderNk, wrapped) {
+  const raw = await gcmOpen(await hkdf(folderNk.raw, null, 'mailbox/key'), unb64u(wrapped), label('mailbox/key', id));
+  if (raw.length !== 32) throw authFail();
+  return { id, raw, key: await x25519(raw) };
+}
+export async function sealMailboxInfo(id, pub, { title, owner }) {
+  if (!title || runes(title) > MAX_INFO || runes(owner) > MAX_INFO) throw new E2EEError('the title must be 1-200 characters');
+  return b64u(await gcmSeal(await hkdf(pub, null, 'mailbox/info'), utf8(JSON.stringify({ title, owner })), label('mailbox/info', id)));
+}
+export async function openMailboxInfo(id, pub, enc) {
+  const info = JSON.parse(td.decode(await gcmOpen(await hkdf(pub, null, 'mailbox/info'), unb64u(enc), label('mailbox/info', id))));
+  if (typeof info.title !== 'string' || typeof info.owner !== 'string') throw authFail();
+  return info;
+}
+
+function cleanNote(note) {
+  if (!note) return null;
+  const out = {};
+  for (const k of ['name', 'email', 'message']) if (note[k]) out[k] = String(note[k]);
+  if (!Object.keys(out).length) return null;
+  if (runes(out.name) > MAX_INFO || runes(out.email) > MAX_INFO || runes(out.message) > MAX_NOTE) throw new E2EEError('the note is too long');
+  return out;
+}
+
+// encryptDrop encrypts a file for a mailbox. Returns { header, body } where
+// body is the container body (a Blob) and header describes it.
+export async function encryptDrop(blob, { mailboxId, dropId, pub, meta, note }, onProgress) {
+  const size = blob.size, n = chunkCount(size), salt = random(32);
+  const nk = await NodeKey.fresh();
+  const fk = await fileKeys(nk, salt);
+  const header = {
+    v: 1, id: dropId, size, salt: b64u(salt), commit: b64u(fk.commit),
+    key: b64u(await seal(pub, nk.raw, label('mailbox/drop', mailboxId, dropId))),
+    meta: b64u(await gcmSeal(fk.meta, utf8(JSON.stringify(meta)), label('file/meta'))),
+  };
+  const cn = cleanNote(note);
+  if (cn) header.note = b64u(await gcmSeal(await hkdf(nk.raw, salt, 'drop/note'), utf8(JSON.stringify(cn)), label('drop/note', dropId)));
+  const key = await aesKey(fk.content, 'encrypt');
+  const parts = [];
+  for (let i = 0; i < n; i++) {
+    const pt = new Uint8Array(await blob.slice(i * CHUNK, Math.min(size, (i + 1) * CHUNK)).arrayBuffer());
+    parts.push(new Uint8Array(await subtle.encrypt({ name: 'AES-GCM', iv: chunkNonce(i, i === n - 1) }, key, pt)));
+    if (onProgress) onProgress((i + 1) / n);
+  }
+  return { header, body: new Blob(parts, { type: 'application/octet-stream' }) };
+}
+
+// openDrop unseals a drop with its mailbox and checks the key commitment.
+export async function openDrop(box, h) {
+  const nk = await NodeKey.from(await unseal(box.key, unb64u(h.key), label('mailbox/drop', box.id, h.id)));
+  const salt = unb64u(h.salt);
+  const fk = await fileKeys(nk, salt);
+  if (!ctEqual(fk.commit, unb64u(h.commit))) throw authFail();
+  const meta = JSON.parse(td.decode(await gcmOpen(fk.meta, unb64u(h.meta), label('file/meta'))));
+  delete meta.from; // only filing sets it, from the note
+  let note = null;
+  if (h.note) note = cleanNote(JSON.parse(td.decode(await gcmOpen(await hkdf(nk.raw, salt, 'drop/note'), unb64u(h.note), label('drop/note', h.id)))));
+  return { header: h, nk, salt, fk, meta, note };
+}
+
+// decryptDropBody decrypts a drop's body for review. Every chunk is
+// authenticated by AES-GCM; drops carry no signature (the sender is anonymous).
+export async function decryptDropBody(d, blob) {
+  const size = d.header.size, n = chunkCount(size);
+  if (blob.size !== size + TAG * n) throw new E2EEError('the drop is truncated or has trailing data');
+  const key = await aesKey(d.fk.content, 'decrypt');
+  const parts = [];
+  let off = 0;
+  for (let i = 0; i < n; i++) {
+    const len = Math.min(CHUNK, size - i * CHUNK) + TAG;
+    const ct = new Uint8Array(await blob.slice(off, off + len).arrayBuffer());
+    off += len;
+    try { parts.push(new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: chunkNonce(i, i === n - 1) }, key, ct))); } catch { throw authFail(); }
+  }
+  return new Blob(parts, { type: 'application/octet-stream' });
+}
+
+// fileDropPrefix builds the container prefix for filing a drop into a
+// space, signed (with fileDropTrailer) by the filer: same salt, commitment
+// and body; NK sealed to the space; the sender's note kept as meta.from.
+export async function fileDropPrefix(d, { spaceId, spacePub, signer }) {
+  const meta = { ...d.meta };
+  if (d.note) meta.from = d.note;
+  const header = {
+    v: 1, alg: ALG, size: d.header.size, salt: d.header.salt, commit: d.header.commit,
+    owner: { space: spaceId, key: b64u(await seal(spacePub, d.nk.raw, label('file-owner', spaceId))) },
+    meta: b64u(await gcmSeal(d.fk.meta, utf8(JSON.stringify(meta)), label('file/meta'))),
+    signer: { user: signer.userId, fp: await signer.fingerprint() },
+  };
+  const hdr = utf8(JSON.stringify(header));
+  const prefix = new Uint8Array(12 + hdr.length);
+  prefix.set(utf8(MAGIC));
+  new DataView(prefix.buffer).setUint32(8, hdr.length);
+  prefix.set(hdr, 12);
+  return prefix;
+}
+export async function fileDropTrailer(signer, prefix, bodyHash) {
+  return concat(utf8('SIG1'), await sign(signer.sig.priv, concat(label('container'), NUL, await sha256(prefix), bodyHash)));
 }

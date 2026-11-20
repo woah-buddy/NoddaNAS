@@ -114,12 +114,31 @@ type Store interface {
 
 	// CommitContent atomically charges v.Size to the space quota (ErrQuota),
 	// creates (isNew) or updates the node, and records the version.
-	CommitContent(ctx context.Context, n *domain.Node, v *domain.Version, isNew bool, expectedRev int64) error
+	CommitContent(ctx context.Context, n *domain.Node, v *domain.Version, isNew bool, expectedRev int64, dropID string) error
 	ListVersions(ctx context.Context, nodeID string) ([]*domain.Version, error)
 	// Attribution digests (docs/E2EE.md §5b) for versions stored before
 	// they were recorded at upload.
 	VersionsWithoutDigest(ctx context.Context, limit int) ([]*domain.Version, error)
 	SetVersionDigest(ctx context.Context, v *domain.Version) error
+	// File mailboxes (mailboxes.go).
+	CreateMailbox(ctx context.Context, m *domain.Mailbox) error
+	GetMailbox(ctx context.Context, id string) (*domain.Mailbox, error)
+	GetMailboxByTokenHash(ctx context.Context, hash string) (*domain.Mailbox, error)
+	ListMailboxesByNode(ctx context.Context, nodeID string) ([]*domain.Mailbox, error)
+	ListMailboxesByCreator(ctx context.Context, userID string, limit int) ([]*domain.Mailbox, error)
+	CloseMailbox(ctx context.Context, id string, now time.Time) error
+	CloseMailboxesByCreator(ctx context.Context, userID string, now time.Time) (int64, error)
+	CloseAllMailboxes(ctx context.Context, now time.Time) (int64, error)
+	RecordMailboxFailure(ctx context.Context, id string, threshold int64, until time.Time) error
+	ResetMailboxFailures(ctx context.Context, id string) error
+	CreateDrop(ctx context.Context, d *domain.Drop, now time.Time) error
+	ListDrops(ctx context.Context, mailboxID string, limit int) ([]*domain.Drop, error)
+	GetDrop(ctx context.Context, mailboxID, dropID string) (*domain.Drop, error)
+	DeleteDrop(ctx context.Context, d *domain.Drop) error
+	FinishedMailboxes(ctx context.Context, before time.Time, limit int) ([]*domain.Mailbox, error)
+	DeleteMailbox(ctx context.Context, id string) error
+	SubtreeDrops(ctx context.Context, rootID string, limit int) ([]*domain.Drop, error)
+	SpaceDrops(ctx context.Context, spaceID string, limit int) ([]*domain.Drop, error)
 	// Thumbnails (thumbs.go).
 	PutThumbnail(ctx context.Context, t *domain.Thumbnail) error
 	GetThumbnails(ctx context.Context, versionID string, makers []string) ([]*domain.Thumbnail, error)

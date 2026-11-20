@@ -59,6 +59,7 @@ server is still responsible for (access control, integrity of structure, availab
 | Server attributes a version to someone who did not write it (to make a planted or altered version look like a colleague's, or to show a collaborator's thumbnail as the author's) | Every version's author is verified from its header without downloading it: the author's signature over the header and the body hash must check out, after the key commitment ties the header to the node (E2EE §5b); a header carries a fresh salt, so no other body hash verifies with it; altered digests or swapped headers show "cannot verify" and that version cannot be restored from the web app | `TestDigest`, `TestVersionAuthors` (tampered hash, trailer and swapped header), interop `version-author-from-go`, browser test |
 | Server rewrites a file's version history: reorders, inserts, drops or relabels versions (who stored one, when, restore versus save) | Every version carries a record signed by whoever stored it, chained to the previous one (E2EE §5c); the server keeps the chain linear (one version per position) and clients verify it, refusing to save or restore on top of a history that fails | `TestVersionHistory`, `TestVersionRecords` (server refuses misplaced, foreign or forged records; racing uploads), `TestSignedHistory` (tampered time, order, dropped and moved records), interop `history-from-go` |
 | Server rolls a file back to an older version, or shows people different histories | Each device remembers the newest record it verified per file; downloads, the drive, saves and the Versions dialog report "gone back in time" or "history differs" and refuse until the user accepts; detection, not prevention (residual 14) | `TestFreshness`, `TestSignedHistory` (rollback on download, drive, save, after a restart; fork through a third user), browser test |
+| Server substitutes a file mailbox's key to read what strangers send | The mailbox's public key travels only in the link's fragment, never to the server; the description senders see must decrypt under that key, so a link paired with another mailbox's description is refused before anything is sent (E2EE §6a) | `TestMailboxDropAndFile`, `TestMailbox` (swapped key refused), interop `mailbox-from-go` |
 | Server substitutes a user's keys, or creates a look-alike account ("Аlice", with a Cyrillic А) | Verified contacts sealed under the user's master key (E2EE §8); "key changed" blocks sharing and grants; look-alike names and emails (homoglyphs, invisible characters) are flagged | `TestContacts`, interop `classify-contacts`, browser test: impersonation and key swap flagged |
 | Swapped public keys in a user's own bundle | Private keys must match the published keys on unlock; server refuses to change published keys | `TestBundleTamperingDetected`; `TestProvisioningAndKeys` |
 
@@ -102,6 +103,8 @@ events (identifiers only; never names, tokens or passwords).
 | Decrypted downloads rendered as a page in the app's origin | The download worker's responses are `attachment`, `application/octet-stream`, `nosniff`, `sandbox` CSP and `no-store`; the worker's scope is `/dl/` only, it fetches nothing, and each download id is random, single use and short-lived | `web/static/dl/sw.js`, browser test |
 | Streaming releases plaintext before the signature is checked | Each chunk is AES-GCM-authenticated before release; the last chunk is withheld until the signature verifies, and a failure aborts the download (the browser discards it) or fails the copy from the drive | `TestStreamingVerifier`, interop `container-stream-*`, `TestDecryptingGateway` |
 | The local drive (`frontdir-cli mount`) exposes plaintext to other users of the computer, to web pages, or to the network | Loopback only, with no option otherwise; a random 256-bit token in every path; loopback `Host` required (DNS rebinding) and browser requests (`Origin`, `Sec-Fetch-Site`) refused; inert response headers; upload buffers that spill to disk are encrypted under a key held in memory | `TestDecryptingGateway`, `TestListenIsLoopbackOnly`, `TestSpoolSpillsEncrypted` |
+| A mailbox sender (or anyone holding the link) reads what is in the folder or what others sent | No read path: the mailbox token is accepted only to describe the mailbox (title, limits) and to take a file; it opens no link endpoint; inboxes need write access to the folder. Drops are sealed to the mailbox key, which is wrapped under the folder key | `TestMailbox` (sender view's exact fields, token refused elsewhere, read-only access sees no inbox, no plaintext stored) |
+| Files from strangers carry malware or misleading content | Drops wait in an inbox; whoever files them sees the name and an unverified note; contents are never rendered in the app's origin, drops carry no thumbnails, and filed files say they arrived through a mailbox and who filed them | browser test |
 | Clickjacking / XS-leaks | `frame-ancestors 'none'`, COOP/CORP | middleware |
 | Thumbnails leak content or metadata | Made on the uploader's device and re-encoded (no EXIF or GPS), encrypted under a key derived from the file key and that version's salt; the server sees only that a version has one and its size (documented in E2EE.md, "What the server can still see"); rendered only as `<img>` WebP or JPEG, never SVG | `TestThumbnails`, browser test |
 | Server-side request forgery through IdP URLs entered on the web (reaching cloud metadata or internal services, reading their responses) | All IdP traffic uses one client that refuses link-local, metadata, unspecified, multicast and (except on localhost deployments) loopback addresses, checked before sending and again on the address actually dialled (DNS rebinding); 1 MiB response cap, 20 s timeout, at most three redirects and never https→http; errors describe the failure and never echo the response | `TestIdPClientRefusesInternalAddresses`, `TestIdPChecksNeverEchoTheRemote` |
@@ -109,7 +112,10 @@ events (identifiers only; never names, tokens or passwords).
 
 ### Denial of service
 
-Atomic quotas (counted on stored, encrypted bytes) and maximum file size; streaming uploads with
+Atomic quotas (counted on stored, encrypted bytes) and maximum file size; file mailboxes must
+have an expiry date and size and file caps, checked atomically with the quota, can be closed at
+any time and by the link kill switches, and their unfiled drops are deleted after the trash
+retention period; streaming uploads with
 idle deadlines; bounded JSON and header sizes; folder depth limit; per-IP rate limits on sign-in,
 public and failed-auth paths; bounded KDF parameters when parsing stored bundles and hashes.
 
@@ -174,3 +180,8 @@ public and failed-auth paths; bounded KDF parameters when parsing stored bundles
     rename or a deletion) are not covered. With one untrusted server and no other channel between
     users this is the best available ("fork consistency"). After a legitimate restore from backup,
     users see these warnings for files changed since the backup and accept them.
+15. **Mailbox senders trust the page they are served.** A sender has no account and nothing to
+    check the web app against, so a server that served malicious JavaScript could read files
+    before they are encrypted (residual 2, with no fallback in the browser). `frontdir-cli drop`
+    encrypts locally. Anyone who obtains a mailbox link can send files and read its title until
+    it expires or is closed, and what a sender says about themselves is unverified.

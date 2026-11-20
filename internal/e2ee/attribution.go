@@ -44,6 +44,8 @@ type Digester struct {
 	idx     int64
 	trailer []byte
 	over    bool // more bytes than the header allows
+	// noTrailer: a drop body (§6a), which ends after its last chunk.
+	noTrailer bool
 }
 
 // NewDigester starts a Digester for the container p was parsed from.
@@ -78,7 +80,7 @@ func (d *Digester) Write(b []byte) (int, error) {
 				d.inChunk = 0
 			}
 		default:
-			if len(d.trailer)+len(b) > TrailerSize {
+			if d.noTrailer || len(d.trailer)+len(b) > TrailerSize {
 				d.over = true
 				return n, nil
 			}
@@ -92,7 +94,11 @@ func (d *Digester) Write(b []byte) (int, error) {
 
 // Digest returns the result once the whole container has been written.
 func (d *Digester) Digest() (*Digest, error) {
-	if d.over || d.off != d.p.TotalSize() || d.idx != Chunks(d.p.Size) {
+	end := d.p.TotalSize()
+	if d.noTrailer {
+		end = d.p.BodyOffset() + BodySize(d.p.Size)
+	}
+	if d.over || d.off != end || d.idx != Chunks(d.p.Size) {
 		return nil, ErrMalformed
 	}
 	return &Digest{Header: bytes.Clone(d.p.raw), BodyHash: d.bh.Sum(nil), Trailer: bytes.Clone(d.trailer)}, nil

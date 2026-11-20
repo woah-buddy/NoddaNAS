@@ -317,3 +317,53 @@ type AppPassword struct {
 	LastUsedAt *time.Time
 	ExpiresAt  *time.Time
 }
+
+// Mailbox is a file mailbox (docs/E2EE.md §6a): a link anyone can drop
+// files into, and nobody can read or retrieve anything through.
+type Mailbox struct {
+	ID        string
+	NodeID    string // the folder drops are filed into
+	SpaceID   string
+	CreatedBy string
+	CreatedAt time.Time
+	TokenHash string // the link's access token, hashed
+	BoxKey    string // the mailbox's private key, wrapped under the folder's key
+	Info      string // title and owner, under a key from the mailbox's public key
+	// Server-enforced limits. Every mailbox expires and has a size cap.
+	PasswordHash   string
+	ExpiresAt      time.Time
+	MaxBytes       int64 // total accepted over the mailbox's life
+	MaxFiles       int64
+	AutoFile       bool
+	ClosedAt       *time.Time
+	UsedBytes      int64
+	UsedFiles      int64
+	FailedAttempts int64
+	LockedUntil    *time.Time
+	// Computed when listing: drops not filed or discarded yet.
+	PendingFiles int64
+	PendingBytes int64
+}
+
+// Accepting reports whether the mailbox takes new drops.
+func (m *Mailbox) Accepting(now time.Time) bool { return m.ClosedAt == nil && now.Before(m.ExpiresAt) }
+
+// Locked reports whether password attempts are temporarily refused.
+func (m *Mailbox) Locked(now time.Time) bool {
+	return m.LockedUntil != nil && now.Before(*m.LockedUntil)
+}
+
+// Drop is a file dropped into a mailbox and not yet filed: an encrypted
+// body and a header the server can parse but not read.
+type Drop struct {
+	ID        string // chosen by the sender's client
+	MailboxID string
+	SpaceID   string
+	BlobKey   string
+	Size      int64  // stored (encrypted) bytes, charged to the space
+	PlainSize int64  // from the header
+	Header    []byte // the drop header, as sent
+	BodyHash  []byte // for signing the filed container (§5b)
+	SHA256    string
+	CreatedAt time.Time
+}

@@ -112,8 +112,31 @@ it only in request bodies):
 | `DELETE /api/v1/shares/{id}` | Revoke (owner/manager/creator) or leave (recipient) |
 | `GET /api/v1/shared-with-me` | Shares made with you, with sealed keys |
 | `GET /api/v1/shared-by-me` | Shares you created (`items[].share` with `status`: `active`, `expired`, `exhausted` or `locked`; `items[].node`, or null if you can no longer see the item), plus `truncated`. No key material. |
-| `POST /api/v1/links/revoke-all` | Kill switch: revoke every public link you created → `{"revoked": n}` (not with read-only credentials) |
-| `POST /api/v1/admin/links/revoke-all` | *session*, admin, recent sign-in. Revoke every public link on the server → `{"revoked": n}` |
+| `POST /api/v1/links/revoke-all` | Kill switch: revoke every public link you created and close every file mailbox you opened → `{"revoked": n}` (not with read-only credentials) |
+| `POST /api/v1/admin/links/revoke-all` | *session*, admin, recent sign-in. Revoke every public link and close every file mailbox on the server → `{"revoked": n}` |
+
+## File mailboxes (E2EE.md §6a)
+
+Managed by anyone with write access to the folder. The link is `/m#<token>.<b64u(public key)>`;
+the server never sees the public key.
+
+| Method & path | |
+|---|---|
+| `POST /api/v1/nodes/{id}/mailboxes` | `{"id","boxKey","info","expiresAt","maxBytes","maxFiles"?,"password"?,"autoFile"?}` → `mailbox`, `token` (shown once). `expiresAt` and `maxBytes` are required; `maxBytes` at most the space's quota |
+| `GET /api/v1/nodes/{id}/mailboxes` | The folder's mailboxes, each with `accepting`, usage and `pendingFiles` / `pendingBytes` |
+| `GET /api/v1/mailboxes` | Mailboxes you opened and can still manage |
+| `GET /api/v1/mailboxes/{id}` | `mailbox` and its pending `drops` (`id`, `header`, `size`, `plainSize`, `bodyHash`, `createdAt`) |
+| `POST /api/v1/mailboxes/{id}/close` | Stop accepting drops; pending drops stay |
+| `GET /api/v1/mailboxes/{id}/drops/{did}/content` | A drop's encrypted body, for review |
+| `POST /api/v1/mailboxes/{id}/drops/{did}/file` | `{"id","nameEnc","nameHash","wrappedKey","prefix","trailer","record","recordSig"}`: file the drop into the folder as a new file (the server splices prefix + body + trailer; the record is a `drop` record) |
+| `DELETE /api/v1/mailboxes/{id}/drops/{did}` | Discard a drop |
+
+Senders (anonymous, rate limited as public endpoints; nothing else accepts a mailbox token):
+
+| Method & path | |
+|---|---|
+| `POST /api/v1/public/mailbox` | `{"token","password"?}` → `{"id","info","expiresAt","maxFileSize","remainingBytes","filesLeft"}`. Nothing about drops |
+| `POST /api/v1/public/mailbox/drop` | Body: the drop's encrypted body. Headers `X-FrontDir-Mailbox` (token), `X-FrontDir-Mailbox-Password`, `X-FrontDir-Drop` (the drop header JSON) → `204`. `507` when the mailbox or the owner's storage is full, `410` when closed or expired |
 
 ## Public links (anonymous; token in the body, key never sent)
 

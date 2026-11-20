@@ -231,8 +231,12 @@ func (s *Service) RevokeMyLinks(ctx context.Context, p Principal) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	s.audit(ctx, "share.link.revoke_all", p, "count", n)
-	return n, nil
+	mb, err := s.store.CloseMailboxesByCreator(ctx, p.UserID, s.now()) // mailboxes are links too
+	if err != nil {
+		return n, err
+	}
+	s.audit(ctx, "share.link.revoke_all", p, "count", n, "mailboxes", mb)
+	return n + mb, nil
 }
 
 // AdminRevokeAllLinks is the instance-wide kill switch: it revokes every
@@ -245,8 +249,12 @@ func (s *Service) AdminRevokeAllLinks(ctx context.Context, p Principal) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	s.log.WarnContext(ctx, "audit", "event", "admin.links.revoke_all", "user", p.UserID, "count", n)
-	return n, nil
+	mb, err := s.store.CloseAllMailboxes(ctx, s.now())
+	if err != nil {
+		return n, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "admin.links.revoke_all", "user", p.UserID, "count", n, "mailboxes", mb)
+	return n + mb, nil
 }
 
 // OperatorFindUser resolves a user for operator commands, by ID or by
@@ -281,8 +289,12 @@ func (s *Service) OperatorRevokeLinks(ctx context.Context, userID string) (int64
 	if err != nil {
 		return 0, err
 	}
-	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_user", "actor", "cli", "target", id, "count", n)
-	return n, nil
+	mb, err := s.store.CloseMailboxesByCreator(ctx, id, s.now())
+	if err != nil {
+		return n, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_user", "actor", "cli", "target", id, "count", n, "mailboxes", mb)
+	return n + mb, nil
 }
 
 // OperatorRevokeAllLinks revokes every public link (break-glass, operator CLI).
@@ -291,8 +303,12 @@ func (s *Service) OperatorRevokeAllLinks(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_all", "actor", "cli", "count", n)
-	return n, nil
+	mb, err := s.store.CloseAllMailboxes(ctx, s.now())
+	if err != nil {
+		return n, err
+	}
+	s.log.WarnContext(ctx, "audit", "event", "operator.links.revoke_all", "actor", "cli", "count", n, "mailboxes", mb)
+	return n + mb, nil
 }
 
 // ---- anonymous access via public links ---------------------------------------------

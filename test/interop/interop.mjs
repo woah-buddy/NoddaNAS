@@ -135,6 +135,23 @@ const result = await page.evaluate(async () => {
       await code(() => E.checkFreshHead(E.seenOf(recs[1]), recs[0])) === 'none' &&
       await code(() => E.checkFreshHead({ seq: 1, hash: E.b64u(recs[0].hash) }, recs[0])) === 'forked';
   });
+  let goDrop = null;
+  await check('mailbox-from-go', async () => {
+    const mb = v.mailbox;
+    const box = await E.openMailbox(mb.id, root, mb.wrapped);
+    if (E.b64u(box.key.pub) !== mb.pub) return false;
+    const info = await E.openMailboxInfo(mb.id, E.unb64u(mb.pub), mb.info);
+    const d = await E.openDrop(box, mb.drop);
+    const body = new Blob([E.unb64u(mb.body)]);
+    const plain = await (await E.decryptDropBody(d, body)).text();
+    const rejects = async (f) => { try { await f(); return false; } catch { return true; } };
+    const other = await E.newMailbox(mb.id);
+    goDrop = d;
+    return info.title === 'Receipts \u2713' && d.meta.name === 'drop.txt' && d.note.name === 'Gopher' && plain === mb.plain &&
+      await rejects(() => E.openDrop(other, mb.drop)) &&
+      await rejects(() => E.openMailboxInfo(mb.id, other.key.pub, mb.info)) &&
+      await rejects(() => E.openDrop(box, { ...mb.drop, id: 'e'.repeat(32) }));
+  });
   await check('recovery-code-format', async () => E.formatRecoveryCode(E.parseRecoveryCode(v.recoveryCode)) === v.recoveryCode);
   await check('open-contacts', async () => {
     const c = await E.openContacts(goAcct, v.contacts);
@@ -190,6 +207,17 @@ const result = await page.evaluate(async () => {
         container: await E.containerId((await E.parseContainer(container)).prefix),
         kind: 'save', at: 1700000002000 });
       return { raw: E.b64u(r.raw), sig: E.b64u(r.sig) };
+    })(),
+    filed: await (async () => {
+      if (!goDrop) return '';
+      const prefix = await E.fileDropPrefix(goDrop, { spaceId: v.jsSpaceId, spacePub: jsSpace.publicKey, signer: account });
+      const trailer = await E.fileDropTrailer(account, prefix, E.unb64u(v.mailbox.bodyHash));
+      return E.b64u(E.concat(prefix, E.unb64u(v.mailbox.body), trailer));
+    })(),
+    drop: await (async () => {
+      const r = await E.encryptDrop(new Blob(['dropped from the browser \u2713']), { mailboxId: v.mailbox.id, dropId: 'c'.repeat(32),
+        pub: E.unb64u(v.mailbox.pub), meta: { name: 'from-browser.txt', type: 'text/plain', mtime: 4 }, note: { email: 'b@example.test' } });
+      return { header: r.header, body: E.b64u(new Uint8Array(await r.body.arrayBuffer())) };
     })(),
     contacts: await E.sealContacts(account, { v: 1, contacts: { ['d'.repeat(32)]: { fp: 'e'.repeat(40), name: 'From the browser \u2713', verifiedAt: 2 } } }),
   };
